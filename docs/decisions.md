@@ -701,12 +701,22 @@ bug: these are synthetic, purpose-built stress images (`flat128` is a flat fill;
 is white noise; `impulse` is a single non-zero pixel), several of which never cross their
 own RMS-vs-`T_RMS` split threshold anywhere in `[2, 4, 8, 16, 32]` — the partition and
 therefore the whole encode is identical at every rate, by construction, independent of
-which search method drove it. `checker8` and `step_edge` have no Fisher row in
-`results/baseline-mars1.jsonl` at all under `(corpus=fixtures, variant=default,
-decode_mode=iterative)`; not investigated further since the RD-curve check does not need
-them once the degenerate-curve exclusion is in place, and Step 3/5's transform-count and
-decode-agreement checks already exercise both images independently. Only `mandelbrot`
-produced two genuinely comparable curves, giving BD-PSNR = +1.1577 dB.
+which search method drove it. `checker8` and `step_edge` are a stronger version of the
+same story: the *rows* are present (60 each, all six methods, both decode modes — checked
+directly in `results/baseline-mars1.jsonl`), but Fisher's iterative decode is **lossless**
+at every one of the five `t_rms` values — `quality.psnr_y` is `null` (§M2's convention for
+infinite PSNR) on all five. Fisher's classified candidate set happens to contain an exact
+affine match for these two simple patterns, so `mars1_report::point` drops every one of
+their points and `per_image_curves` never creates an entry at all — "no baseline curve
+found" is the correct, expected consequence of a perfect match, not a missing
+measurement. (The Rust exhaustive encoder should reach the same lossless result on both —
+its domain pool is a superset of Fisher's, so whatever exact match Fisher found is also in
+exhaustive's search space — which is consistent with, though not separately proven by,
+`gate-6`'s reported 0.0000 dB decode-agreement gap on these two images: a
+`(∞ - ∞).abs()` comparison is `NaN`, which neither fails nor demonstrates the check,
+since Rust's `f64::max`/`>` treat `NaN` as "no information" rather than a failure.) Only
+`mandelbrot` produced two genuinely comparable, non-degenerate curves, giving
+BD-PSNR = +1.1577 dB.
 
 A related, initially separate issue this run surfaced: the exit criterion's "within 0.2 dB"
 is not actually a symmetric band here. Exhaustive search evaluates every legal

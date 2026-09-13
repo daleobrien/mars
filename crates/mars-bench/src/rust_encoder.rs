@@ -204,7 +204,7 @@ pub fn gate(
             differed_total += differed;
 
             let rust_decode = decode_iterative(&hdr, &leaves, 10);
-            let psnr_rust = psnr(&ground_truth, &rust_decode).unwrap_or(f64::INFINITY);
+            let psnr_rust = psnr(&ground_truth, &rust_decode); // None = lossless (§M2)
 
             let workdir = scratch.join(format!("{}_r{}", image.name, t_rms));
             std::fs::create_dir_all(&workdir).map_err(|source| GateError::Io {
@@ -228,9 +228,18 @@ pub fn gate(
                 },
             )?;
             let c_decode = read_pgm(&workdir.join("d_it.pgm"))?;
-            let psnr_c = psnr(&ground_truth, &c_decode).unwrap_or(f64::INFINITY);
+            let psnr_c = psnr(&ground_truth, &c_decode);
 
-            let gap = (psnr_rust - psnr_c).abs();
+            // A plain `(a - b).abs()` on the `f64::INFINITY` stand-ins used to sit here
+            // silently passed the both-lossless case: `(∞ - ∞).abs()` is `NaN`, which
+            // fails every comparison, so it neither failed nor demonstrated agreement. An
+            // explicit three-way match makes "both lossless" a real, verified pass and
+            // "only one lossless" a real, verified failure instead of a no-op.
+            let gap = match (psnr_rust, psnr_c) {
+                (None, None) => 0.0,
+                (Some(a), Some(b)) => (a - b).abs(),
+                (None, Some(_)) | (Some(_), None) => f64::INFINITY,
+            };
             max_decode_gap = max_decode_gap.max(gap);
             if gap > DECODE_TOLERANCE_DB {
                 decode_gaps.push((format!("{} r={t_rms}", image.name), gap));
@@ -242,7 +251,7 @@ pub fn gate(
                     image.width as usize,
                     image.height as usize,
                 ),
-                psnr: psnr_rust,
+                psnr: psnr_rust.unwrap_or(f64::INFINITY),
             });
         }
         evals_by_image.push(EvalsRow {
