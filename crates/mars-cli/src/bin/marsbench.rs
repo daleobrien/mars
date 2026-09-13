@@ -58,6 +58,8 @@ enum Cmd {
     AnchorsCheck(AnchorsCheckArgs),
     /// Step 5's exit criteria as a command that exits 0 or 1 (§A1, gate-5).
     IfsCheck(IfsCheckArgs),
+    /// Step 6's exit criteria as a command that exits 0 or 1 (§A1, gate-6).
+    RustEncoderCheck(RustEncoderCheckArgs),
 }
 
 #[derive(Args)]
@@ -118,6 +120,20 @@ struct IfsCheckArgs {
     #[arg(long, default_value = "target/mars1")]
     mars1_dir: PathBuf,
     #[arg(long, default_value = "target/ifs-check")]
+    scratch: PathBuf,
+}
+
+#[derive(Args)]
+struct RustEncoderCheckArgs {
+    #[arg(long, default_value = "corpus/fixtures.images.json")]
+    fixtures_index: PathBuf,
+    /// Step 2's baseline store, for the Fisher reference curves.
+    #[arg(long, default_value = "results/baseline-mars1.jsonl")]
+    baseline_store: PathBuf,
+    /// Where `just mars1` put the 1998 binaries; only `decmars` is used.
+    #[arg(long, default_value = "target/mars1")]
+    mars1_dir: PathBuf,
+    #[arg(long, default_value = "target/rust-encoder-check")]
     scratch: PathBuf,
 }
 
@@ -291,6 +307,7 @@ fn main() -> Result<()> {
         Cmd::AnchorsReport(a) => anchors_report_cmd(a),
         Cmd::AnchorsCheck(a) => anchors_check(a),
         Cmd::IfsCheck(a) => ifs_check(a),
+        Cmd::RustEncoderCheck(a) => rust_encoder_check(a),
     }
 }
 
@@ -927,5 +944,41 @@ fn ifs_check(a: IfsCheckArgs) -> Result<()> {
         bail!("gate-5: {failed} of {} checks failed", checks.len());
     }
     println!("\ngate-5: PASS ({} checks)", checks.len());
+    Ok(())
+}
+
+// ----------------------------------------------------------------- exhaustive encoder (Step 6)
+
+fn rust_encoder_check(a: RustEncoderCheckArgs) -> Result<()> {
+    let root = Path::new(".");
+    let (checks, divergence) = mars_bench::rust_encoder::gate(
+        root,
+        &a.fixtures_index,
+        &a.baseline_store,
+        &a.mars1_dir,
+        &a.scratch,
+    )?;
+
+    let mut failed = 0;
+    for c in &checks {
+        let mark = if c.passed {
+            "PASS"
+        } else {
+            failed += 1;
+            "FAIL"
+        };
+        println!("{mark}  {}\n      {}", c.name, c.detail);
+    }
+    println!(
+        "\nf32-vs-f64 fit divergence: {:.4}% ({} of {} domain-referencing leaves picked a \
+         different qalfa or qbeta; recorded, not gated — see docs/decisions.md)",
+        divergence.pct(),
+        divergence.differed,
+        divergence.compared
+    );
+    if failed > 0 {
+        bail!("gate-6: {failed} of {} checks failed", checks.len());
+    }
+    println!("\ngate-6: PASS ({} checks)", checks.len());
     Ok(())
 }

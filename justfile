@@ -159,6 +159,18 @@ gate-5:
     ./target/release/marsbench ifs-check
     @echo "gate-5: PASS"
 
+# Step 6 — the exhaustive Rust encoder: Rust-encode -> decmars decodes within 0.1 dB of
+# Rust's own decode, and the resulting RD curve is within 0.2 dB BD-PSNR of the Step 2
+# Fisher baseline, on the fixtures/default/rms=[2,4,8,16,32] grid. Needs `just mars1` (for
+# `decmars`) and `results/baseline-mars1.jsonl` (`just baseline-mars1`). The integer-moment
+# exactness and f32-vs-f64 divergence criteria are covered by `cargo test -p mars-codec`
+# and this command's own printed percentage, respectively.
+gate-6:
+    cargo build --release -p mars-cli
+    cargo test -p mars-codec --release
+    ./target/release/marsbench rust-encoder-check
+    @echo "gate-6: PASS"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval

@@ -97,6 +97,10 @@ pub enum IfsError {
     TrailingBits(usize),
     #[error("padding bits are not zero (§2)")]
     NonZeroPadding,
+    #[error("no leaf at ({row},{col},{size}) and none can follow (size <= min_size)")]
+    MissingLeaf { row: u32, col: u32, size: u32 },
+    #[error("two leaves claim the same position ({row},{col},{size})")]
+    DuplicateLeaf { row: u32, col: u32, size: u32 },
 }
 
 struct BitReader<'a> {
@@ -254,7 +258,7 @@ fn decode_leaf(hdr: &Header, leaf: &Leaf, img: &[u8], stride: usize, next: &mut 
                 + f64::from(img[dr * stride + dc + 1])
                 + f64::from(img[(dr + 1) * stride + dc + 1]))
                 / 4.0;
-            let (i, j) = isometry_map(leaf.isometry, u, v, size);
+            let (i, j) = crate::isometry::map(leaf.isometry, u, v, size);
             // §10.1: the 0.5 is added to the product, not to the sum — `+` is
             // left-associative in the C, and reassociating changes the truncated result.
             let value = ((0.5 + d * alfa) + beta).clamp(0.0, 255.0) as u8;
@@ -263,17 +267,117 @@ fn decode_leaf(hdr: &Header, leaf: &Leaf, img: &[u8], stride: usize, next: &mut 
     }
 }
 
-/// §9: destination `(i, j)` for source `(u, v)`, by isometry code.
-fn isometry_map(k: u8, u: usize, v: usize, size: usize) -> (usize, usize) {
-    match k {
-        0 => (u, v),                       // IDENTITY
-        1 => (size - 1 - v, u),            // L_ROTATE90
-        2 => (v, size - 1 - u),            // R_ROTATE90
-        3 => (size - 1 - u, size - 1 - v), // ROTATE180
-        4 => (u, size - 1 - v),            // R_VERTICAL
-        5 => (size - 1 - u, v),            // R_HORIZONTAL
-        6 => (v, u),                       // F_DIAGONAL
-        7 => (size - 1 - v, size - 1 - u), // S_DIAGONAL
-        _ => unreachable!("isometry is a 3-bit field parsed as 0..=7"),
+// ---------------------------------------------------------------------------- the writer
+
+struct BitWriter {
+    bits: Vec<bool>,
+}
+
+impl BitWriter {
+    fn new() -> Self {
+        Self { bits: Vec::new() }
     }
+
+    /// §2: each value is written least-significant-bit first.
+    fn write(&mut self, n: u32, value: u32) {
+        for i in 0..n {
+            self.bits.push((value >> i) & 1 != 0);
+        }
+    }
+
+    /// §2: bits pack into each byte most-significant-bit first; the final partial byte is
+    /// right-padded with zero.
+    fn finish(self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.bits.len().div_ceil(8));
+        for chunk in self.bits.chunks(8) {
+            let mut byte = 0u8;
+            for (i, &bit) in chunk.iter().enumerate() {
+                if bit {
+                    byte |= 1 << (7 - i);
+                }
+            }
+            out.push(byte);
+        }
+        out
+    }
+}
+
+/// Serialise a header and its leaves back into a `.ifs` bitstream — the inverse of
+/// [`parse`], used only for cross-checking the encoder against `decmars` (Step 6). Driven
+/// by the leaf *positions* rather than a recorded list of split decisions, so it
+/// independently checks that the leaves tile the image exactly as `parse`'s walk expects.
+pub fn write(hdr: &Header, leaves: &[Leaf]) -> Result<Vec<u8>, IfsError> {
+    let mut by_pos = std::collections::HashMap::with_capacity(leaves.len());
+    for leaf in leaves {
+        if by_pos
+            .insert((leaf.row, leaf.col, leaf.size), leaf)
+            .is_some()
+        {
+            return Err(IfsError::DuplicateLeaf {
+                row: leaf.row,
+                col: leaf.col,
+                size: leaf.size,
+            });
+        }
+    }
+
+    let mut w = BitWriter::new();
+    w.write(4, hdr.bits_alfa);
+    w.write(4, hdr.bits_beta);
+    w.write(7, hdr.min_size);
+    w.write(7, hdr.max_size);
+    w.write(6, hdr.shift);
+    w.write(12, hdr.width);
+    w.write(12, hdr.height);
+    w.write(8, hdr.int_max_alfa);
+
+    write_walk(&mut w, hdr, 0, 0, hdr.virtual_size(), &by_pos)?;
+    Ok(w.finish())
+}
+
+#[allow(clippy::type_complexity)]
+fn write_walk(
+    w: &mut BitWriter,
+    hdr: &Header,
+    row: u32,
+    col: u32,
+    size: u32,
+    by_pos: &std::collections::HashMap<(u32, u32, u32), &Leaf>,
+) -> Result<(), IfsError> {
+    if row >= hdr.height || col >= hdr.width {
+        return Ok(());
+    }
+    let half = size / 2;
+    let forced = size > hdr.max_size || row + size > hdr.height || col + size > hdr.width;
+    if forced {
+        write_walk(w, hdr, row, col, half, by_pos)?;
+        write_walk(w, hdr, row + half, col, half, by_pos)?;
+        write_walk(w, hdr, row, col + half, half, by_pos)?;
+        write_walk(w, hdr, row + half, col + half, half, by_pos)?;
+        return Ok(());
+    }
+
+    let Some(&leaf) = by_pos.get(&(row, col, size)) else {
+        if size <= hdr.min_size {
+            return Err(IfsError::MissingLeaf { row, col, size });
+        }
+        w.write(1, 1);
+        write_walk(w, hdr, row, col, half, by_pos)?;
+        write_walk(w, hdr, row + half, col, half, by_pos)?;
+        write_walk(w, hdr, row, col + half, half, by_pos)?;
+        write_walk(w, hdr, row + half, col + half, half, by_pos)?;
+        return Ok(());
+    };
+
+    if size > hdr.min_size {
+        w.write(1, 0);
+    }
+    w.write(hdr.bits_alfa, leaf.qalfa);
+    w.write(hdr.bits_beta, leaf.qbeta);
+    if leaf.qalfa != 0 {
+        w.write(3, u32::from(leaf.isometry));
+        w.write(hdr.bits_coord_row(), leaf.dom_row / hdr.shift);
+        w.write(hdr.bits_coord_col(), leaf.dom_col / hdr.shift);
+    }
+    Ok(())
 }

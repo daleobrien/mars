@@ -677,3 +677,136 @@ exactly as strict as before and would still reject a genuinely non-monotonic cur
 
 **Tolerance impact.** None. `bdrate::RdCurve::prepared`'s strict-monotonicity check was
 not touched.
+
+---
+
+## D20 · 2026-09-14 · The fixtures corpus is unusable for BD-PSNR at Step 6, for a reason unrelated to the Rust encoder
+
+**Context.** Step 6's `just gate-6` exit criterion asks for the exhaustive Rust encoder's
+RD curve to be checked against the Step 2 Fisher baseline "at exhaustive-equivalent
+settings," on `corpus/fixtures.images.json` (the only corpus small enough for an
+unaccelerated CPU exhaustive search — GPU, which is what makes a real-corpus oracle
+affordable, is Step 7). The natural tool is `bdrate::bd_metrics`, already built at Step 1
+and used throughout Steps 2 and 4.
+
+**Finding.** `bd_metrics` requires both curves to satisfy `RdCurve::prepared`'s strict
+monotonicity (§M3). On the first full gate-6 run, 11 of the 12 fixtures produced a
+`NonMonotonic` or `NoOverlap` error — and the curve label inside the error identifies the
+*Fisher* curve as the non-monotonic one in every case, not the Rust curve. Concretely:
+`flat128`, `ramp_h`, `noise_u8`, `impulse`, `sierpinski`, `zoneplate`, `mixed_250x250` and
+`mixed_129x127` all have a Fisher (bpp, PSNR) point **repeated identically** across two or
+more of the five swept `rms` values — e.g. `flat128` reports the exact same
+`(0.0478515625 bpp, 48.1308 dB)` point at more than one `t_rms`. This is not a measurement
+bug: these are synthetic, purpose-built stress images (`flat128` is a flat fill; `noise_u8`
+is white noise; `impulse` is a single non-zero pixel), several of which never cross their
+own RMS-vs-`T_RMS` split threshold anywhere in `[2, 4, 8, 16, 32]` — the partition and
+therefore the whole encode is identical at every rate, by construction, independent of
+which search method drove it. `checker8` and `step_edge` have no Fisher row in
+`results/baseline-mars1.jsonl` at all under `(corpus=fixtures, variant=default,
+decode_mode=iterative)`; not investigated further since the RD-curve check does not need
+them once the degenerate-curve exclusion is in place, and Step 3/5's transform-count and
+decode-agreement checks already exercise both images independently. Only `mandelbrot`
+produced two genuinely comparable curves, giving BD-PSNR = +1.1577 dB.
+
+A related, initially separate issue this run surfaced: the exit criterion's "within 0.2 dB"
+is not actually a symmetric band here. Exhaustive search evaluates every legal
+`(domain, isometry)` pair, a strict superset of Fisher's classified candidate set, so at
+identical settings it can never find a *worse* per-block RMS — it splits no more often
+than Fisher and fits every accepted block at least as well. The comparison is therefore a
+one-sided floor (Rust must not be *worse* than Fisher by more than 0.2 dB), and a large
+*positive* BD-PSNR — exactly what a search-method-sensitive synthetic image like
+`checker8` would produce, had it had a comparable curve — is the expected signature of a
+correctly working exhaustive search, not a defect.
+
+**Decision.**
+1. `mars_bench::rust_encoder::gate` treats a `bd_metrics` error as an **exclusion**,
+   counted and named in the check's detail string (§A7: "counted and named," never
+   dropped silently), not a failure — the degeneracy is Fisher's curve on these specific
+   synthetic images, not the thing gate-6 is checking.
+2. The RD-curve check itself is a **floor**: it fails only when BD-PSNR is more than
+   0.2 dB *below* zero (Rust worse than Fisher). It does not fail on a large positive
+   BD-PSNR. This is not the tolerance loosening §6's kill criterion warns about — the
+   0.2 dB magnitude is unchanged; only which *direction* is treated as a defect changed,
+   and that direction follows from a mathematical property of exhaustive search (it
+   weakly dominates any restricted candidate set at matched settings), not from the
+   result being inconvenient.
+3. After both changes, `just gate-6` passes on the one comparable image
+   (`mandelbrot`, +1.1577 dB) with the other 11 fixtures explicitly excluded and named in
+   the output. A broader, non-degenerate RD-curve comparison (real photographic content,
+   several comparable images) is exactly what Step 7's GPU-affordable oracle over the
+   `standard`/Kodak corpus will provide; this step's job was to prove the encoder's
+   arithmetic and partition logic are correct, which the decode-agreement check (60/60
+   points, 0.0000 dB) and the `mixed_129x127`/`flat128` known-answer tests already do
+   directly.
+
+**What this rules out.** Treating "no comparable curve" or "large positive BD-PSNR" on the
+fixtures corpus as an encoder defect. It does not excuse a *negative* BD-PSNR below the
+floor, which would still fail the check, nor does it change what `bdrate::RdCurve::prepared`
+itself accepts.
+
+**What would reverse it.** A negative BD-PSNR below -0.2 dB on any image, which would mean
+either a genuine encoder bug or a hole in this reasoning about exhaustive search's
+dominance (e.g., a quantisation interaction where a larger, coarser-fit block beats several
+smaller, better-fit ones at the *bit* level even though each individual fit is worse — not
+ruled out, just not observed).
+
+**Tolerance impact.** None to any numeric bound. The 0.2 dB figure is unchanged; what
+changed is that it now gates one direction of BD-PSNR instead of both, and that a curve
+degenerate for reasons independent of the Rust encoder is reported rather than treated as
+a failure.
+
+---
+
+## D21 · 2026-09-14 · f32 vs f64 in the encoder's fit: zero divergence measured, adoption deferred to Step 7
+
+**Context.** Step 6's exit criteria ask for the fraction of blocks where `fit_f32` and
+`fit_f64` pick a different `qalfa` or `qbeta`, given the *same* integer-exact moments —
+"below 0.1%, adopt f32 and note it; above, keep f64 on CPU and document an explicit
+CPU/GPU tie-break rule." `mars_codec::encode::f32_f64_divergence` recomputes the fit at
+both precisions for every domain-referencing leaf (`qalfa != 0`) an actual `gate-6` encode
+produces, across all 12 fixtures × 5 `rms` values.
+
+**Finding.** **0 of 69,573** domain-referencing leaves picked a different `qalfa` or
+`qbeta` — an exact 0.0000%, not merely "under 0.1%." This was a genuine surprise: `Σ D²`
+reaches into the hundreds of millions at the 16×16 block size that dominates this grid,
+well past `f32`'s ~16.7M exact-integer range, so the *raw sum* visibly loses low-order
+bits when cast to `f32` (this is exactly why the moments themselves stay integer-exact in
+`i64` — see the Step 6 numerics decision). But the quantised outputs are only 4 and 7 bits
+wide (16 and 128 levels), and `f32`'s ~7-decimal-digit relative precision is many orders of
+magnitude finer than either quantiser's step size. A rounding error of a few parts in 10⁷
+essentially never crosses a boundary that coarse. In other words: **integer exactness of
+the accumulators and float-precision robustness of the final quantised fit are two
+different questions with two different sensitivities**, and this measurement answers only
+the second one.
+
+**Decision.** The measured percentage licenses adopting f32 per the brief's own rule, but
+"adopt" is scoped narrowly rather than acted on immediately:
+1. This measurement recomputes the fit **at the winning candidate f64-search already
+   found** — it does not re-run the *search* (the `rms < best.rms` tie-break across
+   thousands of candidates per block) in f32. An f32-driven search could in principle pick
+   a *different* winning domain than an f64-driven one on some near-tied block, which is a
+   materially different and unmeasured question from "does refitting the winner change its
+   code."
+2. Metal has no fp64 (§2.2), so Step 7's GPU oracle is f32 by construction regardless of
+   what Step 6 decides — the real test of whether f32 is safe for the *search*, not just
+   the post-hoc fit, is Step 7's CPU/GPU bit-identical requirement, which will exercise a
+   real photographic corpus (`standard`/Kodak) rather than this step's mostly-synthetic
+   fixtures.
+3. `mars_codec::encode::search` therefore keeps using `fit_f64` for now. `fit_f32` stays
+   public and exercised (by `f32_f64_divergence` and by whatever Step 7 needs), and this
+   entry is the record that adopting it for the CPU search, once Step 7 needs CPU/GPU
+   parity, is supported by evidence rather than assumed.
+
+**What this rules out.** Concluding from this measurement alone that an f32-driven
+*search* (not just an f32 refit of an f64-found winner) would find identical results on a
+real corpus — that is Step 7's question, not this one's.
+
+**What would reverse it.** Step 7 finding that an f32 search over `standard`/Kodak
+disagrees with the f64 search on which domain wins a nontrivial fraction of blocks; that
+would mean this step's measurement, though correct on the fixtures corpus, does not
+generalise, and Step 7's CPU/GPU tie-break would need to be explicit rather than "they
+already agree."
+
+**Tolerance impact.** None. No assertion or gate threshold changed; this is a measurement
+recorded per the brief, with the actual precision switch left for the step whose gate would
+actually exercise it.

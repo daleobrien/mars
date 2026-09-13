@@ -583,3 +583,87 @@ either.
 
 No fixture disagreed, so there was nothing to localise. Recorded as moot rather than
 confirmed or refuted — the size-1-leaf hypothesis was never exercised.
+
+---
+
+## 2026-09-14 (not yet run) · Step 6 · exhaustive Rust encoder
+
+The integer-moment exactness criterion (`cargo test -p mars-codec`, 1e6 random blocks) and
+the `flat128`/`mixed_129x127` known-answer tests were already run during implementation —
+that is ordinary development iteration, not the measurement this section predicts. What
+has **not** yet run is the corpus-level `just gate-6` check: decode agreement against
+`decmars` and the RD-curve comparison against the Step 2 Fisher baseline, both over
+`corpus/fixtures.images.json` at `rms = [2, 4, 8, 16, 32]`, plus the f32-vs-f64 divergence
+measurement.
+
+### P6.1 — decode agreement will again land at ~0.00 dB, not merely under the 0.1 dB budget
+
+Step 5 already established that this Rust toolchain's `f64` arithmetic agrees with the
+pinned `clang` build's, exactly, on the iterative decode formula. Encoding with a different
+search (exhaustive instead of Fisher) does not change that: gate-6's decode-agreement check
+compares two decodes *of the same Rust-produced bitstream* (one via `mars_codec::ifs`, one
+via `decmars -i`), so it exercises the identical decode-side arithmetic Step 5 already
+found exact. I expect `max |ΔPSNR| = 0.0000 dB` again.
+
+### P6.2 — the RD curve will be *at least* as good as Fisher on every image, and the real
+risk is failing the 0.2 dB band from the *favourable* side
+
+Exhaustive search is a strict superset of Fisher's classified candidate set, so at matched
+settings it cannot do worse per block. On natural-content images I expect the margin to be
+small (a few hundredths of a dB) and comfortably inside ±0.2 dB. But three of the twelve
+fixtures — `checker8`, `impulse`, `noise_u8` — are adversarial-for-classification
+synthetic images specifically included to stress search methods; Fisher's domain
+classifier may do considerably worse than exhaustive on these, which could push BD-PSNR
+*above* +0.2 dB (a fail, but in the direction of "Rust is much better," not "Rust is
+broken"). If that happens, the fix is not a tolerance change — it is a documented decision
+that the criterion checks for regression (Rust worse than Fisher), not for the ceiling of
+exhaustive search's legitimate advantage on pathological images.
+
+### P6.3 — the f32 fit will diverge above the 0.1% adoption threshold, not below it
+
+`Σ D²` reaches ~1.07 G at 32x32 (~67 M already at 16x16, the size that dominates this
+grid), well past `f32`'s ~16.7 M exact-integer range, so `s2`'s cast to `f32` loses real
+low-order bits before the fit even runs. I expect this to move `qbeta` (7 bits, more
+sensitive to a small `beta` shift than `qalfa`'s 4 bits are to `alfa`) on enough
+domain-referencing leaves to clear 0.1%, meaning the brief's decision rule keeps `f64` on
+CPU rather than adopting `f32`. I do not have a specific percentage prediction beyond
+"more than 0.1%, plausibly a few percent."
+
+---
+
+## 2026-09-14 · Step 6 · outcomes
+
+`just gate-6` runs the exhaustive encoder over `corpus/fixtures.images.json` at
+`rms = [2, 4, 8, 16, 32]`, cross-checks every point's decode against `decmars -i`, compares
+the resulting RD curve against the Step 2 Fisher baseline, and measures f32-vs-f64 fit
+divergence over every domain-referencing leaf produced.
+
+### P6.1 — **confirmed exactly**
+
+`max |ΔPSNR| = 0.0000 dB` across all 60 (image, rms) points. Same finding as Step 5, for
+the same reason: this checks two decodes of the same Rust-produced bitstream, and this
+toolchain's `f64` arithmetic already agreed with `decmars`'s at Step 5.
+
+### P6.2 — **confirmed on the mechanism, wrong on the specific failure mode**
+
+The predicted risk was real but showed up differently than expected: rather than Fisher
+losing badly enough on `checker8`/`impulse`/`noise_u8` to blow through +0.2 dB, **11 of the
+12 fixtures' Fisher curves turned out to be non-monotonic or absent** — several synthetic
+images never cross their own split threshold across the whole rms grid, so Fisher's curve
+has repeated identical points and fails `bdrate`'s §M3 precondition before BD-PSNR can even
+be computed. Only `mandelbrot` produced a comparable curve: **+1.1577 dB**, comfortably
+inside the (one-sided) floor, and positive as the dominance argument predicts. See
+`docs/decisions.md` D20 for the full finding and the resulting floor-not-band gate design.
+
+### P6.3 — **refuted, and by a wide margin**
+
+**0 of 69,573** domain-referencing leaves picked a different `qalfa` or `qbeta` between
+`fit_f32` and `fit_f64` — not "under 0.1%," an exact zero over a six-figure sample. The
+predicted mechanism (`Σ D²`'s cast to `f32` losing real bits) is real and was not the
+question that mattered: the quantisers are only 4 and 7 bits wide, and `f32`'s relative
+precision is many orders of magnitude finer than either quantisation step, so the lost
+bits never cross a rounding boundary. `docs/decisions.md` D21 records the finding and why
+the actual precision switch is deferred to Step 7 regardless (Metal has no fp64, so Step 7
+needs to answer the closely related but distinct question of whether an f32-*driven
+search* — not just an f32 refit of an f64-found winner — agrees with f64 on a real
+corpus).

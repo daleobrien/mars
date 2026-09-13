@@ -16,6 +16,7 @@ pub mod measure;
 pub mod pchip;
 pub mod provenance;
 pub mod report;
+pub mod rust_encoder;
 pub mod store;
 pub mod sweep;
 
