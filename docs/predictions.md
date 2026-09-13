@@ -667,3 +667,51 @@ the actual precision switch is deferred to Step 7 regardless (Metal has no fp64,
 needs to answer the closely related but distinct question of whether an f32-*driven
 search* — not just an f32 refit of an f64-found winner — agrees with f64 on a real
 corpus).
+
+---
+
+## 2026-09-14 · Step 7 (not yet run) · GPU exhaustive search
+
+### P7.1 — 32-bit unsigned accumulators suffice; no 64-bit emulation is needed
+
+The brief flags 64-bit accumulator support as a risk to check "before writing the
+kernel," and WGSL has no native 64-bit integer type, so the fallback it names is
+splitting `s2`/`t1`/`t2` across two 32-bit lanes. I predict that fallback will not be
+needed at all: every one of the six moments is a sum of non-negative terms (`D >= 0`,
+`r >= 0`), so there is no cancellation to worry about, and the project's actual configs
+(`configs/*.json`) cap `max_size` at 32 — exactly the block size the brief's own table
+uses for its worst case. At that size the largest moment, `s2_x16 ~= 1.07e9`, still sits
+comfortably under `u32::MAX` (`~4.29e9`), and every other moment is smaller. I expect a
+single `u32` accumulator per moment on the GPU to match the CPU's `i64` values exactly
+(as integers, not merely as compared floats) over the full fixtures/standard corpus, with
+room to spare rather than a near-miss.
+
+### P7.2 — the f32-driven GPU search will match the f64 CPU search's winning candidate
+on effectively 100% of range blocks, extending D21 rather than reversing it
+
+D21 measured zero divergence for an f32 *refit* of an f64-found winner, but flagged the
+full f32-*driven search* on real photographic content as the genuinely open question,
+since a search compares thousands of near-tied candidates per block rather than
+recomputing one. I predict the same mechanism D21 found still dominates: `qalfa`/`qbeta`
+are only 4 and 7 bits wide, and `f32`'s relative precision is many orders of magnitude
+finer than either quantisation step, so an `f32` rounding difference essentially never
+flips which of two candidates has the lower `rms` closely enough to change which one a
+search keeps as its running best — even across a full exhaustive sweep on Kodak/`standard`,
+not just the fixtures corpus. I expect the GPU's chosen `(dom_row, dom_col, isometry,
+qalfa, qbeta)` to match the CPU's on every block, gated on the search enumerating
+candidates in the same order (`dom_row` outer, `dom_col` inner, isometry innermost,
+strict `<` keeps the first candidate on an exact tie) so a genuine exact tie resolves
+identically rather than becoming a coin flip. If any block does diverge, I expect it to be
+a handful out of the corpus, not a systemic fraction, and traceable to an actual near-exact
+tie rather than to widespread `f32` drift.
+
+### P7.3 — the speedup clears 50x and the Kodak oracle build lands in the "hours" band,
+not merely "faster than weeks"
+
+This machine's GPU has no host<->device transfer to amortise (unified memory), and the
+exhaustive search's regular, branch-free access pattern (a dense `range x domain x
+isometry` sweep) is close to the ideal case for a GPU. I expect the measured speedup
+against the Rayon CPU exhaustive path, transfer included, to clear the 50x floor with
+margin (not land just above it), and a full Kodak oracle build (24 images, the sizes/rates
+Step 8 needs) to complete in low single-digit hours rather than needing the full "hours"
+budget the exit criterion allows.

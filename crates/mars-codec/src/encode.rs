@@ -177,7 +177,7 @@ fn best_beta(range_sum: i64, pixel_count: i64, bits_beta: u32) -> u32 {
 /// `(2row,2col),(2row+1,2col),(2row,2col+1),(2row+1,2col+1)`), so that every domain
 /// position's `size x size` sample block is an O(size²) slice of this rather than a
 /// redundant box-sum recomputation per candidate.
-struct Contracted {
+pub struct Contracted {
     data: Vec<i32>,
     stride: usize,
 }
@@ -204,6 +204,29 @@ impl Contracted {
     fn at(&self, row: usize, col: usize) -> i32 {
         self.data[row * self.stride + col]
     }
+}
+
+/// Public entry point for [`search`], for callers outside this crate that need the
+/// ground-truth per-block result without running the full quadtree `walk` — Step 7's GPU
+/// differential test (`mars-gpu`/`marsbench`) is the reason this exists: it needs to zip
+/// the CPU's per-`(row, col, size)` winner against the GPU's, at exactly the positions the
+/// GPU enumerated, not at whatever positions the RMS-driven partition happened to visit.
+/// A thin visibility wrapper only — [`search`]'s behaviour is untouched.
+pub fn search_block(
+    image: &Plane,
+    contracted: &Contracted,
+    row: u32,
+    col: u32,
+    size: u32,
+    params: &EncodeParams,
+) -> (Option<Candidate>, u64) {
+    search(image, contracted, row, col, size, params)
+}
+
+/// Public constructor for [`Contracted`], needed by [`search_block`]'s callers to build
+/// the 2:1 box-sum plane once per image rather than per block.
+pub fn build_contracted(image: &Plane) -> Contracted {
+    Contracted::build(image)
 }
 
 /// Exhaustively search every valid domain position and isometry for the range block at

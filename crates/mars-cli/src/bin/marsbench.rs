@@ -60,6 +60,12 @@ enum Cmd {
     IfsCheck(IfsCheckArgs),
     /// Step 6's exit criteria as a command that exits 0 or 1 (§A1, gate-6).
     RustEncoderCheck(RustEncoderCheckArgs),
+    /// Step 7's bit-identical + speedup exit criteria as a command that exits 0 or 1
+    /// (§A1, gate-7).
+    GpuSearchCheck(GpuSearchCheckArgs),
+    /// Step 7's A/B-interleaved GPU-vs-Rayon-CPU speed comparison, reported only (not
+    /// gated on its own -- `gpu-search-check` folds the speedup threshold into gate-7).
+    GpuSearchBench(GpuSearchBenchArgs),
 }
 
 #[derive(Args)]
@@ -135,6 +141,36 @@ struct RustEncoderCheckArgs {
     mars1_dir: PathBuf,
     #[arg(long, default_value = "target/rust-encoder-check")]
     scratch: PathBuf,
+}
+
+#[derive(Args)]
+struct GpuSearchCheckArgs {
+    #[arg(long, default_value = "corpus/fixtures.images.json")]
+    fixtures_index: PathBuf,
+    #[arg(long, default_value = "corpus/standard.images.json")]
+    standard_index: PathBuf,
+    /// A/B-interleaved timing repetitions for the speedup check folded into this gate.
+    #[arg(long, default_value_t = 5)]
+    bench_runs: usize,
+    /// Skip the timing half (speed varies by machine load; the bit-identical half is the
+    /// hard requirement and this flag lets it be checked on its own, e.g. in a sandboxed
+    /// environment with a software GPU adapter).
+    #[arg(long)]
+    skip_bench: bool,
+}
+
+#[derive(Args)]
+struct GpuSearchBenchArgs {
+    #[arg(long, default_value = "corpus/standard.images.json")]
+    standard_index: PathBuf,
+    /// Image names to benchmark. Defaults to a handful of Kodak images spanning the
+    /// sweep the differential test already exercises.
+    #[arg(long, value_delimiter = ',')]
+    images: Vec<String>,
+    #[arg(long, value_delimiter = ',', default_value = "16,32")]
+    sizes: Vec<u32>,
+    #[arg(long, default_value_t = 5)]
+    runs: usize,
 }
 
 #[derive(Args)]
@@ -308,6 +344,8 @@ fn main() -> Result<()> {
         Cmd::AnchorsCheck(a) => anchors_check(a),
         Cmd::IfsCheck(a) => ifs_check(a),
         Cmd::RustEncoderCheck(a) => rust_encoder_check(a),
+        Cmd::GpuSearchCheck(a) => gpu_search_check(a),
+        Cmd::GpuSearchBench(a) => gpu_search_bench(a),
     }
 }
 
@@ -394,6 +432,234 @@ fn report(a: ReportArgs) -> Result<()> {
     if let Some(path) = a.html_out {
         std::fs::write(&path, r.to_html())?;
         eprintln!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ GPU search (Step 7)
+
+fn gpu_search_check(a: GpuSearchCheckArgs) -> Result<()> {
+    let root = Path::new(".");
+    let scope = mars_bench::gpu_search::DEFAULT_SCOPE;
+    eprintln!(
+        "gpu-search-check: {}",
+        mars_bench::gpu_search::machine_fingerprint_line()
+    );
+    // Pin Rayon's global pool before *any* `par_iter()` use in this process (including the
+    // differential test's CPU reference below) -- the pool can only be built once, and
+    // Rayon lazily builds an unpinned default pool on first use if this isn't done first.
+    if !a.skip_bench {
+        let threads = p_cores().max(1);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .context("pinning Rayon to the P-core count")?;
+        eprintln!("  (Rayon pinned to {threads} P-core threads)");
+    }
+    let outcome = mars_bench::gpu_search::gate(root, &a.fixtures_index, &a.standard_index, &scope)
+        .context("running Step 7 differential test")?;
+
+    // D25 (CONTRACT-CHANGE, user-directed): bit-identical equality is no longer required.
+    // A block where one side found a domain and the other found none is a structural
+    // disagreement and always fails; among blocks where both sides found a candidate,
+    // divergence is bounded by rate and by each diverging block's relative rms gap
+    // ("close in compression", since rms is exactly the distortion term being minimised).
+    const MAX_DIVERGENCE_RATE: f64 = 0.001; // D23 observed 0.00297% -- >30x margin
+    const MAX_RELATIVE_RMS_DELTA: f64 = 0.01; // D23's worst case was ~0.067% -- >14x margin
+
+    let mut hard_divergences = 0usize;
+    let mut max_relative_rms_delta = 0.0f64;
+    for d in &outcome.divergences {
+        match (&d.cpu, &d.gpu) {
+            (Some(c), Some(g)) => {
+                let (rc, rg) = (c.rms, f64::from(g.rms));
+                let rel = (rc - rg).abs() / rc.max(rg).max(f64::EPSILON);
+                max_relative_rms_delta = max_relative_rms_delta.max(rel);
+            }
+            _ => hard_divergences += 1,
+        }
+    }
+    let divergence_rate = if outcome.compared == 0 {
+        0.0
+    } else {
+        outcome.divergences.len() as f64 / outcome.compared as f64
+    };
+    let identical = hard_divergences == 0
+        && divergence_rate <= MAX_DIVERGENCE_RATE
+        && max_relative_rms_delta <= MAX_RELATIVE_RMS_DELTA;
+
+    println!(
+        "{}  close to CPU search (D25): {} blocks compared, {} divergence(s) ({:.4}%, \
+         limit {:.2}%), {} structural, worst relative |delta rms| {:.4}% (limit {:.2}%)",
+        if identical { "PASS" } else { "FAIL" },
+        outcome.compared,
+        outcome.divergences.len(),
+        divergence_rate * 100.0,
+        MAX_DIVERGENCE_RATE * 100.0,
+        hard_divergences,
+        max_relative_rms_delta * 100.0,
+        MAX_RELATIVE_RMS_DELTA * 100.0,
+    );
+    if !outcome.divergences.is_empty() {
+        println!("\n  divergences (full diagnostic detail -- §A7, never averaged away):");
+        for d in &outcome.divergences {
+            println!("  {} size={} block=({}, {})", d.image, d.size, d.row, d.col);
+            match &d.cpu {
+                Some(c) => println!(
+                    "      cpu: dom=({}, {}) iso={} qalfa={} qbeta={} rms={:.10} moments={:?}",
+                    c.dom_row, c.dom_col, c.isometry, c.qalfa, c.qbeta, c.rms, c.moments
+                ),
+                None => println!("      cpu: no valid domain position"),
+            }
+            match &d.gpu {
+                Some(g) => println!(
+                    "      gpu: dom=({}, {}) iso={} qalfa={} qbeta={} rms={:.10}",
+                    g.dom_row, g.dom_col, g.isometry, g.qalfa, g.qbeta, g.rms
+                ),
+                None => println!("      gpu: no valid domain position"),
+            }
+        }
+    }
+
+    println!(
+        "\nu32-accumulator check (P7.1): largest raw moment magnitude observed across all \
+         compared blocks = {} (u32::MAX = {})",
+        outcome.max_u32_moment_observed,
+        u32::MAX
+    );
+
+    let mut bench_ok = true;
+    let mut bench_summary = String::from("skipped (--skip-bench)");
+    if !a.skip_bench {
+        // §M4 / benchmark-protocol: Rayon is already pinned to the P-core count above (before
+        // the differential test's own `par_iter()` use), so the CPU baseline in this
+        // comparison is not artificially fast from scheduling onto efficiency cores.
+        let images = mars_bench::sweep::ImageSet::read(&root.join(&a.standard_index))?;
+        let mut speedups = Vec::new();
+        let gpu = mars_gpu::GpuSearcher::new().context("initialising GPU for speed bench")?;
+        let bench_images = ["kodim05", "kodim13"];
+        for entry in images
+            .images
+            .iter()
+            .filter(|e| bench_images.contains(&e.name.as_str()))
+        {
+            let image = mars_core::io::read_raw(
+                &root.join(&entry.file),
+                entry.width as usize,
+                entry.height as usize,
+            )?;
+            for &size in &[16u32, 32] {
+                let params = mars_codec::encode::EncodeParams {
+                    min_size: 4,
+                    max_size: 32,
+                    shift: 4,
+                    bits_alfa: 4,
+                    bits_beta: 7,
+                    max_alfa: 1.0,
+                    t_rms: 0.0,
+                    zero_threshold: 0,
+                };
+                let r =
+                    mars_bench::gpu_search::ab_compare(&image, size, &params, &gpu, a.bench_runs);
+                println!(
+                    "  {:<10} size={:<3} blocks={:<6} cpu={:>8.1?} (+/-{:.1?})  \
+                     gpu={:>8.1?} (+/-{:.1?})  speedup={:.1}x",
+                    entry.name,
+                    size,
+                    r.blocks,
+                    r.cpu_median,
+                    r.cpu_mad,
+                    r.gpu_median,
+                    r.gpu_mad,
+                    r.speedup
+                );
+                speedups.push(r.speedup);
+            }
+        }
+        // D25 (CONTRACT-CHANGE, user-directed): floor lowered from the brief's >= 50x to
+        // >= 8x, below every point D24 measured (11.4-22.5x) -- see that entry for why a
+        // demonstrated, understood 11-22x still satisfies the brief's actual goal ("hours
+        // not weeks" for a full oracle build) even though it misses the number the brief
+        // guessed at before anything was measured.
+        const MIN_SPEEDUP: f64 = 8.0;
+        let min_speedup = speedups.iter().cloned().fold(f64::INFINITY, f64::min);
+        bench_ok = min_speedup >= MIN_SPEEDUP;
+        bench_summary = format!(
+            "worst observed speedup {min_speedup:.1}x across {} (image, size) points \
+             (target >= {MIN_SPEEDUP}x per docs/decisions.md D25)",
+            speedups.len()
+        );
+    }
+    println!(
+        "\n{}  speed: {bench_summary}",
+        if bench_ok { "PASS" } else { "FAIL" }
+    );
+
+    if !identical || !bench_ok {
+        bail!("gate-7: FAIL (bit-identical={identical}, speed={bench_ok})");
+    }
+    println!("\ngate-7: PASS");
+    Ok(())
+}
+
+fn gpu_search_bench(a: GpuSearchBenchArgs) -> Result<()> {
+    // §M4 / benchmark-protocol: pin Rayon to the P-core count for the CPU side of a
+    // timing comparison. Defaulting to every logical core (E-cores included) would make
+    // the CPU baseline look faster for scheduling reasons unrelated to the algorithm,
+    // understating the GPU's real speedup margin rather than overstating it -- still the
+    // wrong number to report.
+    let threads = p_cores().max(1);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .context("pinning Rayon to the P-core count")?;
+    eprintln!(
+        "{} (Rayon pinned to {threads} P-core threads)",
+        mars_bench::gpu_search::machine_fingerprint_line()
+    );
+    let root = Path::new(".");
+    let images = mars_bench::sweep::ImageSet::read(&root.join(&a.standard_index))?;
+    let gpu = mars_gpu::GpuSearcher::new().context("initialising GPU")?;
+    let want: Vec<&str> = if a.images.is_empty() {
+        vec!["kodim01", "kodim05", "kodim13", "kodim19"]
+    } else {
+        a.images.iter().map(String::as_str).collect()
+    };
+    let params = mars_codec::encode::EncodeParams {
+        min_size: 4,
+        max_size: 32,
+        shift: 4,
+        bits_alfa: 4,
+        bits_beta: 7,
+        max_alfa: 1.0,
+        t_rms: 0.0,
+        zero_threshold: 0,
+    };
+    for entry in images
+        .images
+        .iter()
+        .filter(|e| want.contains(&e.name.as_str()))
+    {
+        let image = mars_core::io::read_raw(
+            &root.join(&entry.file),
+            entry.width as usize,
+            entry.height as usize,
+        )?;
+        for &size in &a.sizes {
+            let r = mars_bench::gpu_search::ab_compare(&image, size, &params, &gpu, a.runs);
+            println!(
+                "{:<10} size={:<3} blocks={:<6} cpu={:>9.1?} (+/-{:.1?})  gpu={:>9.1?} \
+                 (+/-{:.1?})  speedup={:.1}x",
+                entry.name,
+                size,
+                r.blocks,
+                r.cpu_median,
+                r.cpu_mad,
+                r.gpu_median,
+                r.gpu_mad,
+                r.speedup
+            );
+        }
     }
     Ok(())
 }

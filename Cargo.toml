@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/mars-core",
     "crates/mars-codec",
+    "crates/mars-gpu",
     "crates/mars-bench",
     "crates/mars-cli",
 ]
@@ -20,16 +21,26 @@ authors = ["The Mars 2 authors"]
 # them as wildcards; a wildcard dependency is denied outright.
 mars-core = { path = "crates/mars-core", version = "0.1.0" }
 mars-codec = { path = "crates/mars-codec", version = "0.1.0" }
+mars-gpu = { path = "crates/mars-gpu", version = "0.1.0" }
 mars-bench = { path = "crates/mars-bench", version = "0.1.0" }
 
 anyhow = "1.0"
+bytemuck = { version = "1.19", features = ["derive"] }
 clap = { version = "4.5", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "0.4"
+rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
 toml = "0.8"
+# Metal + WGSL only (§2.2: this project targets one machine, Apple Silicon). Default
+# features pull in dx12/gles/vulkan/webgpu, and with them Apache-2.0-only crates
+# (khronos_api, gl_generator, spirv, codespan-reporting) that `deny.toml`'s licence
+# policy deliberately rejects (see that file's header comment) -- trimming to what this
+# target actually needs avoids the conflict rather than widening the allow-list.
+wgpu = { version = "30", default-features = false, features = ["std", "metal", "wgsl"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

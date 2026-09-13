@@ -8,6 +8,7 @@
 pub mod anchors;
 pub mod anchors_report;
 pub mod bdrate;
+pub mod gpu_search;
 pub mod ifs_check;
 pub mod mars1;
 pub mod mars1_fixtures;

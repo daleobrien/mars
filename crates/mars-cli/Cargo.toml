@@ -10,9 +10,12 @@ authors.workspace = true
 
 [dependencies]
 mars-bench = { workspace = true }
+mars-codec = { workspace = true }
 mars-core = { workspace = true }
+mars-gpu = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+rayon = { workspace = true }
 serde_json = { workspace = true }
 
 [[bin]]

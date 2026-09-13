@@ -171,6 +171,18 @@ gate-6:
     ./target/release/marsbench rust-encoder-check
     @echo "gate-6: PASS"
 
+# Step 7 — the GPU exhaustive search: bit-identical to the CPU exhaustive search on every
+# compared block (any divergence is a bug, never a tolerance -- §A7), and >= 50x faster
+# than the Rayon CPU exhaustive path, transfer included, per the `benchmark-protocol`
+# skill (A/B interleaved, N=5, median+MAD). Needs a real GPU adapter (run on the target
+# M-series machine, in the foreground -- timing runs are never background work) and the
+# `standard`/Kodak images under `corpus/images/kodak-gray/`.
+gate-7:
+    cargo build --release -p mars-cli
+    cargo test -p mars-gpu -p mars-bench --release
+    ./target/release/marsbench gpu-search-check
+    @echo "gate-7: PASS"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval

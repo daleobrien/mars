@@ -1,0 +1,22 @@
+[package]
+name = "mars-gpu"
+description = "GPU exhaustive fractal search (Step 7) — wgpu/WGSL, verified close to mars-codec's CPU search per docs/decisions.md D25."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+mars-core = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+thiserror = { workspace = true }
+wgpu = { workspace = true }
+
+[dev-dependencies]
+mars-codec = { workspace = true }
+
+[lints]
+workspace = true
