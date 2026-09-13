@@ -1,0 +1,52 @@
+24 bytes, 185 bits of payload + 7 of padding, 7 leaves (3 DC-only)
+
+        bits      bytes  field                        value
+------------  ---------  ---------------------------- ----------------------------------
+    0..4              0  header N_BITALFA             4
+    4..8              0  header N_BITBETA             7
+    8..15             1  header min_size              16
+   15..22           1-2  header max_size              32
+   22..28           2-3  header SHIFT                 4
+   28..40           3-4  header image_width           64
+   40..52           5-6  header image_height          64
+   52..60           6-7  header int_max_alfa          32  MAX_ALFA = 1
+                         (0,0) 64x64                  forced subdivision (§5.2), no bits
+   60..61             7  (0,0) 32x32 split            0 = leaf
+   61..65           7-8  (0,0) 32x32 qalfa            0  -> alfa 0.000000
+   65..72             8  (0,0) 32x32 qbeta            50  -> beta 100.393701
+                         (0,0) 32x32 DC-only          qalfa == 0: no isometry, no domain (§6)
+   72..73             9  (32,0) 32x32 split           1 = subdivide
+   73..77             9  (32,0) 16x16 qalfa           8  -> alfa 0.500000
+   77..84          9-10  (32,0) 16x16 qbeta           49  -> beta 20.078740
+   84..87            10  (32,0) 16x16 isometry        0
+   87..91         10-11  (32,0) 16x16 dom_row         8 -> row 32
+   91..95            11  (32,0) 16x16 dom_col         0 -> col 0
+   95..99         11-12  (48,0) 16x16 qalfa           8  -> alfa 0.500000
+   99..106        12-13  (48,0) 16x16 qbeta           70  -> beta 83.326772
+  106..109           13  (48,0) 16x16 isometry        0
+  109..113        13-14  (48,0) 16x16 dom_row         8 -> row 32
+  113..117           14  (48,0) 16x16 dom_col         0 -> col 0
+  117..121        14-15  (32,16) 16x16 qalfa          8  -> alfa 0.500000
+  121..128           15  (32,16) 16x16 qbeta          49  -> beta 20.078740
+  128..131           16  (32,16) 16x16 isometry       0
+  131..135           16  (32,16) 16x16 dom_row        8 -> row 32
+  135..139        16-17  (32,16) 16x16 dom_col        0 -> col 0
+  139..143           17  (48,16) 16x16 qalfa          8  -> alfa 0.500000
+  143..150        17-18  (48,16) 16x16 qbeta          70  -> beta 83.326772
+  150..153        18-19  (48,16) 16x16 isometry       0
+  153..157           19  (48,16) 16x16 dom_row        8 -> row 32
+  157..161        19-20  (48,16) 16x16 dom_col        0 -> col 0
+  161..162           20  (0,32) 32x32 split           0 = leaf
+  162..166           20  (0,32) 32x32 qalfa           0  -> alfa 0.000000
+  166..173        20-21  (0,32) 32x32 qbeta           85  -> beta 170.669291
+                         (0,32) 32x32 DC-only         qalfa == 0: no isometry, no domain (§6)
+  173..174           21  (32,32) 32x32 split          0 = leaf
+  174..178        21-22  (32,32) 32x32 qalfa          0  -> alfa 0.000000
+  178..185        22-23  (32,32) 32x32 qbeta          30  -> beta 60.236220
+                         (32,32) 32x32 DC-only        qalfa == 0: no isometry, no domain (§6)
+  185..192           23  padding                      zero, low bits of the final byte (§2)
+
+hexdump
+  0000  2e 08 08 80 20 02 00 40  00101110 00001000 00001000 10000000 00100000 00000010 00000000 01000000
+  0008  26 8c 60 20 2c 40 80 c6  00100110 10001100 01100000 00100000 00101100 01000000 10000000 11000110
+  0010  02 02 c4 08 02 a8 1e 00  00000010 00000010 11000100 00001000 00000010 10101000 00011110 00000000

@@ -70,7 +70,7 @@ fn the_presplit_thresholds_are_inert_at_the_1998_defaults() {
     let (bins, work, w, h) = require_binaries!("inert");
 
     let encode_to = |name: &str, params: &EncodeParams| -> Vec<u8> {
-        encode(&bins, &work, "i.raw", name, w, h, params).expect("encode");
+        encode(&bins, &work, "i.raw", name, w, h, params, &[]).expect("encode");
         std::fs::read(work.join(name)).expect("read bitstream")
     };
 
@@ -150,7 +150,7 @@ fn each_method_flag_selects_a_distinct_search() {
             ..base()
         };
         // `encode` itself asserts that the reported method equals the requested one.
-        let out = encode(&bins, &work, "i.raw", "o.ifs", w, h, &params).expect("encode");
+        let out = encode(&bins, &work, "i.raw", "o.ifs", w, h, &params, &[]).expect("encode");
         assert_eq!(out.stats.method_reported, m.reported_label());
         assert!(out.stats.transforms > 0);
         comparisons.push((m, out.stats.comparisons));
@@ -179,7 +179,7 @@ fn each_method_flag_selects_a_distinct_search() {
 #[ignore = "needs the 1998 binaries; run via `just gate-2`"]
 fn the_encoder_summary_is_self_consistent() {
     let (bins, work, w, h) = require_binaries!("consistent");
-    let out = encode(&bins, &work, "i.raw", "o.ifs", w, h, &base()).expect("encode");
+    let out = encode(&bins, &work, "i.raw", "o.ifs", w, h, &base(), &[]).expect("encode");
     assert_eq!(
         out.coded_bytes,
         std::fs::metadata(work.join("o.ifs")).unwrap().len()
@@ -199,7 +199,7 @@ fn the_encoder_summary_is_self_consistent() {
 #[ignore = "needs the 1998 binaries; run via `just gate-2`"]
 fn a_dimension_mismatch_is_caught_not_absorbed() {
     let (bins, work, w, h) = require_binaries!("dims");
-    encode(&bins, &work, "i.raw", "o.ifs", w, h, &base()).expect("encode");
+    encode(&bins, &work, "i.raw", "o.ifs", w, h, &base(), &[]).expect("encode");
     let err = decode(
         &bins,
         &work,
@@ -232,7 +232,7 @@ fn a_dimension_mismatch_is_caught_not_absorbed() {
 #[ignore = "needs the 1998 binaries; run via `just gate-2`"]
 fn the_decode_modes_diverge_when_unconverged_and_agree_once_converged() {
     let (bins, work, w, h) = require_binaries!("decode");
-    encode(&bins, &work, "i.raw", "o.ifs", w, h, &base()).expect("encode");
+    encode(&bins, &work, "i.raw", "o.ifs", w, h, &base(), &[]).expect("encode");
 
     let psnr_at = |iterations: u32, mode: DecodeMode, name: &str| -> f64 {
         let params = DecodeParams {
@@ -300,7 +300,7 @@ fn pyramidal_decode_breaks_only_on_sub_pixel_range_blocks() {
             t_rms: 4.0,
             ..base()
         };
-        encode(&bins, &work, "i.raw", "o.ifs", w, h, &params).expect("encode");
+        encode(&bins, &work, "i.raw", "o.ifs", w, h, &params, &[]).expect("encode");
         let psnr = |mode: DecodeMode, name: &str| {
             decode(
                 &bins,

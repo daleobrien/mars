@@ -12,6 +12,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use mars_bench::bdrate::{bd_metrics, RdCurve, RdPoint};
 use mars_bench::mars1::Mars1Binaries;
+use mars_bench::mars1_fixtures::{self, FixtureConfig, FIXTURE_DIR};
 use mars_bench::mars1_report::{self, Mars1Report};
 use mars_bench::measure::{file_size, measure, MeasureRequest};
 use mars_bench::provenance::Provenance;
@@ -45,6 +46,24 @@ enum Cmd {
     Mars1Report(Mars1ReportArgs),
     /// Step 2's exit criteria as a command that exits 0 or 1 (§A1).
     Mars1Check(Mars1CheckArgs),
+    /// Step 3: regenerate the golden `.ifs` fixtures and their manifest.
+    Mars1Fixtures(Mars1FixturesArgs),
+}
+
+#[derive(Args)]
+struct Mars1FixturesArgs {
+    /// The fixture set. §2.3: the set is a config file, not a code edit.
+    #[arg(long, default_value = "configs/mars1-fixtures.json")]
+    config: PathBuf,
+    /// Where `just mars1` put the 1998 binaries.
+    #[arg(long, default_value = "target/mars1")]
+    mars1_dir: PathBuf,
+    /// Scratch space for the encodes and decodes; nothing here is committed.
+    #[arg(long, default_value = "target/mars1-fixtures")]
+    scratch: PathBuf,
+    /// Plan the set and print it without running anything.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -196,6 +215,7 @@ fn main() -> Result<()> {
         Cmd::Mars1Sweep(a) => mars1_sweep(a),
         Cmd::Mars1Report(a) => mars1_report(a),
         Cmd::Mars1Check(a) => mars1_check(a),
+        Cmd::Mars1Fixtures(a) => mars1_fixtures(a),
     }
 }
 
@@ -544,5 +564,50 @@ fn mars1_check(a: Mars1CheckArgs) -> Result<()> {
         bail!("gate-2: {failed} of {} checks failed", checks.len());
     }
     println!("\ngate-2: PASS ({} checks)", checks.len());
+    Ok(())
+}
+
+/// Step 3: regenerate the golden `.ifs` fixtures.
+///
+/// Serial on purpose. It takes a few minutes, it runs once when the set changes, and a
+/// concurrent version would buy nothing except a way for two cases to disagree about which
+/// of them wrote `quadtree.pgm`.
+fn mars1_fixtures(a: Mars1FixturesArgs) -> Result<()> {
+    let root = Path::new(".");
+    let config = FixtureConfig::read(&a.config)
+        .with_context(|| format!("reading {}", a.config.display()))?;
+    let cases = config.plan(root)?;
+
+    if a.dry_run {
+        for c in &cases {
+            println!("{:>4}  {:<12} {}", c.id, c.group, c.stem());
+        }
+        println!("{} fixtures", cases.len());
+        return Ok(());
+    }
+
+    let bins = Mars1Binaries::from_dir(&a.mars1_dir)?;
+    std::fs::create_dir_all(&a.scratch)?;
+
+    let mut records = Vec::with_capacity(cases.len());
+    for c in &cases {
+        let r = mars1_fixtures::generate(&bins, root, &a.scratch, c)
+            .with_context(|| format!("generating fixture {}", c.stem()))?;
+        println!(
+            "{:>4}/{}  {:<48} {:>7} B  {:>6} transforms ({} DC)",
+            c.id + 1,
+            cases.len(),
+            r.stem,
+            r.ifs_bytes,
+            r.transforms,
+            r.zero_alfa_transforms
+        );
+        records.push(r);
+    }
+
+    let manifest = mars1_fixtures::manifest_toml(&config, &records, bins.build_info.as_deref());
+    let path = root.join(FIXTURE_DIR).join("manifest.toml");
+    std::fs::write(&path, manifest).with_context(|| format!("writing {}", path.display()))?;
+    println!("\nwrote {} ({} fixtures)", path.display(), records.len());
     Ok(())
 }

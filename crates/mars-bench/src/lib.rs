@@ -7,6 +7,7 @@
 
 pub mod bdrate;
 pub mod mars1;
+pub mod mars1_fixtures;
 pub mod mars1_report;
 pub mod measure;
 pub mod pchip;

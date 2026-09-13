@@ -1,0 +1,69 @@
+{
+  "name": "mars1-fixtures",
+  "description": "Golden Mars 1 .ifs bitstreams that validate docs/mars1-format.md (Step 3).",
+
+  "indexes": ["corpus/fixtures.images.json"],
+
+  "extra_images": [
+    {
+      "name": "lena",
+      "file": "reference/mars1/lena.raw",
+      "width": 512,
+      "height": 512,
+      "sha256": "1f4ca6165411dc19befadb9364e8681c8c524dcb28c05cf139736171819d6e9b"
+    },
+    {
+      "name": "tiny64",
+      "file": "fixtures/mars1/tiny64.raw",
+      "width": 64,
+      "height": 64,
+      "sha256": "2cac3a8d8aa44fc19883938e9577b3348595a5cd3e7045cba9c780cd76ddecba"
+    }
+  ],
+
+  "base": {
+    "min_size": 4,
+    "max_size": 16,
+    "shift": 4,
+    "bits_alfa": 4,
+    "bits_beta": 7,
+    "max_alfa": 1.0
+  },
+
+  "variants": [
+    { "label": "default", "description": "the 1998 settings" },
+    { "label": "alfa5", "description": "-A 5: a 5-bit scale quantiser, so a leaf is not a whole number of nibbles", "bits_alfa": 5 },
+    { "label": "beta6", "description": "-B 6: a 6-bit offset quantiser", "bits_beta": 6 },
+    { "label": "step8", "description": "-d 8: halves bits_per_coordinate on both axes", "shift": 8 },
+    { "label": "min2", "description": "-m 2: drives the partition below the pyramidal decoder's floor (D11)", "min_size": 2 },
+    { "label": "max32", "description": "-M 32: leaves above 16, and one fewer level of forced subdivision", "max_size": 32 },
+    { "label": "walkthrough", "description": "-m 16 -M 32 on tiny64: the 24-byte file dissected in mars1-format.md §12", "min_size": 16, "max_size": 32 }
+  ],
+
+  "groups": [
+    {
+      "label": "grid",
+      "description": "Every fixture image at the 1998 settings, three methods, three rates. The rates bracket the Step 2 sweep (2 = deep partition, 32 = shallow and mostly DC-only), so the golden set contains leaves at every size and both leaf kinds.",
+      "images": [],
+      "variants": ["default"],
+      "methods": ["fisher", "masscenter", "saupe-fisher"],
+      "rms": [2.0, 8.0, 32.0]
+    },
+    {
+      "label": "header-stress",
+      "description": "The header's variable-width fields and the derived bit widths, which the default point never varies. Run on the two non-power-of-two images (where bits_per_coordinate truncation and sub-min_size leaves both bite) plus lena.",
+      "images": ["mixed_129x127", "mixed_250x250", "lena"],
+      "variants": ["alfa5", "beta6", "step8", "min2", "max32"],
+      "methods": ["fisher"],
+      "rms": [8.0]
+    },
+    {
+      "label": "walkthrough",
+      "description": "The one bitstream small enough to print in full.",
+      "images": ["tiny64"],
+      "variants": ["walkthrough"],
+      "methods": ["fisher"],
+      "rms": [8.0]
+    }
+  ]
+}

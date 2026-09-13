@@ -205,3 +205,196 @@ five negative numbers in a column.
 
 Requires the anchor codecs from Step 4. Deliberately left open rather than answered from
 the Mars 1 numbers alone; the prediction stands as recorded.
+
+---
+
+## 2026-09-13 · Step 3 (not yet run) · `.ifs` format spec + golden fixtures
+
+**Provenance of these predictions.** They were formed by reading `image_io.c`,
+`mars_enc.c`, `mars_dec.c` and `coding_func.c`, and written down **before** generating a
+single golden fixture, before running the independent validator, and before running
+`encmars` even once in this step. They are therefore predictions about what the
+*measurement* will show, derived from the source — not from the numbers. Several of them
+contradict the spec sketch in `implementation-plan.md` §4 Step 3, which is the point:
+that sketch is the thing being validated.
+
+### P3.1 — the `dom_x` / `dom_y` bit-width "asymmetry" is not a naming slip
+
+Both the plan (§4 Step 3) and the `mars1-reference` skill say `dom_x` being packed with
+`bits_per_coordinate_h` "looks like a naming slip in the original, but encoder and decoder
+agree, so it is normative. Preserve it exactly; do not fix it."
+
+**Prediction: there is nothing to preserve, because there is no slip.** Mars 1 uses
+`x` for the **row** axis and `y` for the **column** axis everywhere (`image[atx+x][aty+y]`,
+`if(atx >= image_height || aty >= image_width)`). A row coordinate must be sized by the
+image *height*, so `bits_per_coordinate_h` for `dom_x` is correct, not a bug that happens
+to be symmetric across the two binaries.
+
+**Consequence if true:** the instruction "preserve the bug" is actively harmful — a Rust
+implementer who believes `dom_x` is an *x* coordinate in the usual sense will write a
+transposed decoder and then "preserve" a second bug to compensate. The spec must state the
+axis convention once, at the top, and the plan text must be corrected.
+
+**How it will be falsified:** the Python decoder reads `dom_x` as a row offset. If that is
+wrong, decoded images will be visibly transposed and will not match `decmars` at all — a
+loud failure, not a subtle one.
+
+### P3.2 — leaf blocks smaller than `min_size` exist, and their count is pure geometry
+
+The forced-subdivision branch (`size > max_size || atx+size > image_height ||
+aty+size > image_width`) recurses **without consulting `min_size`**, so on an image whose
+dimensions are not multiples of `min_size` the walk drives blocks below `min_size` — down
+to size 1. At size 1 the coding functions take a special path (`tip == 0`) that sets
+`qalfa = zeroalfa` and `qbeta = image[atx][aty]`, i.e. **the raw pixel value**, which is
+then packed into `N_BITBETA = 7` bits and silently loses its top bit.
+
+Because the forced branch depends only on the image dimensions, the counts are independent
+of method, of RMS threshold, and of `min_size` itself. Predicted exactly, at `-m 4 -M 16`:
+
+| fixture | size-1 leaves | size-2 leaves |
+|---|---:|---:|
+| `mixed_129x127` (129×127) | **255** | (not predicted) |
+| `mixed_250x250` (250×250) | **0** | **249** |
+| every 256² and 512² fixture | **0** | **0** |
+
+The 255 is row 126 in full (129 leaves) plus column 128 for rows 0–125 (126 leaves). The
+249 is row 248 at even columns (125) plus column 248 at even rows 0–246 (124).
+
+**Consequence if true:** a parser that assumes leaves are at least `min_size` is wrong on
+two of the twelve fixtures, and a Rust encoder that reproduces the partition but not the
+`tip == 0` path will disagree with Mars 1 on exactly those edge blocks. Neither the plan's
+spec sketch nor the skill mentions this case at all.
+
+### P3.3 — `flat128` at 1998 defaults produces a 392-byte file of 256 identical leaves, and decodes to 129
+
+Everything about this file is predictable in closed form, which makes it the worked example
+the spec needs:
+
+- A constant block has `det = s0·s2 − s1² = 0`, so `alfa = 0` and `qalfa = 0` — every leaf
+  is zero-alfa, so no isometry and no domain coordinates are emitted.
+- The zero-alfa branch (`abs(qalfa − zeroalfa) <= zero_threshold`, true at the default
+  `zero_threshold = 0`) **discards the searched `qbeta` and recomputes it** as
+  `best_beta(…, 0.0)` = `int(0.5 + 128/255 · 127)` = `int(64.249)` = **64**, for every leaf.
+- Reconstructed `beta = 64/127 · 255 = 128.5039…`, so each pixel is
+  `bound(0.5 + 128.5039…)` truncated to `unsigned char` = **129**, not 128.
+- 256×256 with `max_size = 16` gives exactly **256 leaves**, each `1 + 4 + 7 = 12` bits,
+  after a 60-bit header: 3132 bits → **392 bytes**.
+- MSE = 1 exactly, so PSNR = 10·log10(65025) = **48.1308 dB** in both decode modes.
+
+**Prediction: all six numbers land exactly.** If `bytes_written` is not 392 the bit
+accounting in the spec is wrong; if the decode is 128 rather than 129 the `bound()`
+truncation has been mis-stated; if `qbeta` is not 64 the `best_beta` override has been
+missed. This is one prediction with six independent ways to fail, which is why it is worth
+more than the other five put together.
+
+### P3.4 — the last byte is right-padded, not "left-padded"
+
+The plan says "the final byte is left-padded by `pack(-1, …)`". Reading `pack`: after `m`
+bits the accumulator holds them at bit positions `1..m` and `ptr == m+1`, so
+`fputc(sum << (8-ptr))` shifts the first-written bit to position 7. **The data is
+left-aligned and the unused *low-order* bits are zero.** Prediction: `flat128`'s 3132 bits
+are 391 whole bytes plus 4, and byte 392 has its low nibble zero.
+
+### P3.5 — a Python decoder written from the spec will match `decmars` byte-for-byte
+
+The iterative decoder is 2:1 averaging, one multiply-add, `bound(0.5 + v)`, truncation.
+Python floats are IEEE-754 binary64 and so are the C's, so **prediction: exact equality on
+every fixture, zero differing pixels.**
+
+**The one thing that could break it, named in advance:** the pinned build flags
+(`-O2 -fno-fast-math -fno-unsafe-math-optimizations`) do **not** disable FP contraction, so
+clang on aarch64 is free to emit an `fmadd` for `pixel * trans->alfa + trans->beta`. If it
+does, the C result differs from the Python one in the last bit, and `bound(0.5 + x)`
+truncation will occasionally turn that into a whole grey level. So the fallback prediction
+is: differences, if any, are **exactly ±1**, affect **< 0.1%** of pixels, and disappear when
+the Python side uses `math.fma`. Anything else — a difference of 2, or a structured region
+of differences — means the geometry is wrong, not the arithmetic.
+
+### P3.6 — no fixture dimension trips the `ceil(log2(·))` floating-point edge
+
+`bits_per_coordinate` is `ceil(log(dim / SHIFT) / log(2.0))` in binary64 with an integer
+division first, and `virtual_size` is `1 << ceil(log(max_dim) / log(2.0))`. For exact
+powers of two this is one ULP away from returning a value one too large. Prediction: for
+every fixture dimension and every `SHIFT` in the golden set, the double-precision result
+equals the exact integer ceiling — so the hazard is real but unarmed here, and the spec
+should state the closed-form integer rule rather than the float expression.
+
+---
+
+## 2026-09-13 · Step 3 · outcomes
+
+Recorded after generating 142 golden fixtures and validating every one of them with an
+independent Python implementation written from `docs/mars1-format.md`.
+
+### P3.1 — **confirmed**
+
+The Python decoder reads `dom_x` as a row offset and reproduces `decmars -i` byte for byte
+on all 142 fixtures. Had the axis reading been wrong the images would have been transposed
+garbage. The plan's "preserve the bug exactly" is corrected to an axis convention in
+`mars1-format.md` §0 and recorded as D12.
+
+### P3.2 — **confirmed exactly, all four numbers**
+
+| fixture | predicted size-1 | measured | predicted size-2 | measured |
+|---|---:|---:|---:|---:|
+| `mixed_129x127` | 255 | **255** | (not predicted) | 64 |
+| `mixed_250x250` | 0 | **0** | 249 | **249** |
+| 256² and 512² fixtures | 0 | **0** | 0 | **0** |
+
+And the invariance claim held in the strong form: 255 and 249 are identical across all
+three methods, all three rates, and the `alfa5` / `beta6` / `step8` / `max32` variants —
+and 255 survives `-m 2`, because the forced branch never consulted `min_size`.
+
+The `tip == 0` path is real: those 255 leaves each carry a raw pixel truncated to 7 bits.
+
+### P3.3 — **confirmed, all six numbers**
+
+`flat128` at 1998 defaults: 392 bytes, 256 transforms, 256 of them DC-only, every `qbeta`
+= 64, decodes to a constant **129** in both modes, MSE exactly 1 → PSNR 48.1308 dB. The
+prediction had six independent ways to fail and took none of them, which is the strongest
+evidence available that the bit accounting, the `best_beta` override and the `bound()`
+truncation are all stated correctly. All six are now asserted by `just gate-3`.
+
+### P3.4 — **confirmed**
+
+3132 bits = 391 whole bytes plus 4. The final byte is `0x10` = `0001 0000`: four data bits
+left-aligned, low nibble zero. The plan's "left-padded" is backwards.
+
+### P3.5 — **confirmed in the strong form; the named hazard did not fire**
+
+The Python decoder reproduces `decmars -i` **byte for byte on all 142 fixtures**, so the
+fallback prediction (±1 differences from `fmadd` contraction) was not needed: clang did not
+contract the expression, and the gate asserts exact equality rather than a tolerance, so a
+future toolchain that does contract will fail loudly.
+
+One thing the prediction did not anticipate and the implementation forced into the open:
+`0.5 + pixel * alfa + beta` associates **left**, so the 0.5 joins the product before beta.
+Computing `(pixel·alfa + beta) + 0.5` instead is a different binary64 value, and the
+truncation in `bound()` turns some of those into a whole grey level. Written into
+`mars1-format.md` §10.1. Getting this wrong would have produced exactly the "off by one on
+a handful of pixels" signature the prediction attributed to FMA — that is, the prediction
+named the right *symptom* and the wrong *cause*, and would have sent a debugger to check
+the compiler before checking the operator precedence.
+
+### P3.6 — **confirmed**
+
+All 35 combinations of `dim ∈ {64, 127, 129, 250, 256, 512, 768}` and
+`SHIFT ∈ {2, 4, 8, 16, 32}` agree with the exact integer ceiling. The spec states the
+integer rule, so the hazard cannot arm itself later.
+
+### An unpredicted result worth more than most of the predictions
+
+Checks 1–3 of the validator (transform count, DC count, byte-exact re-serialisation) were
+argued in §13 to be blind to the child-recursion order. That argument was tested rather
+than trusted: a mutant validator using NW,NE,SW,SE instead of NW,SW,NE,SE was run over the
+whole set.
+
+- **106 of 142 fixtures caught it.** 92 by the decoded-image check, 46 by the partition
+  render, 14 by the domain-bounds check in §6 (overlapping).
+- **Checks 1–3 caught it zero times**, exactly as §13 claims.
+- **36 fixtures did not catch it at all** — including `sierpinski`, whose partition is
+  symmetric under transpose, so swapping the SW and NE children is genuinely invisible.
+
+The last line is the useful one. A single golden fixture would have had a real chance of
+passing a transposed parser, and `sierpinski` — the most obviously "fractal" image in the
+set — is one of the ones that would have. The size of the set is not decoration.

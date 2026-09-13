@@ -79,6 +79,29 @@ if [ -n "$deleted_tests" ]; then
   fail=1
 fi
 
+# --- 1b. Contract scripts that are not Rust tests -----------------------------
+# Step 3's exit criterion lives entirely in a Python file: `validate-ifs.py` is the
+# independent implementation that decides whether docs/mars1-format.md is a spec. Its
+# checks are as much "the contract" as any #[test], and the Rust-only scan above cannot
+# see them, so it is counted separately.
+CONTRACT_SCRIPTS="scripts/validate-ifs.py"
+py_check_count() {
+  local content
+  if [ -z "$1" ]; then content="$(cat "$2" 2>/dev/null || true)"
+  else content="$(git show "$1:$2" 2>/dev/null || true)"; fi
+  grep -cE 'fails\.append\(|raise SpecViolation' <<< "$content" || true
+}
+for f in $CONTRACT_SCRIPTS; do
+  git diff --quiet "$RANGE" -- "$f" && continue
+  before="$(py_check_count "$MERGE_BASE" "$f")"
+  after="$(py_check_count "" "$f")"
+  # A brand-new file has nothing to have been weakened from.
+  if [ "$before" -gt 0 ] && [ "$after" -lt "$before" ]; then
+    note "$f: checks went $before -> $after"
+    fail=1
+  fi
+done
+
 # --- 2. The central tolerance module -----------------------------------------
 TOLERANCE="crates/mars-core/src/tolerance.rs"
 if git diff --quiet "$RANGE" -- "$TOLERANCE"; then :; else

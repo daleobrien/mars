@@ -500,9 +500,11 @@ impl Mars1Binaries {
                 path: decmars,
             });
         }
+        // Absolute, because every child is spawned with `current_dir` set to a scratch
+        // directory (D3) and a relative binary path would be resolved against *that*.
         Ok(Self {
-            encmars,
-            decmars,
+            encmars: encmars.canonicalize().unwrap_or(encmars),
+            decmars: decmars.canonicalize().unwrap_or(decmars),
             build_info: std::fs::read_to_string(dir.join("build-info.txt")).ok(),
         })
     }
@@ -721,8 +723,16 @@ pub fn encode(
     width: u32,
     height: u32,
     params: &EncodeParams,
+    extra_flags: &[String],
 ) -> Result<EncodeOutcome, Mars1Error> {
-    let args = params.args(width, height, input, output);
+    let mut args = params.args(width, height, input, output);
+    // Flags that change what the encoder *writes beside* the bitstream but not the
+    // bitstream itself — today only `-Q`. Kept out of `EncodeParams` on purpose: that
+    // struct is hashed into `parameter_set_sha256` on every result row (§M7), so adding a
+    // field to it would change the hash of every previously recorded configuration.
+    let tail = args.split_off(args.len() - 2);
+    args.extend(extra_flags.iter().cloned());
+    args.extend(tail);
     let (out, seconds) = run(&bins.encmars, workdir, &args)?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stats = parse_encode_stdout(&stdout)?;

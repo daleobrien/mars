@@ -382,3 +382,182 @@ minimum block size and level count are not independent parameters. Worth knowing
 Step 19 rather than during it.
 
 **Tolerance impact.** None; the new assertions are additions.
+
+---
+
+## D12 · 2026-09-13 · The `dom_x`/`dom_y` bit-width asymmetry is not a bug; `x` is the row axis
+
+**Context.** `implementation-plan.md` §4 Step 3 and the `mars1-reference` skill both flag
+that `dom_x` is packed with `bits_per_coordinate_h` and `dom_y` with
+`bits_per_coordinate_w`, call it "a naming slip in the original", declare it normative
+because encoder and decoder agree, and instruct: **"Preserve it exactly; do not 'fix' it."**
+
+**Finding.** There is no slip. Mars 1 uses `x` for the **row** axis and `y` for the
+**column** axis throughout: `image[atx+x][aty+y]`, `if(atx >= image_height || aty >=
+image_width)`, and the domain enumeration in `index_func.c` is
+`for(i = 0; i < image_height - 2*size + 1; i += SHIFT)` over the `ptr_x` axis. A row
+coordinate is bounded by the image height, so sizing `dom_x` by `bits_per_coordinate_h` is
+simply correct. The decoder confirms it at the pixel level: `iterative_decoding` reads
+`imag[ii][jj]` with `ii` seeded from `dx`, and the first index is the row.
+
+**Why the instruction is worse than the observation.** "Preserve the bug" tells an
+implementer that `dom_x` is an x-coordinate in the ordinary sense and that its bit width is
+wrong. Acting on that produces a transposed decoder, and the natural next move is to add a
+second transposition to compensate — two bugs where there were none, in code whose output
+looks *nearly* right on symmetric images.
+
+**Decision.** `docs/mars1-format.md` opens with §0, the axis convention, before any field
+layout, and uses "row"/"column" throughout rather than `x`/`y`. The
+`mars1-reference` skill's paragraph is corrected. `implementation-plan.md` is **not**
+edited — it is the accepted brief and amending it belongs to a human at a gate (§A8) — so
+the discrepancy is flagged here instead, and Step 5 should read the format document rather
+than the plan's sketch of it.
+
+**What would reverse it.** Nothing; the reading is confirmed by three independent sites in
+the C and by 142 fixtures whose decoded images match `decmars` byte for byte.
+
+**Tolerance impact.** None.
+
+---
+
+## D13 · 2026-09-13 · Leaves below `min_size` are normative, and size-1 leaves store a truncated raw pixel
+
+**Context.** Both the plan's spec sketch and the skill describe the tree as bottoming out
+at `min_size`. Nothing in either mentions smaller blocks.
+
+**Finding.** The forced-subdivision branch —
+`if (size > max_size || atx+size > image_height || aty+size > image_width)` — **does not
+consult `min_size`**. On an image whose dimensions are not multiples of `min_size` it
+recurses past it, down to size 1. Counts are pure geometry, identical across every method,
+rate and variant in the golden set:
+
+| fixture | size-1 leaves | size-2 leaves |
+|---|---:|---:|
+| `mixed_129x127` | 255 | 64 |
+| `mixed_250x250` | 0 | 249 |
+| every 64², 256², 512² fixture | 0 | 0 |
+
+At size 1 all six `*Coding` functions take a `tip == 0` path setting
+`*qbet = image[row][col]` — the **raw pixel value**, 0–255 — which is then packed into
+`N_BITBETA = 7` bits and loses its top bit. A pixel of 200 is stored as 72 and decodes to
+145.
+
+**Decision.** Specified in `mars1-format.md` §5.3 and asserted by `just gate-3`, which
+checks the three counts above and, separately, that no fixture whose dimensions *do* divide
+`min_size` contains any leaf below it — so the rule is pinned in both directions and cannot
+become vacuous.
+
+**What this means for Mars 2.** Step 5's `.ifs` reader must handle sub-`min_size` leaves or
+it will desynchronise on two of the fourteen fixture images. Step 6's encoder does not have
+to reproduce the 7-bit truncation — Mars 1 bit-exactness is explicitly not a goal — but it
+must know the partition rule, or its `transforms` count will differ from the baseline's on
+non-power-of-two images and the §M5 comparison will be against a different denominator.
+
+**Tolerance impact.** None; the new assertions are additions.
+
+---
+
+## D14 · 2026-09-13 · The golden set pins decodes by hash, and is fourteen images rather than five
+
+**Context.** §4 Step 3 asks for "5 fixture images × 3 methods × 3 RMS thresholds: the
+`.ifs` bitstream, both decodes (iterative and pyramidal), and a `manifest.toml`", and §3
+lists `fixtures/` as "golden `.ifs` + decoded `.pgm` — committed, small".
+
+**Two deviations, both deliberate.**
+
+1. **Fourteen images, not five.** §M9's "lena + 4 synthetic" grew to twelve synthetic
+   fixtures at Step 0, and the three that matter most to a *format* spec are among the new
+   ones: `mixed_250x250` and `mixed_129x127` are the only images that exercise
+   `bits_per_coordinate`'s integer truncation, virtual-size padding, and the
+   sub-`min_size` leaves of D13. Adding `lena` and a purpose-built 64² walkthrough image
+   gives 14 × 3 methods × 3 rates = 126, plus 15 header-stress cases that vary `-A -B -d
+   -m -M` (the default point never varies them, so without these the golden set would
+   never test a header field away from its 1998 value) and the walkthrough: **142
+   fixtures, 1.3 MB**.
+
+2. **The decodes are pinned by SHA-256, not committed.** 142 fixtures × 2 decodes × up to
+   256 KB is ~25 MB, which is not "small". The manifest records the SHA-256 of both
+   decodes and of the `-Q` partition rendering; the validator regenerates each from the
+   bitstream and compares hashes. This is the pattern already used for `fixtures/images/`,
+   where the `.raw` inputs are hash-pinned rather than committed.
+
+**What this buys beyond saving disk.** `just gate-3` reads only committed data — 142 `.ifs`
+files and a manifest of integers and hashes. It needs no C binaries, no corpus images and
+no image library, so the format spec stays checkable after this machine's toolchain is
+gone. A stored `.pgm` could also be quietly regenerated to match a broken decoder; a hash
+recorded at the same time as the encoder's own `transforms` count cannot.
+
+**What this rules out.** Eyeballing a golden decode. If one is ever needed, regenerate it
+with `just mars1-fixtures` and diff against the recorded hash.
+
+**Tolerance impact.** None. Every check is an exact equality.
+
+---
+
+## D15 · 2026-09-13 · The searched `qbeta` is discarded whenever `qalfa` quantises to zero
+
+**Context.** The quantisation formulas in the plan and the skill end at `qbeta` and `rms`,
+and read as though the `(qalfa, qbeta)` pair the search found is what gets written.
+
+**Finding.** It is not. `coding_func.c:1169-1172` runs, immediately before packing:
+
+```
+if (abs(qalfa - zeroalfa) <= zero_threshold) {   /* zero_threshold is `-z`, default 0 */
+    qbeta = best_beta(atx, aty, size, 0.0);
+    qalfa = zeroalfa;
+}
+```
+
+At the default this fires on **every** leaf whose `qalfa` quantised to 0, replacing the
+searched offset with a DC-only refit — `int(0.5 + mean/255 · (2^N_BITBETA − 1))`. On
+`flat128` that is 100% of leaves. The split decision, however, uses the RMS of the
+*searched* fit computed before the override, so a block can be kept as a leaf on the
+strength of a domain match that is then thrown away.
+
+**Why it matters and where.** It is correct behaviour — with `alfa = 0` the optimal offset
+is the block mean — but it is invisible in the formulas as usually written, and Step 6's
+Rust encoder that omits it will produce a different `qbeta` on every DC leaf. That is a
+real image difference arising from a step nobody wrote down.
+
+**Decision.** Specified as `mars1-format.md` §8.1, listed in that document's hazard
+checklist, and pinned by the `flat128` closed-form assertion in `just gate-3`: every leaf's
+`qbeta` must be exactly 64, which is `best_beta`'s answer and not the search's.
+
+**Tolerance impact.** None.
+
+---
+
+## D16 · 2026-09-13 · The size of the golden set is load-bearing: one fixture would not have caught a transposed parser
+
+**Context.** `mars1-format.md` §13 claims that three of the validator's five checks —
+transform count, DC-leaf count, byte-exact re-serialisation — are structurally blind to the
+child-recursion order of §5.1, because a parser visiting NW,NE,SW,SE consumes identical
+bits in identical order and emits an identical leaf count. Only the geometry checks can see
+it. That was an argument, not a measurement.
+
+**Finding.** Tested by mutation: a copy of the validator with the child order swapped was
+run over all 142 fixtures.
+
+| | fixtures catching the mutant |
+|---|---:|
+| decoded image vs `decmars -i` | 92 |
+| partition render vs `encmars -Q` | 46 |
+| domain-coordinate bounds check (§6) | 14 |
+| transform count / DC count / re-serialisation | **0** |
+| **any check** | **106 of 142** |
+
+The argument holds exactly: checks 1–3 caught it zero times. But **36 fixtures did not
+catch it at all** — among them `sierpinski`, whose partition is symmetric under transpose,
+so swapping the SW and NE children is genuinely undetectable there.
+
+**Decision.** Record this rather than only the pass. The natural instinct when a set of 142
+fixtures takes 5.7 seconds to validate is to trim it to something representative; this is
+the measurement that says which fixtures are load-bearing and why "representative" is the
+wrong criterion. Any future reduction of the set must re-run this mutation and keep the
+catch rate, not the image count.
+
+It also generalises past this one mutation: an exit criterion should be tested by breaking
+it. "The validator passes" and "the validator can fail" are different claims, and only the
+second one makes the first worth anything.
+
+**Tolerance impact.** None.

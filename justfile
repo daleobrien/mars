@@ -72,6 +72,17 @@ baseline-mars1-report:
 mars1-claims:
     cargo test -p mars-bench --test mars1_reference -- --ignored --nocapture
 
+# --------------------------------------------------- mars 1 format spec (Step 3)
+
+# Regenerate the golden `.ifs` set and its manifest, then the §12 walkthrough.
+# ~4 minutes; needed only when the fixture config or the reference binaries change.
+# Fixtures are contract (§M8): committing a change here needs a FORMAT-CHANGE: trailer.
+mars1-fixtures:
+    cargo build --release -p mars-cli
+    python3 scripts/gen-tiny64.py
+    ./target/release/marsbench mars1-fixtures
+    .venv-crossval/bin/python scripts/validate-ifs.py --walkthrough
+
 # ------------------------------------------------------------------ crossval
 
 # Create the pinned python venv holding the independent reference implementations.
@@ -96,7 +107,7 @@ contract-check base="origin/main":
 
 # Gate A — "we can measure everything, and we have recorded baselines, with zero Mars 2
 # codec code written." Steps 0-4. Run it before starting Group B.
-gate-a: fmt-check clippy test deny mars1 crossval
+gate-a: fmt-check clippy test deny mars1 crossval gate-3
     @echo "gate-a: PASS"
 
 # Step 2 — the Mars 1 baseline is captured, complete, and internally consistent.
@@ -105,6 +116,17 @@ gate-2: test mars1 corpus-gray-check mars1-claims
     cargo build --release -p mars-cli
     ./target/release/marsbench mars1-check
     @echo "gate-2: PASS"
+
+# Step 3 — the format document is a specification, not notes.
+#
+# The whole criterion is that an implementation written from `docs/mars1-format.md` alone
+# agrees with the 1998 binaries. It reads only committed data — the `.ifs` files and the
+# integers and hashes in the manifest — so it needs neither the C binaries nor the corpus,
+# and it will still run when this machine's toolchain is gone.
+gate-3:
+    python3 scripts/gen-tiny64.py --check
+    .venv-crossval/bin/python scripts/validate-ifs.py
+    @echo "gate-3: PASS"
 
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.

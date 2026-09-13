@@ -123,9 +123,18 @@ Tree, walked as quadtree(0, 0, virtual_size):
               dom_y : bits_per_coordinate_w bits   (= domy / SHIFT)
 ```
 
-**The `dom_x`/`dom_y` width asymmetry is normative.** It looks like a naming slip in the
-original, but encoder and decoder agree, so it is part of the format. Preserve it
-exactly; do not "fix" it.
+**The `dom_x`/`dom_y` width asymmetry is not a naming slip.** Mars 1 uses `x` for the
+**row** axis and `y` for the **column** axis everywhere, so `dom_x` is a row coordinate and
+is correctly sized by the image *height*. Reading it as a bug leads to a transposed decoder
+plus a second bug to compensate. See `docs/decisions.md` D12.
+
+**Leaves smaller than `min_size` exist.** The forced-subdivision branch never consults
+`min_size`, so on dimensions that are not multiples of it the walk goes down to size 1, and
+a size-1 leaf stores the raw pixel truncated to `N_BITBETA` bits. `docs/decisions.md` D13.
+
+**`docs/mars1-format.md` is the full specification** — this table is the summary. That
+document is independently validated against 142 golden fixtures by `just gate-3`; this
+table is not.
 
 ## Quantisation (normative, from `coding_func.c`)
 
@@ -145,6 +154,12 @@ rms    = sqrt((t2 − 2·alfa'·t1 − 2·beta'·t0 + alfa'²·s2 + 2·alfa'·be
 
 `s0` = pixel count; `s1`, `s2` = domain sum and sum of squares; `t0`, `t1`, `t2` = range
 sum, cross term, and range sum of squares.
+
+**These formulas are not the last word before packing.** If `|qalfa − zeroalfa| <=
+zero_threshold` (true whenever `qalfa == 0` at the default `-z 0`), the encoder *discards*
+the searched `qbeta` and refits it as `best_beta` = the block mean quantised. The split
+decision still uses the RMS of the searched fit. See `docs/decisions.md` D15 and
+`docs/mars1-format.md` §8.1.
 
 **Mars 2 accumulates these moments as exact integers** (Step 6): domain pixels are 2:1
 contractions, so `D = 4d` is an integer in `0..=1020` and every moment is exact in

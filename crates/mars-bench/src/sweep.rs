@@ -364,6 +364,7 @@ fn run_job(ctx: &RunContext, workdir: &Path, job: &Job) -> Result<Vec<BaselineRo
         job.image.width,
         job.image.height,
         &job.params,
+        &[],
     )?;
 
     let mut rows = Vec::with_capacity(ctx.decode_modes.len());
