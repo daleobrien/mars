@@ -7,7 +7,8 @@
 
 use std::path::PathBuf;
 
-use mars_core::io::{read_image, read_pgm, read_raw, ImageError};
+use mars_core::image::Image;
+use mars_core::io::{read_image, read_pgm, read_ppm, read_raw, write_pnm, ImageError};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("mars-io-{}", std::process::id()));
@@ -81,17 +82,59 @@ fn a_truncated_raster_is_an_error() {
 }
 
 #[test]
-fn p6_and_other_magics_are_rejected() {
+fn p6_ppm_is_read_as_colour_but_a_pgm_with_a_p6_magic_is_rejected() {
+    // .ppm dispatches to the colour P6 reader (added for the Step 4 JPEG 2000 anchor
+    // driver, which needs a PNM round trip with no colour-management metadata --
+    // docs/decisions.md D18).
     let path = scratch("c.ppm");
-    std::fs::write(&path, "P6\n1 1\n255\n\0\0\0").unwrap();
-    // Dispatch is by extension, and .ppm is not a format the harness reads.
+    std::fs::write(&path, "P6\n1 1\n255\n\x01\x02\x03").unwrap();
+    let img = read_image(&path, None).unwrap();
+    assert_eq!((img.width(), img.height()), (1, 1));
+    assert_eq!(
+        img.planes().iter().map(|p| p.get(0, 0)).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+
+    // .pgm dispatch still only accepts P5/P2; a P6 magic there is a real format error,
+    // not silently reinterpreted as colour.
+    let path = scratch("c.pgm");
+    std::fs::write(&path, "P6\n1 1\n255\n\0").unwrap();
+    assert!(matches!(read_pgm(&path), Err(ImageError::Malformed { .. })));
+}
+
+#[test]
+fn an_unrecognised_extension_is_still_rejected() {
+    let path = scratch("c.bmp");
+    std::fs::write(&path, "not an image").unwrap();
     assert!(matches!(
         read_image(&path, None),
         Err(ImageError::UnknownFormat { .. })
     ));
-    let path = scratch("c.pgm");
-    std::fs::write(&path, "P6\n1 1\n255\n\0").unwrap();
-    assert!(matches!(read_pgm(&path), Err(ImageError::Malformed { .. })));
+}
+
+#[test]
+fn write_pnm_then_read_ppm_round_trips_a_colour_image_exactly() {
+    let path = scratch("rt.ppm");
+    let r = mars_core::image::Plane::from_vec(2, 2, vec![1, 2, 3, 4]);
+    let g = mars_core::image::Plane::from_vec(2, 2, vec![10, 20, 30, 40]);
+    let b = mars_core::image::Plane::from_vec(2, 2, vec![100, 200, 250, 5]);
+    let img = Image::rgb(r, g, b);
+    write_pnm(&path, &img).unwrap();
+    let back = read_ppm(&path).unwrap();
+    assert_eq!(back.width(), 2);
+    assert_eq!(back.height(), 2);
+    for (a, b) in img.planes().iter().zip(back.planes()) {
+        assert_eq!(a.as_slice(), b.as_slice());
+    }
+}
+
+#[test]
+fn write_pnm_then_read_pgm_round_trips_a_gray_image_exactly() {
+    let path = scratch("rt.pgm");
+    let img = Image::gray(mars_core::image::Plane::from_vec(2, 2, vec![7, 8, 9, 10]));
+    write_pnm(&path, &img).unwrap();
+    let back = read_pgm(&path).unwrap();
+    assert_eq!(back.as_slice(), &[7, 8, 9, 10]);
 }
 
 #[test]

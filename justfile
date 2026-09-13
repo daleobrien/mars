@@ -83,6 +83,19 @@ mars1-fixtures:
     ./target/release/marsbench mars1-fixtures
     .venv-crossval/bin/python scripts/validate-ifs.py --walkthrough
 
+# --------------------------------------------------------------- anchor codecs (Step 4)
+
+# Sweep the five anchor codecs (JPEG/JPEG2000/WebP/AVIF/JPEG XL) over quality on Kodak,
+# then regenerate the combined report (anchors + the six Mars 1 methods) and BD-rate
+# table against JPEG. ~2 minutes on 6 cores. Requires cjpeg/djpeg, opj_compress/
+# opj_decompress, cwebp/dwebp, avifenc/avifdec, cjxl/djxl on PATH.
+anchors jobs="":
+    cargo build --release -p mars-cli
+    ./target/release/marsbench anchors-sweep {{ if jobs == "" { "" } else { "--jobs " + jobs } }}
+    ./target/release/marsbench anchors-report \
+        --markdown-out results/anchors.md \
+        --html-out results/anchors.html
+
 # ------------------------------------------------------------------ crossval
 
 # Create the pinned python venv holding the independent reference implementations.
@@ -107,7 +120,7 @@ contract-check base="origin/main":
 
 # Gate A — "we can measure everything, and we have recorded baselines, with zero Mars 2
 # codec code written." Steps 0-4. Run it before starting Group B.
-gate-a: fmt-check clippy test deny mars1 crossval gate-3
+gate-a: fmt-check clippy test deny mars1 crossval gate-3 gate-4
     @echo "gate-a: PASS"
 
 # Step 2 — the Mars 1 baseline is captured, complete, and internally consistent.
@@ -127,6 +140,15 @@ gate-3:
     python3 scripts/gen-tiny64.py --check
     .venv-crossval/bin/python scripts/validate-ifs.py
     @echo "gate-3: PASS"
+
+# Step 4 — the anchor curves are recorded, complete, and self-consistent: all five codecs
+# present, >= 6 points per (codec, image) inside 0.1-2.0 bpp, BD-rate against JPEG defined
+# and finite for every other anchor on every image, report files present.
+# Reads the committed results; run `just anchors` first if they are missing.
+gate-4:
+    cargo build --release -p mars-cli
+    ./target/release/marsbench anchors-check
+    @echo "gate-4: PASS"
 
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.

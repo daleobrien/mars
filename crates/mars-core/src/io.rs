@@ -20,7 +20,7 @@ pub enum ImageError {
     },
     #[error("{path}: {reason}")]
     Malformed { path: String, reason: String },
-    #[error("{path}: unsupported format; expected .pgm, .png or .raw/.y/.gray")]
+    #[error("{path}: unsupported format; expected .pgm, .ppm, .png or .raw/.y/.gray")]
     UnknownFormat { path: String },
     #[error("{path}: raw images have no header; dimensions must be given explicitly")]
     RawDimensionsRequired { path: String },
@@ -50,6 +50,7 @@ pub fn read_image(path: &Path, raw_dims: Option<(usize, usize)>) -> Result<Image
         .to_ascii_lowercase();
     match ext.as_str() {
         "pgm" => read_pgm(path).map(Image::gray),
+        "ppm" => read_ppm(path),
         "png" => read_png(path),
         "raw" | "y" | "gray" => {
             let (w, h) = raw_dims.ok_or_else(|| ImageError::RawDimensionsRequired {
@@ -118,6 +119,114 @@ pub fn read_png(path: &Path) -> Result<Image, ImageError> {
             ),
         )),
     }
+}
+
+/// Write an image as a binary PNM: P5 (grayscale) for a one-plane image, P6 (colour) for
+/// a three-plane RGB image, interleaved.
+///
+/// This exists for feeding image data to external tools that must see raw sample values
+/// with **no colour-management metadata** — no `gAMA`, no ICC profile, nothing a tool's
+/// PNG reader might "correct" against. `mars-bench`'s JPEG 2000 anchor driver uses this
+/// because OpenJPEG's PNG reader honours an input's `gAMA` chunk on read but its PNG
+/// writer does not restore it on write, so a plain PNG round trip through
+/// `opj_compress`/`opj_decompress` silently darkens every pixel (roughly squares the
+/// normalised sample value) even losslessly. PNM carries no such chunk, so there is
+/// nothing for the reader to misinterpret. See `docs/decisions.md` D18.
+pub fn write_pnm(path: &Path, image: &crate::image::Image) -> Result<(), ImageError> {
+    let (w, h) = (image.width(), image.height());
+    let planes = image.planes();
+    let mut out = Vec::with_capacity(planes.len() * w * h + 32);
+    match planes.len() {
+        1 => {
+            out.extend_from_slice(format!("P5\n{w} {h}\n255\n").as_bytes());
+            out.extend_from_slice(planes[0].as_slice());
+        }
+        3 => {
+            out.extend_from_slice(format!("P6\n{w} {h}\n255\n").as_bytes());
+            let (r, g, b) = (
+                planes[0].as_slice(),
+                planes[1].as_slice(),
+                planes[2].as_slice(),
+            );
+            for i in 0..w * h {
+                out.push(r[i]);
+                out.push(g[i]);
+                out.push(b[i]);
+            }
+        }
+        n => {
+            return Err(malformed(
+                path,
+                format!("cannot write a PNM with {n} planes; expected 1 or 3"),
+            ))
+        }
+    }
+    fs::write(path, out).map_err(|source| ImageError::Io {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+/// Read a binary (P6) colour PPM.
+///
+/// Written for the same reason `write_pnm` exists: reading back what an external tool
+/// wrote as PNM/PPM, with no gamma or colour-management reinterpretation possible.
+pub fn read_ppm(path: &Path) -> Result<Image, ImageError> {
+    let bytes = fs::read(path).map_err(|source| ImageError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mut cur = Cursor::new(&bytes);
+    let magic = cur.token().ok_or_else(|| malformed(path, "empty file"))?;
+    if magic.as_slice() != b"P6" {
+        return Err(malformed(
+            path,
+            format!(
+                "expected magic P6, got {:?}",
+                String::from_utf8_lossy(&magic)
+            ),
+        ));
+    }
+    let width = cur.uint().ok_or_else(|| malformed(path, "missing width"))?;
+    let height = cur
+        .uint()
+        .ok_or_else(|| malformed(path, "missing height"))?;
+    let maxval = cur
+        .uint()
+        .ok_or_else(|| malformed(path, "missing maxval"))?;
+    if width == 0 || height == 0 {
+        return Err(malformed(path, "zero-sized image"));
+    }
+    if maxval != 255 {
+        return Err(malformed(
+            path,
+            format!("maxval must be 255 for 8-bit metrics, got {maxval}"),
+        ));
+    }
+    cur.skip_single_whitespace()
+        .ok_or_else(|| malformed(path, "missing whitespace after maxval"))?;
+    let want = width * height * 3;
+    let rest = cur.rest();
+    if rest.len() < want {
+        return Err(malformed(
+            path,
+            format!("P6 raster is {} bytes, need {want}", rest.len()),
+        ));
+    }
+    let raster = &rest[..want];
+    let mut r = Vec::with_capacity(width * height);
+    let mut g = Vec::with_capacity(width * height);
+    let mut b = Vec::with_capacity(width * height);
+    for px in raster.chunks_exact(3) {
+        r.push(px[0]);
+        g.push(px[1]);
+        b.push(px[2]);
+    }
+    Ok(Image::rgb(
+        Plane::from_vec(width, height, r),
+        Plane::from_vec(width, height, g),
+        Plane::from_vec(width, height, b),
+    ))
 }
 
 /// Read a binary (P5) or ASCII (P2) PGM.

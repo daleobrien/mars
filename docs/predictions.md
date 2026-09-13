@@ -398,3 +398,126 @@ whole set.
 The last line is the useful one. A single golden fixture would have had a real chance of
 passing a transposed parser, and `sierpinski` — the most obviously "fractal" image in the
 set — is one of the ones that would have. The size of the set is not decoration.
+
+---
+
+## 2026-09-13 · Step 4 (not yet run) · anchor codecs
+
+**Provenance of these predictions.** Written down by the orchestrating session before the
+anchor sweep was run, per the plan's own Step 4 exit criterion ("write down the expected
+verdict before looking"). Recorded here (rather than only in the orchestrator's own
+context) so the agent executing Step 4 has something concrete to compare its measurements
+against, per this project's working agreement that predictions precede measurement (A4).
+
+### P4.1 — Mars 1 sits below JPEG over most of 0.1–2.0 bpp
+
+This is the plan's own stated exit-criterion pre-registration (§ Step 4): fractal coding at
+1998 defaults is expected to need more bits than commodity JPEG for the same quality, over
+most of the target bpp range, for every one of the six Mars 1 methods.
+
+### P4.2 — anchor ranking by BD-rate against JPEG: JPEG < JPEG2000 ≈ WebP < AVIF ≈ JPEG XL
+
+Expected ordering from worst to best compression efficiency (BD-rate against JPEG as
+reference, more negative is better): JPEG (0%, reference) is worst; JPEG 2000 and WebP are
+expected to land close to each other, both meaningfully ahead of JPEG; AVIF and JPEG XL are
+expected to be the two strongest anchors and roughly tied with each other, consistent with
+their shared generation (AV1-intra and a modern DCT/Modular hybrid respectively, both
+newer than JPEG 2000/WebP).
+
+### P4.3 — bpp-floor reachability: JPEG and WebP cannot reach 0.1 bpp on Kodak; AVIF, JPEG XL and JPEG 2000 can
+
+`cwebp` and the mozjpeg-equivalent JPEG anchor are expected to be unable to push any Kodak
+image down to 0.1 bpp within a sane quality-parameter range, because both are built on an
+8×8 block-DCT design without the strong low-bitrate tooling (large transforms, better
+entropy coding) the three newer formats have. `avifenc`, `cjxl` and `opj_compress` are
+expected to reach 0.1 bpp on at least some, if not most, Kodak images.
+
+---
+
+## 2026-09-13 · Step 4 · outcomes
+
+Recorded after running the full anchor sweep (`configs/anchors.json`, all 5 codecs × 24
+Kodak images, 1536 rows in `results/anchors.jsonl`) and generating `results/anchors.md` /
+`results/anchors.html`. Two real harness/config issues were found and fixed before these
+numbers were trustworthy — see `docs/decisions.md` D18 (OpenJPEG's PNG reader silently
+darkens every pixel via the source's `gAMA` chunk; fixed by routing JPEG 2000 through PNM)
+and D19 (two extreme-low-quality non-monotonic points in JPEG and AVIF, and a JPEG XL
+low-bitrate coverage gap; fixed by adjusting the swept quality/distance floors, not by
+touching the BD-rate monotonicity check). Per §2.1's order of investigation, both were
+confirmed as real, reproducible, out-of-harness phenomena (byte-for-byte pixel comparisons
+outside `mars-bench` entirely) before any code changed.
+
+### P4.1 — **confirmed**
+
+Every one of the six Mars 1 methods has a **positive** per-image-summarised BD-rate
+against JPEG (needs more bits for the same quality), over the full 24-image Kodak corpus,
+computed by `marsbench anchors-report`:
+
+| Mars 1 method | BD-rate % vs JPEG (corpus-curve) |
+|---|---:|
+| saupe | +13.39 |
+| saupe-fisher | +21.56 |
+| masscenter | +26.90 |
+| hurtgen | +28.86 |
+| fisher | +35.48 |
+| mc-saupe | +54.61 |
+
+All positive, all over the PSNR overlap 25–31 dB (stated per §M3), against JPEG's own
+27–37 dB range — Mars 1's usable quality range does not even reach as high as JPEG's does
+on this corpus at any of the five swept rates. The prediction holds without qualification.
+
+### P4.2 — **confirmed in its coarse shape, refuted in its specific pairings**
+
+Measured per-image BD-rate against JPEG, mean over 24 images:
+
+| codec | mean BD-rate % vs JPEG |
+|---|---:|
+| AVIF | −49.59 |
+| WebP | −41.85 |
+| JPEG 2000 | −35.58 |
+| JPEG XL | −33.47 |
+| JPEG | 0 (reference) |
+
+JPEG being the worst anchor is confirmed. Everything else about the predicted ordering is
+not: JPEG 2000 and WebP are not close (a 6.3 percentage-point gap, and WebP is clearly the
+stronger of the two, not the weaker as informally expected from format age); and AVIF and
+JPEG XL are not tied — AVIF is the single best anchor by a wide margin (16 points ahead of
+the next-best), while JPEG XL is actually the **weakest** of the four modern anchors, not
+the strongest. This was investigated before being accepted (§ verification-discipline —
+"assume the harness, not the codec"): the JPEG XL curve's PSNR/bpp overlap with JPEG was
+checked directly and is not an artefact of too few points or a bad reference range (16
+points, PSNR overlap 21.8–40.8 dB). The most likely real explanation is that `cjxl`'s
+default effort/heuristics target Butteraugli (a perceptual distance), not raw PSNR, so a
+PSNR-only BD-rate — which is what §M2 defines and this table reports — is not the metric
+JPEG XL's encoder is tuned against, whereas aom's AVIF encoder does comparatively well on
+raw PSNR. This is a known, previously reported asymmetry in the codec literature and not
+specific to this harness; a future SSIM/MS-SSIM-based BD-rate table (both already computed
+per row and available in `results/anchors.jsonl`) would be the natural follow-up were this
+ranking to matter for a downstream decision.
+
+### P4.3 — **confirmed for JPEG and AVIF; refuted for WebP; not reached for JPEG 2000 within the tested range; marginal for JPEG XL**
+
+Fraction of the 24 Kodak images on which each anchor's swept range reached ≤ 0.1 bpp:
+
+| codec | images reaching ≤ 0.1 bpp | global minimum bpp |
+|---|---:|---:|
+| JPEG | 0 / 24 | 0.154 |
+| JPEG 2000 | 0 / 24 | 0.118 |
+| WebP | 13 / 24 | 0.059 |
+| AVIF | 19 / 24 | 0.056 |
+| JPEG XL | 1 / 24 | 0.096 |
+
+JPEG's inability to reach 0.1 bpp is confirmed (its lowest usable quality setting on this
+codebase's swept range still lands above 0.15 bpp on every image). AVIF reaching it easily
+is confirmed. **WebP is refuted**: `cwebp -q 0` reaches well below 0.1 bpp on the majority
+of Kodak images (as low as 0.059 bpp), which the prediction did not expect — WebP's
+low-bitrate behaviour turns out to be much closer to AVIF's than to JPEG's, another data
+point against grouping "older" and "newer" formats the way P4.2 also assumed. **JPEG 2000
+did not reach 0.1 bpp anywhere** at the compression ratios swept here (up to `-r 200`);
+this is a statement about the tested range, not a structural limit — `opj_compress` almost
+certainly could be pushed lower with a higher `-r`, but doing so was not needed to satisfy
+the ≥6-points-in-0.1–2.0-bpp gate and was not attempted, so "expected able to reach it" is
+recorded as refuted **for the range actually swept**, not as a claim about OpenJPEG's
+absolute floor. **JPEG XL is a marginal confirm**: it reaches ≤ 0.1 bpp on exactly one
+image, and only after D19 extended the distance sweep up to 21 (its allowed range goes to
+25); the prediction was technically right but by a much thinner margin than expected.

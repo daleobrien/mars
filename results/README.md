@@ -66,6 +66,14 @@ baseline.** 9360 rows: 4680 encodes (24 Kodak images + 12 fixtures × 6 speed-up
 Read the report's §4 before quoting any `min_size = 2` number: under pyramidal decode those
 curves run backwards, for the reason in `docs/decisions.md` D11.
 
+`anchors.jsonl` · `anchors.md` · `anchors.html` — **the Step 4 anchor codecs.** 1536 rows:
+5 CLI-driven anchor codecs (JPEG via libjpeg-turbo, JPEG 2000 via OpenJPEG, WebP, AVIF,
+JPEG XL) swept over quality on all 24 Kodak colour images, at least 6 points per
+`(codec, image)` inside 0.1–2.0 bpp. Unlike the Step 2 baseline, these run on the original
+colour PNGs directly (`docs/decisions.md` D17). Regenerate with `just anchors`; check with
+`just gate-4`. Read `docs/decisions.md` D18 before trusting any JPEG 2000 number produced
+by a different pipeline: `opj_compress`'s PNG reader silently darkens every pixel via the
+source's `gAMA` chunk, worked around here by routing through PNM.
 
 `harness-smoke.jsonl` · `harness-smoke.md` · `harness-smoke.html` — **not a baseline.**
 Ten rows from real Mars 1 encodes of Lena (MassCenter and Fisher, `-r 2,4,8,16,32`,
@@ -80,6 +88,7 @@ images, and the real baseline arrives at Step 2.
 |---|---|---|
 | `quality` | One `Measurement`: MSE/PSNR per plane, PSNR-Y/Cb/Cr/YUV, SSIM, MS-SSIM, coded bytes, bpp, and the pinned metric definitions inline. | Step 1 |
 | `baseline-mars1` | Mars 1 encode/decode under the harness: `transforms`, `comparisons`, `zero_alfa_transform`, bytes, decode mode **and iteration count** (D9/D11 — the mode alone does not determine the reconstruction). | Step 2 |
+| `anchors` | One anchor-codec quality-sweep point: codec, swept param and what it means, coded bytes, the full `Measurement`, exact encode/decode command lines, and the codec's own version string. | Step 4 |
 | `timing` | Median + MAD over N ≥ 5 A/B-interleaved runs. | later |
 
 A row carries its own metric definitions in `data.definitions`. That is redundant with

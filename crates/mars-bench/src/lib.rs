@@ -5,6 +5,8 @@
 //! append-only result store (§M7). The metric mathematics itself lives in `mars-core`,
 //! so that exactly one implementation exists.
 
+pub mod anchors;
+pub mod anchors_report;
 pub mod bdrate;
 pub mod mars1;
 pub mod mars1_fixtures;

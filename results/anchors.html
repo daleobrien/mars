@@ -1,0 +1,126 @@
+<!doctype html><meta charset="utf-8"><title>Mars 2 -- Kodak rate-distortion: five anchor codecs + six Mars 1 methods</title>
+<style>body{font:14px/1.5 ui-sans-serif,system-ui,sans-serif;margin:2rem auto;max-width:56rem;padding:0 1rem}table{border-collapse:collapse;margin:1rem 0;font-variant-numeric:tabular-nums}th,td{border-bottom:1px solid #0002;padding:.3rem .6rem;text-align:left}td.n{text-align:right}.err{color:#b00}.prov{color:#555;font-size:.9em}svg.rd{max-width:100%;height:auto;border:1px solid #0002;border-radius:4px;background:#fff}.grid{stroke:#0001}.tick,.legend,.axis{font:11px ui-sans-serif,system-ui,sans-serif;fill:#444}</style>
+<h1>Mars 2 -- Kodak rate-distortion: five anchor codecs + six Mars 1 methods</h1>
+<p class=prov>1536 anchor rows from `results/anchors.jsonl` (+ 9360 Mars 1 rows from `results/baseline-mars1.jsonl`) · report at be7f5ee0b422-dirty · harness 0.1.0 · Apple M3 Pro (6 P / 6 E cores) · 2026-09-13T09:10:01Z
+
+&lt;details&gt;&lt;summary&gt;Anchor codec versions&lt;/summary&gt;
+
+```
+avif: Version: 1.4.2 (dav1d [dec]:1.5.4, aom [enc/dec]:3.15.0)
+jpeg2000: It compresses various image formats with the JPEG 2000 algorithm.
+jpeg: libjpeg-turbo version 3.2.0 (build 20260630)
+jpegxl: cjxl v0.8.2 0.8.2 [SSE4,SSSE3]
+webp: 1.6.0
+```
+
+&lt;/details&gt;</p>
+<svg class=rd viewBox="0 0 720 440" width="100%" role=img aria-label="rate-distortion curves"><line class=grid x1="64.0" y1="392.0" x2="704.0" y2="392.0"/><text class=tick x="56.0" y="396.0" text-anchor=end>21.8</text><line class=grid x1="64.0" y1="298.0" x2="704.0" y2="298.0"/><text class=tick x="56.0" y="302.0" text-anchor=end>29.6</text><line class=grid x1="64.0" y1="204.0" x2="704.0" y2="204.0"/><text class=tick x="56.0" y="208.0" text-anchor=end>37.4</text><line class=grid x1="64.0" y1="110.0" x2="704.0" y2="110.0"/><text class=tick x="56.0" y="114.0" text-anchor=end>45.2</text><line class=grid x1="64.0" y1="16.0" x2="704.0" y2="16.0"/><text class=tick x="56.0" y="20.0" text-anchor=end>53.0</text><line class=grid x1="64.0" y1="16.0" x2="64.0" y2="392.0"/><text class=tick x="64.0" y="410.0" text-anchor=middle>0.062</text><line class=grid x1="224.0" y1="16.0" x2="224.0" y2="392.0"/><text class=tick x="224.0" y="410.0" text-anchor=middle>0.207</text><line class=grid x1="384.0" y1="16.0" x2="384.0" y2="392.0"/><text class=tick x="384.0" y="410.0" text-anchor=middle>0.693</text><line class=grid x1="544.0" y1="16.0" x2="544.0" y2="392.0"/><text class=tick x="544.0" y="410.0" text-anchor=middle>2.320</text><line class=grid x1="704.0" y1="16.0" x2="704.0" y2="392.0"/><text class=tick x="704.0" y="410.0" text-anchor=middle>7.768</text><text class=axis x="384.0" y="432.0" text-anchor=middle>bpp (log scale)</text><text class=axis transform="translate(14,204.0) rotate(-90)" text-anchor=middle>PSNR-Y (dB)</text><polyline fill=none stroke="#4269d0" stroke-width=2 points="98.29,336.40 113.11,332.65 128.26,328.02 150.99,321.68 186.52,311.30 216.30,302.03 251.38,289.32 299.15,271.36 351.21,247.34 406.83,218.71 465.52,178.69 508.62,146.12"/><circle cx="98.29" cy="336.40" r=3 fill="#4269d0"/><circle cx="113.11" cy="332.65" r=3 fill="#4269d0"/><circle cx="128.26" cy="328.02" r=3 fill="#4269d0"/><circle cx="150.99" cy="321.68" r=3 fill="#4269d0"/><circle cx="186.52" cy="311.30" r=3 fill="#4269d0"/><circle cx="216.30" cy="302.03" r=3 fill="#4269d0"/><circle cx="251.38" cy="289.32" r=3 fill="#4269d0"/><circle cx="299.15" cy="271.36" r=3 fill="#4269d0"/><circle cx="351.21" cy="247.34" r=3 fill="#4269d0"/><circle cx="406.83" cy="218.71" r=3 fill="#4269d0"/><circle cx="465.52" cy="178.69" r=3 fill="#4269d0"/><circle cx="508.62" cy="146.12" r=3 fill="#4269d0"/><rect x="544.0" y="23.0" width=10 height=10 fill="#4269d0"/><text class=legend x="560.0" y="32.0">avif</text><polyline fill=none stroke="#efb118" stroke-width=2 points="205.30,371.86 233.53,346.75 267.21,325.34 300.51,308.99 330.32,295.06 355.63,283.06 377.56,272.61 400.66,261.24 419.47,251.62 448.37,235.78 492.35,208.06"/><circle cx="205.30" cy="371.86" r=3 fill="#efb118"/><circle cx="233.53" cy="346.75" r=3 fill="#efb118"/><circle cx="267.21" cy="325.34" r=3 fill="#efb118"/><circle cx="300.51" cy="308.99" r=3 fill="#efb118"/><circle cx="330.32" cy="295.06" r=3 fill="#efb118"/><circle cx="355.63" cy="283.06" r=3 fill="#efb118"/><circle cx="377.56" cy="272.61" r=3 fill="#efb118"/><circle cx="400.66" cy="261.24" r=3 fill="#efb118"/><circle cx="419.47" cy="251.62" r=3 fill="#efb118"/><circle cx="448.37" cy="235.78" r=3 fill="#efb118"/><circle cx="492.35" cy="208.06" r=3 fill="#efb118"/><rect x="544.0" y="41.0" width=10 height=10 fill="#efb118"/><text class=legend x="560.0" y="50.0">jpeg</text><polyline fill=none stroke="#ff725c" stroke-width=2 points="151.44,327.78 198.69,314.74 243.45,300.56 290.43,283.69 335.16,265.38 382.34,243.23 426.89,219.72 470.49,194.63 513.63,167.53 562.33,135.44 616.00,96.61 669.71,36.14"/><circle cx="151.44" cy="327.78" r=3 fill="#ff725c"/><circle cx="198.69" cy="314.74" r=3 fill="#ff725c"/><circle cx="243.45" cy="300.56" r=3 fill="#ff725c"/><circle cx="290.43" cy="283.69" r=3 fill="#ff725c"/><circle cx="335.16" cy="265.38" r=3 fill="#ff725c"/><circle cx="382.34" cy="243.23" r=3 fill="#ff725c"/><circle cx="426.89" cy="219.72" r=3 fill="#ff725c"/><circle cx="470.49" cy="194.63" r=3 fill="#ff725c"/><circle cx="513.63" cy="167.53" r=3 fill="#ff725c"/><circle cx="562.33" cy="135.44" r=3 fill="#ff725c"/><circle cx="616.00" cy="96.61" r=3 fill="#ff725c"/><circle cx="669.71" cy="36.14" r=3 fill="#ff725c"/><rect x="544.0" y="59.0" width=10 height=10 fill="#ff725c"/><text class=legend x="560.0" y="68.0">jpeg2000</text><polyline fill=none stroke="#6cc5b0" stroke-width=2 points="184.98,331.07 220.25,318.51 256.69,304.87 278.14,295.70 298.40,286.92 319.53,277.33 342.08,265.54 366.73,252.41 390.99,238.43 413.05,224.65 435.21,210.11 455.91,195.65 481.75,176.82 505.84,157.98 537.75,131.01 584.23,87.83"/><circle cx="184.98" cy="331.07" r=3 fill="#6cc5b0"/><circle cx="220.25" cy="318.51" r=3 fill="#6cc5b0"/><circle cx="256.69" cy="304.87" r=3 fill="#6cc5b0"/><circle cx="278.14" cy="295.70" r=3 fill="#6cc5b0"/><circle cx="298.40" cy="286.92" r=3 fill="#6cc5b0"/><circle cx="319.53" cy="277.33" r=3 fill="#6cc5b0"/><circle cx="342.08" cy="265.54" r=3 fill="#6cc5b0"/><circle cx="366.73" cy="252.41" r=3 fill="#6cc5b0"/><circle cx="390.99" cy="238.43" r=3 fill="#6cc5b0"/><circle cx="413.05" cy="224.65" r=3 fill="#6cc5b0"/><circle cx="435.21" cy="210.11" r=3 fill="#6cc5b0"/><circle cx="455.91" cy="195.65" r=3 fill="#6cc5b0"/><circle cx="481.75" cy="176.82" r=3 fill="#6cc5b0"/><circle cx="505.84" cy="157.98" r=3 fill="#6cc5b0"/><circle cx="537.75" cy="131.01" r=3 fill="#6cc5b0"/><circle cx="584.23" cy="87.83" r=3 fill="#6cc5b0"/><rect x="544.0" y="77.0" width=10 height=10 fill="#6cc5b0"/><text class=legend x="560.0" y="86.0">jpegxl</text><polyline fill=none stroke="#3ca951" stroke-width=2 points="200.19,350.51 316.93,319.64 409.12,292.76 455.11,282.85 484.17,280.66"/><circle cx="200.19" cy="350.51" r=3 fill="#3ca951"/><circle cx="316.93" cy="319.64" r=3 fill="#3ca951"/><circle cx="409.12" cy="292.76" r=3 fill="#3ca951"/><circle cx="455.11" cy="282.85" r=3 fill="#3ca951"/><circle cx="484.17" cy="280.66" r=3 fill="#3ca951"/><rect x="544.0" y="95.0" width=10 height=10 fill="#3ca951"/><text class=legend x="560.0" y="104.0">mars1-fisher</text><polyline fill=none stroke="#a463f2" stroke-width=2 points="197.02,349.21 312.51,317.92 406.58,289.97 454.02,279.08 483.60,276.66"/><circle cx="197.02" cy="349.21" r=3 fill="#a463f2"/><circle cx="312.51" cy="317.92" r=3 fill="#a463f2"/><circle cx="406.58" cy="289.97" r=3 fill="#a463f2"/><circle cx="454.02" cy="279.08" r=3 fill="#a463f2"/><circle cx="483.60" cy="276.66" r=3 fill="#a463f2"/><rect x="544.0" y="113.0" width=10 height=10 fill="#a463f2"/><text class=legend x="560.0" y="122.0">mars1-hurtgen</text><polyline fill=none stroke="#97bbf5" stroke-width=2 points="197.39,348.36 311.57,317.15 405.63,289.03 453.41,277.80 482.91,275.32"/><circle cx="197.39" cy="348.36" r=3 fill="#97bbf5"/><circle cx="311.57" cy="317.15" r=3 fill="#97bbf5"/><circle cx="405.63" cy="289.03" r=3 fill="#97bbf5"/><circle cx="453.41" cy="277.80" r=3 fill="#97bbf5"/><circle cx="482.91" cy="275.32" r=3 fill="#97bbf5"/><rect x="544.0" y="131.0" width=10 height=10 fill="#97bbf5"/><text class=legend x="560.0" y="140.0">mars1-masscenter</text><polyline fill=none stroke="#4269d0" stroke-width=2 points="211.53,352.93 327.61,324.21 414.21,302.02 457.62,294.29 485.88,292.66"/><circle cx="211.53" cy="352.93" r=3 fill="#4269d0"/><circle cx="327.61" cy="324.21" r=3 fill="#4269d0"/><circle cx="414.21" cy="302.02" r=3 fill="#4269d0"/><circle cx="457.62" cy="294.29" r=3 fill="#4269d0"/><circle cx="485.88" cy="292.66" r=3 fill="#4269d0"/><rect x="544.0" y="149.0" width=10 height=10 fill="#4269d0"/><text class=legend x="560.0" y="158.0">mars1-mc-saupe</text><polyline fill=none stroke="#efb118" stroke-width=2 points="188.43,346.22 302.51,313.82 400.31,281.55 450.82,267.66 481.23,264.31"/><circle cx="188.43" cy="346.22" r=3 fill="#efb118"/><circle cx="302.51" cy="313.82" r=3 fill="#efb118"/><circle cx="400.31" cy="281.55" r=3 fill="#efb118"/><circle cx="450.82" cy="267.66" r=3 fill="#efb118"/><circle cx="481.23" cy="264.31" r=3 fill="#efb118"/><rect x="544.0" y="167.0" width=10 height=10 fill="#efb118"/><text class=legend x="560.0" y="176.0">mars1-saupe</text><polyline fill=none stroke="#ff725c" stroke-width=2 points="193.75,348.08 309.63,315.70 403.96,284.82 452.32,272.32 482.40,269.34"/><circle cx="193.75" cy="348.08" r=3 fill="#ff725c"/><circle cx="309.63" cy="315.70" r=3 fill="#ff725c"/><circle cx="403.96" cy="284.82" r=3 fill="#ff725c"/><circle cx="452.32" cy="272.32" r=3 fill="#ff725c"/><circle cx="482.40" cy="269.34" r=3 fill="#ff725c"/><rect x="544.0" y="185.0" width=10 height=10 fill="#ff725c"/><text class=legend x="560.0" y="194.0">mars1-saupe-fisher</text><polyline fill=none stroke="#6cc5b0" stroke-width=2 points="138.68,335.06 194.30,318.06 210.55,313.12 232.72,305.96 254.29,298.70 271.59,292.56 294.70,283.77 313.61,276.07 338.64,265.13 364.70,251.84 389.45,237.98 414.78,223.05 458.53,194.03"/><circle cx="138.68" cy="335.06" r=3 fill="#6cc5b0"/><circle cx="194.30" cy="318.06" r=3 fill="#6cc5b0"/><circle cx="210.55" cy="313.12" r=3 fill="#6cc5b0"/><circle cx="232.72" cy="305.96" r=3 fill="#6cc5b0"/><circle cx="254.29" cy="298.70" r=3 fill="#6cc5b0"/><circle cx="271.59" cy="292.56" r=3 fill="#6cc5b0"/><circle cx="294.70" cy="283.77" r=3 fill="#6cc5b0"/><circle cx="313.61" cy="276.07" r=3 fill="#6cc5b0"/><circle cx="338.64" cy="265.13" r=3 fill="#6cc5b0"/><circle cx="364.70" cy="251.84" r=3 fill="#6cc5b0"/><circle cx="389.45" cy="237.98" r=3 fill="#6cc5b0"/><circle cx="414.78" cy="223.05" r=3 fill="#6cc5b0"/><circle cx="458.53" cy="194.03" r=3 fill="#6cc5b0"/><rect x="544.0" y="203.0" width=10 height=10 fill="#6cc5b0"/><text class=legend x="560.0" y="212.0">webp</text></svg>
+<h2>Operating points</h2><table><thead><tr><th>curve<th>bpp<th>PSNR (dB)</thead><tbody>
+<tr><td>avif<td class=n>0.0800<td class=n>26.398
+<tr><td>avif<td class=n>0.0895<td class=n>26.709
+<tr><td>avif<td class=n>0.1004<td class=n>27.093
+<tr><td>avif<td class=n>0.1192<td class=n>27.619
+<tr><td>avif<td class=n>0.1559<td class=n>28.479
+<tr><td>avif<td class=n>0.1952<td class=n>29.247
+<tr><td>avif<td class=n>0.2544<td class=n>30.301
+<tr><td>avif<td class=n>0.3649<td class=n>31.790
+<tr><td>avif<td class=n>0.5407<td class=n>33.781
+<tr><td>avif<td class=n>0.8231<td class=n>36.155
+<tr><td>avif<td class=n>1.2822<td class=n>39.472
+<tr><td>avif<td class=n>1.7756<td class=n>42.173
+<tr><td>jpeg<td class=n>0.1796<td class=n>23.458
+<tr><td>jpeg<td class=n>0.2223<td class=n>25.540
+<tr><td>jpeg<td class=n>0.2867<td class=n>27.315
+<tr><td>jpeg<td class=n>0.3687<td class=n>28.671
+<tr><td>jpeg<td class=n>0.4618<td class=n>29.825
+<tr><td>jpeg<td class=n>0.5591<td class=n>30.820
+<tr><td>jpeg<td class=n>0.6598<td class=n>31.687
+<tr><td>jpeg<td class=n>0.7856<td class=n>32.629
+<tr><td>jpeg<td class=n>0.9055<td class=n>33.427
+<tr><td>jpeg<td class=n>1.1265<td class=n>34.740
+<tr><td>jpeg<td class=n>1.5702<td class=n>37.038
+<tr><td>jpeg2000<td class=n>0.1196<td class=n>27.112
+<tr><td>jpeg2000<td class=n>0.1709<td class=n>28.194
+<tr><td>jpeg2000<td class=n>0.2396<td class=n>29.369
+<tr><td>jpeg2000<td class=n>0.3417<td class=n>30.768
+<tr><td>jpeg2000<td class=n>0.4790<td class=n>32.286
+<tr><td>jpeg2000<td class=n>0.6841<td class=n>34.122
+<tr><td>jpeg2000<td class=n>0.9578<td class=n>36.071
+<tr><td>jpeg2000<td class=n>1.3313<td class=n>38.151
+<tr><td>jpeg2000<td class=n>1.8441<td class=n>40.398
+<tr><td>jpeg2000<td class=n>2.6640<td class=n>43.058
+<tr><td>jpeg2000<td class=n>3.9958<td class=n>46.277
+<tr><td>jpeg2000<td class=n>5.9954<td class=n>51.290
+<tr><td>jpegxl<td class=n>0.1541<td class=n>26.840
+<tr><td>jpegxl<td class=n>0.2011<td class=n>27.881
+<tr><td>jpegxl<td class=n>0.2648<td class=n>29.012
+<tr><td>jpegxl<td class=n>0.3114<td class=n>29.772
+<tr><td>jpegxl<td class=n>0.3629<td class=n>30.500
+<tr><td>jpegxl<td class=n>0.4256<td class=n>31.295
+<tr><td>jpegxl<td class=n>0.5047<td class=n>32.273
+<tr><td>jpegxl<td class=n>0.6080<td class=n>33.361
+<tr><td>jpegxl<td class=n>0.7303<td class=n>34.520
+<tr><td>jpegxl<td class=n>0.8627<td class=n>35.663
+<tr><td>jpegxl<td class=n>1.0199<td class=n>36.867
+<tr><td>jpegxl<td class=n>1.1924<td class=n>38.067
+<tr><td>jpegxl<td class=n>1.4495<td class=n>39.628
+<tr><td>jpegxl<td class=n>1.7387<td class=n>41.189
+<tr><td>jpegxl<td class=n>2.2127<td class=n>43.426
+<tr><td>jpegxl<td class=n>3.1434<td class=n>47.005
+<tr><td>mars1-fisher<td class=n>0.1728<td class=n>25.229
+<tr><td>mars1-fisher<td class=n>0.4174<td class=n>27.787
+<tr><td>mars1-fisher<td class=n>0.8374<td class=n>30.016
+<tr><td>mars1-fisher<td class=n>1.1853<td class=n>30.838
+<tr><td>mars1-fisher<td class=n>1.4762<td class=n>31.019
+<tr><td>mars1-hurtgen<td class=n>0.1687<td class=n>25.336
+<tr><td>mars1-hurtgen<td class=n>0.4037<td class=n>27.930
+<tr><td>mars1-hurtgen<td class=n>0.8215<td class=n>30.247
+<tr><td>mars1-hurtgen<td class=n>1.1756<td class=n>31.150
+<tr><td>mars1-hurtgen<td class=n>1.4698<td class=n>31.351
+<tr><td>mars1-masscenter<td class=n>0.1692<td class=n>25.406
+<tr><td>mars1-masscenter<td class=n>0.4008<td class=n>27.994
+<tr><td>mars1-masscenter<td class=n>0.8157<td class=n>30.325
+<tr><td>mars1-masscenter<td class=n>1.1701<td class=n>31.256
+<tr><td>mars1-masscenter<td class=n>1.4622<td class=n>31.461
+<tr><td>mars1-mc-saupe<td class=n>0.1883<td class=n>25.028
+<tr><td>mars1-mc-saupe<td class=n>0.4524<td class=n>27.409
+<tr><td>mars1-mc-saupe<td class=n>0.8703<td class=n>29.248
+<tr><td>mars1-mc-saupe<td class=n>1.2080<td class=n>29.889
+<tr><td>mars1-mc-saupe<td class=n>1.4954<td class=n>30.024
+<tr><td>mars1-saupe<td class=n>0.1581<td class=n>25.584
+<tr><td>mars1-saupe<td class=n>0.3743<td class=n>28.270
+<tr><td>mars1-saupe<td class=n>0.7835<td class=n>30.945
+<tr><td>mars1-saupe<td class=n>1.1475<td class=n>32.097
+<tr><td>mars1-saupe<td class=n>1.4438<td class=n>32.375
+<tr><td>mars1-saupe-fisher<td class=n>0.1646<td class=n>25.429
+<tr><td>mars1-saupe-fisher<td class=n>0.3950<td class=n>28.114
+<tr><td>mars1-saupe-fisher<td class=n>0.8054<td class=n>30.674
+<tr><td>mars1-saupe-fisher<td class=n>1.1606<td class=n>31.710
+<tr><td>mars1-saupe-fisher<td class=n>1.4566<td class=n>31.957
+<tr><td>webp<td class=n>0.1086<td class=n>26.509
+<tr><td>webp<td class=n>0.1653<td class=n>27.919
+<tr><td>webp<td class=n>0.1869<td class=n>28.328
+<tr><td>webp<td class=n>0.2209<td class=n>28.921
+<tr><td>webp<td class=n>0.2600<td class=n>29.523
+<tr><td>webp<td class=n>0.2963<td class=n>30.033
+<tr><td>webp<td class=n>0.3529<td class=n>30.761
+<tr><td>webp<td class=n>0.4070<td class=n>31.399
+<tr><td>webp<td class=n>0.4918<td class=n>32.306
+<tr><td>webp<td class=n>0.5987<td class=n>33.408
+<tr><td>webp<td class=n>0.7218<td class=n>34.557
+<tr><td>webp<td class=n>0.8740<td class=n>35.795
+<tr><td>webp<td class=n>1.2163<td class=n>38.201
+</tbody></table>
+<h2>BD-rate vs <code>jpeg</code></h2>
+<table><thead><tr><th>curve<th>BD-rate %<th>BD-PSNR dB<th>PSNR interval (dB)<th>bpp interval</thead><tbody>
+<tr><td>avif<td class=n>-49.50<td class=n>+3.568<td>26.40 – 37.04<td>0.0800 – 1.5702
+<tr><td>jpeg2000<td class=n>-38.35<td class=n>+2.600<td>27.11 – 37.04<td>0.1196 – 1.5702
+<tr><td>jpegxl<td class=n>-33.19<td class=n>+2.454<td>26.84 – 37.04<td>0.1541 – 1.5702
+<tr><td>mars1-fisher<td class=n>+35.48<td class=n>-1.926<td>25.23 – 31.02<td>0.1728 – 1.4762
+<tr><td>mars1-hurtgen<td class=n>+28.86<td class=n>-1.658<td>25.34 – 31.35<td>0.1687 – 1.4698
+<tr><td>mars1-masscenter<td class=n>+26.90<td class=n>-1.559<td>25.41 – 31.46<td>0.1692 – 1.4622
+<tr><td>mars1-mc-saupe<td class=n>+54.61<td class=n>-2.739<td>25.03 – 30.02<td>0.1883 – 1.4954
+<tr><td>mars1-saupe<td class=n>+13.39<td class=n>-0.923<td>25.58 – 32.37<td>0.1581 – 1.4438
+<tr><td>mars1-saupe-fisher<td class=n>+21.56<td class=n>-1.287<td>25.43 – 31.96<td>0.1646 – 1.4566
+<tr><td>webp<td class=n>-38.90<td class=n>+2.663<td>26.51 – 37.04<td>0.1086 – 1.5702
+</tbody></table>

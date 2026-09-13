@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use mars_bench::anchors::{self, AnchorsConfig};
+use mars_bench::anchors_report;
 use mars_bench::bdrate::{bd_metrics, RdCurve, RdPoint};
 use mars_bench::mars1::Mars1Binaries;
 use mars_bench::mars1_fixtures::{self, FixtureConfig, FIXTURE_DIR};
@@ -48,6 +50,60 @@ enum Cmd {
     Mars1Check(Mars1CheckArgs),
     /// Step 3: regenerate the golden `.ifs` fixtures and their manifest.
     Mars1Fixtures(Mars1FixturesArgs),
+    /// Step 4: run the anchor-codec quality sweeps and append them to the result store.
+    AnchorsSweep(AnchorsSweepArgs),
+    /// Step 4: render the anchors + Mars 1 combined RD report from the stores.
+    AnchorsReport(AnchorsReportArgs),
+    /// Step 4's exit criteria as a command that exits 0 or 1 (§A1, gate-4).
+    AnchorsCheck(AnchorsCheckArgs),
+}
+
+#[derive(Args)]
+struct AnchorsSweepArgs {
+    /// The codec/param grid. §2.3: every experiment is a config file, not a code edit.
+    #[arg(long, default_value = "configs/anchors.json")]
+    config: PathBuf,
+    /// Append-only JSONL to write to (§M7).
+    #[arg(long, default_value = "results/anchors.jsonl")]
+    out: PathBuf,
+    /// Worker threads. Defaults to the P-core count (§M4); row order does not depend on it.
+    #[arg(long)]
+    jobs: Option<usize>,
+    #[arg(long)]
+    scratch: Option<PathBuf>,
+    /// Run only the first N jobs. For smoke-testing the pipeline, never for results.
+    #[arg(long)]
+    limit: Option<usize>,
+}
+
+#[derive(Args)]
+struct AnchorsReportArgs {
+    #[arg(long, default_value = "results/anchors.jsonl")]
+    store: PathBuf,
+    /// The Step 2 Mars 1 baseline, whose six methods share the plot and the BD-rate table.
+    #[arg(long, default_value = "results/baseline-mars1.jsonl")]
+    mars1_store: PathBuf,
+    /// BD-rate reference codec -- JPEG, the anchor of record (plan's Step 4 exit criteria).
+    #[arg(long, default_value = "jpeg")]
+    reference: String,
+    #[arg(long)]
+    markdown_out: Option<PathBuf>,
+    #[arg(long)]
+    html_out: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct AnchorsCheckArgs {
+    #[arg(long, default_value = "results/anchors.jsonl")]
+    store: PathBuf,
+    #[arg(long, default_value = "configs/anchors.json")]
+    config: PathBuf,
+    #[arg(long, default_value = "jpeg")]
+    reference: String,
+    #[arg(long, default_value = "results/anchors.md")]
+    markdown_out: PathBuf,
+    #[arg(long, default_value = "results/anchors.html")]
+    html_out: PathBuf,
 }
 
 #[derive(Args)]
@@ -216,6 +272,9 @@ fn main() -> Result<()> {
         Cmd::Mars1Report(a) => mars1_report(a),
         Cmd::Mars1Check(a) => mars1_check(a),
         Cmd::Mars1Fixtures(a) => mars1_fixtures(a),
+        Cmd::AnchorsSweep(a) => anchors_sweep(a),
+        Cmd::AnchorsReport(a) => anchors_report_cmd(a),
+        Cmd::AnchorsCheck(a) => anchors_check(a),
     }
 }
 
@@ -609,5 +668,224 @@ fn mars1_fixtures(a: Mars1FixturesArgs) -> Result<()> {
     let path = root.join(FIXTURE_DIR).join("manifest.toml");
     std::fs::write(&path, manifest).with_context(|| format!("writing {}", path.display()))?;
     println!("\nwrote {} ({} fixtures)", path.display(), records.len());
+    Ok(())
+}
+
+// ------------------------------------------------------------------------ anchors (Step 4)
+
+fn anchors_sweep(a: AnchorsSweepArgs) -> Result<()> {
+    let root = repo_root(&a.config)?;
+    let config = AnchorsConfig::read(&a.config)?;
+    config.validate()?;
+
+    let (corpus_name, images) = anchors::load_corpus(&root, &config.corpus_manifest)?;
+    eprintln!(
+        "corpus {:<10} {:>3} images  {}",
+        corpus_name,
+        images.len(),
+        config.corpus_manifest.display()
+    );
+
+    let mut jobs = anchors::plan(&config, &images)?;
+    if let Some(limit) = a.limit {
+        jobs.truncate(limit);
+    }
+
+    let scratch = a
+        .scratch
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/anchors-sweep-{}", std::process::id())));
+    std::fs::create_dir_all(&scratch)
+        .with_context(|| format!("creating scratch dir {}", scratch.display()))?;
+
+    // §M4: pin concurrency to the P-core count, as the Step 2 sweep does.
+    let workers = a.jobs.unwrap_or_else(p_cores).max(1);
+
+    let manifest_path = root.join(&config.corpus_manifest);
+    let provenance = Provenance::detect(0)
+        .with_corpus_manifest(&std::fs::read(&manifest_path)?)
+        .with_parameter_set(&config);
+
+    eprintln!(
+        "{} jobs on {} worker(s) -> {}",
+        jobs.len(),
+        workers,
+        a.out.display()
+    );
+
+    let ctx = anchors::RunContext {
+        repo_root: &root,
+        scratch: &scratch,
+        jobs: workers,
+        sweep_name: &config.name,
+    };
+
+    let started = std::time::Instant::now();
+    let mut store = ResultStore::open(&a.out)?;
+    let progress = move |done: usize, total: usize, job: &anchors::Job| {
+        if done % 25 == 0 || done == total {
+            let el = started.elapsed().as_secs_f64();
+            let eta = el / done as f64 * (total - done) as f64;
+            eprintln!(
+                "  {done:>5}/{total}  {:>5.0}s elapsed, ~{eta:.0}s left   (last: {} {} param={})",
+                el,
+                job.image.name,
+                job.codec.key(),
+                job.param
+            );
+        }
+    };
+    let written = anchors::run(&ctx, &jobs, &provenance, &mut store, &progress)?;
+
+    std::fs::remove_dir_all(&scratch).ok();
+    eprintln!(
+        "appended {written} rows to {} in {:.0}s",
+        a.out.display(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn anchors_report_cmd(a: AnchorsReportArgs) -> Result<()> {
+    let anchor_rows = anchors_report::load(&a.store)?;
+    if anchor_rows.is_empty() {
+        bail!("{} contains no anchors rows", a.store.display());
+    }
+    let mars1_rows = if a.mars1_store.is_file() {
+        mars1_report::load(&a.mars1_store)?
+    } else {
+        eprintln!(
+            "note: {} not found; the plot will show anchors only, no Mars 1 curves",
+            a.mars1_store.display()
+        );
+        Vec::new()
+    };
+
+    let p = Provenance::detect(0);
+    let build_infos: std::collections::BTreeSet<String> = anchor_rows
+        .iter()
+        .map(|r| format!("{}: {}", r.codec, r.codec_build_info))
+        .collect();
+    let note = format!(
+        "{} anchor rows from `{}` (+ {} Mars 1 rows from `{}`) · report at {}{} · harness {} · {} ({} P / {} E cores) · {}\n\n\
+         <details><summary>Anchor codec versions</summary>\n\n```\n{}\n```\n\n</details>",
+        anchor_rows.len(),
+        a.store.display(),
+        mars1_rows.len(),
+        a.mars1_store.display(),
+        &p.git_sha[..p.git_sha.len().min(12)],
+        if p.git_dirty { "-dirty" } else { "" },
+        p.harness_version,
+        p.machine.cpu_brand,
+        p.machine.p_cores.map_or("?".into(), |c| c.to_string()),
+        p.machine.e_cores.map_or("?".into(), |c| c.to_string()),
+        p.timestamp_utc,
+        build_infos.into_iter().collect::<Vec<_>>().join("\n"),
+    );
+
+    let curves = anchors_report::combined_plot_curves(&anchor_rows, &mars1_rows);
+    let mut report = Report::new(
+        "Mars 2 -- Kodak rate-distortion: five anchor codecs + six Mars 1 methods".to_string(),
+        curves,
+    )
+    .with_provenance_note(note.clone());
+    report = report.with_reference(a.reference.clone());
+
+    let bd_matrix = anchors_report::bd_matrix(&anchor_rows, &a.reference);
+
+    let mut md = report.to_markdown();
+    md.push_str(&format!(
+        "\n## Per-image BD-rate vs `{}` (anchor codecs only)\n\n\
+         Computed per image over the PSNR overlap, then summarised across images -- \
+         §M3/D7-style: a BD-rate between two *averaged* curves is a different, less \
+         honest number. Nothing is dropped silently; exclusions are named (§A7).\n\n\
+         | codec | n | mean % | median % | min % | max % | PSNR interval (dB) | excluded |\n\
+         |---|---:|---:|---:|---:|---:|---|---|\n",
+        a.reference
+    ));
+    for b in &bd_matrix {
+        let excl = if b.excluded.is_empty() {
+            "none".to_string()
+        } else {
+            b.excluded
+                .iter()
+                .map(|e| format!("{} ({})", e.image, e.reason))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        md.push_str(&format!(
+            "| {} | {} | {:+.2} | {:+.2} | {:+.2} | {:+.2} | {:.2}-{:.2} | {} |\n",
+            b.test,
+            b.n,
+            b.mean_pct,
+            b.median_pct,
+            b.min_pct,
+            b.max_pct,
+            b.psnr_interval_db.0,
+            b.psnr_interval_db.1,
+            excl,
+        ));
+    }
+
+    match &a.markdown_out {
+        Some(path) => {
+            std::fs::write(path, &md)?;
+            eprintln!("wrote {}", path.display());
+        }
+        None => print!("{md}"),
+    }
+    if let Some(path) = &a.html_out {
+        std::fs::write(path, report.to_html())?;
+        eprintln!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+fn anchors_check(a: AnchorsCheckArgs) -> Result<()> {
+    let rows = anchors_report::load(&a.store)?;
+    let envelopes = read_rows(&a.store)?;
+    let unprovenanced = envelopes
+        .iter()
+        .filter(|r| {
+            r.provenance.git_sha == "unknown"
+                || r.provenance.corpus_manifest_sha256.is_none()
+                || r.provenance.parameter_set_sha256.is_none()
+        })
+        .count();
+
+    let expected_codecs: Vec<String> = mars_bench::anchors::AnchorCodec::ALL
+        .iter()
+        .map(|c| c.key().to_string())
+        .collect();
+
+    let report_files: Vec<(&str, &Path)> = vec![
+        ("markdown report", a.markdown_out.as_path()),
+        ("html report", a.html_out.as_path()),
+    ];
+
+    let mut checks = anchors_report::gate(&rows, &expected_codecs, &a.reference, &report_files);
+    checks.insert(
+        0,
+        mars1_report::Check {
+            name: "every row carries a full provenance block (§M7)".into(),
+            passed: unprovenanced == 0,
+            detail: format!("{} of {} rows incomplete", unprovenanced, envelopes.len()),
+        },
+    );
+
+    let mut failed = 0;
+    for c in &checks {
+        let mark = if c.passed {
+            "PASS"
+        } else {
+            failed += 1;
+            "FAIL"
+        };
+        println!("{mark}  {}\n      {}", c.name, c.detail);
+    }
+    if failed > 0 {
+        bail!("gate-4: {failed} of {} checks failed", checks.len());
+    }
+    println!("\ngate-4: PASS ({} checks)", checks.len());
     Ok(())
 }

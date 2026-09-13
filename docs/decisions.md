@@ -561,3 +561,119 @@ it. "The validator passes" and "the validator can fail" are different claims, an
 second one makes the first worth anything.
 
 **Tolerance impact.** None.
+
+---
+
+## D17 · 2026-09-13 · Anchors run on the original colour Kodak PNGs; JPEG anchor is libjpeg-turbo, not mozjpeg proper
+
+**Context.** Step 4 asks for five anchor codec drivers, including a "mozjpeg-equivalent"
+JPEG, swept over quality on the Kodak corpus. Step 2's sweep reads Kodak as **grayscale**
+raw (`scripts/build-imageset.py` converts via pinned Rec.601 luma) because the 1998 codec
+is grayscale-only. Anchors have no such constraint.
+
+**Finding.** `mars_core::io::read_image` already reads 8-bit RGB PNG directly
+(`crates/mars-core/src/io.rs::read_png`), and §M2's PSNR-Y/PSNR-Cb/PSNR-Cr/PSNR-YUV
+definitions are colour-aware. Building a second grayscale-raw image set for anchors would
+throw away information (all five anchors are colour-capable) and would not even be
+comparable to a real-world JPEG/AVIF/etc. deployment, which encodes colour. Separately:
+this machine has libjpeg-turbo 3.2.0 (`cjpeg -version`) but not mozjpeg proper (`brew
+install mozjpeg` was not attempted as part of this step — mozjpeg is a fork of
+libjpeg-turbo tuned for smaller files at the same quality via trellis quantisation and
+different default Huffman tables, not a different bitstream or CLI surface, and swapping
+it in later would not change the row schema).
+
+**Decision.** `crates/mars-bench/src/anchors.rs` loads Kodak directly from
+`corpus/kodak.manifest.json` (which already has name + sha256 per colour PNG — reused
+rather than duplicated into a second image-set schema) and encodes/decodes colour
+throughout. The JPEG anchor's row `codec_build_info` records the actual
+`cjpeg -version` output (`libjpeg-turbo version 3.2.0 ...`), and this document states
+plainly that the row is libjpeg-turbo's baseline Huffman/quantisation behaviour, not
+mozjpeg's. Anyone quoting the JPEG anchor number should read it as "commodity JPEG at
+libjpeg-turbo defaults", which is if anything a *harder* bar for Mars 2 to clear than
+mozjpeg would be at typical settings (mozjpeg tends to produce smaller files at matched
+quality, i.e. a stronger anchor) — so a comparison against this anchor is conservative in
+Mars 2's favour, not inflated. Revisit if `mozjpeg` becomes trivially installable on the
+target machine and someone wants the tighter anchor specifically.
+
+**Tolerance impact.** None — this changes which tool is invoked, not any assertion.
+
+---
+
+## D18 · 2026-09-13 · OpenJPEG's PNG reader silently darkens every pixel via `gAMA`; anchors feed it PNM instead
+
+**Context.** While validating the JPEG 2000 anchor driver (§ verification-discipline —
+"assume the harness, not the codec" when a number looks wrong), the JPEG 2000 curve's
+PSNR-Y sat at 11–16 dB across the entire quality sweep, an order of magnitude worse than
+every other anchor and flat regardless of the compression ratio requested. That flatness
+was the tell: a real RD curve moves with the rate parameter; a harness bug does not.
+
+**Finding.** Reproduced outside the harness: `opj_compress -i kodimNN.png -o x.j2k -r 1`
+(**lossless**) followed by `opj_decompress -i x.j2k -o x.png` does not round-trip pixel
+values. Sample point (100,100) on `kodim01.png`: original `(96, 96, 86)`, round-tripped
+`(30, 30, 23)`. The transform is not random noise — it is almost exactly the sRGB gamma
+curve applied twice: `(96/255)^2.2 * 255 ≈ 29.9`, `(144/255)^2.2 * 255 ≈ 72.6`,
+`(73/255)^2.2 * 255 ≈ 16.2`, matching the corrupted output to within rounding on all three
+sampled pixels. Kodak's official PNGs (from `r0k.us`) carry a `gAMA` chunk
+(`gamma=0.45455` i.e. 1/2.2). Isolated further: encoding from a **PPM** (no `gAMA`, no
+colour-management metadata of any kind) round-trips exactly, and decoding a
+PPM-sourced `.j2k` **to PNG** is also exact — the corruption is entirely on OpenJPEG's
+PNG **read** path honouring the source's `gAMA` chunk, with no matching correction
+anywhere else in the pipeline. WebP, JPEG XL and AVIF were cross-checked the same way
+(lossless round trip through their own PNG-in/PNG-out paths) and are exact; this is an
+OpenJPEG-specific bug, not a general PNG-metadata hazard in this toolchain.
+
+**Decision.** Never feed `opj_compress` a PNG with colour-management metadata. Added
+`mars_core::io::write_pnm` (binary PGM/PPM writer, no metadata of any kind) and
+`read_ppm`; `AnchorCodec::Jpeg2000::encode` converts its input through
+`read_image` → `write_pnm` into a plain `.ppm` before calling `opj_compress`, sidestepping
+the bug rather than working around its symptom (e.g. by pre-correcting for the gamma
+curve, which would be fragile if the bug's exact shape ever changes). Decoding to PNG was
+left alone since it was independently confirmed exact. This is a documented, worth-a-D
+harness fix under §A2/A7: the anomaly was investigated to a concrete, reproducible root
+cause (not "close enough"-averaged away) before any code changed.
+
+**Tolerance impact.** None — no assertion changed; a genuine encode-path bug was fixed.
+
+---
+
+## D19 · 2026-09-13 · Quality-sweep floors and the JPEG XL distance range were chosen after two real non-monotonic anomalies, not by loosening the BD-rate contract
+
+**Context.** §M3/`bdrate::RdCurve::prepared` requires a curve's bpp *and* PSNR to be
+strictly increasing together; §A7 makes a non-monotonic curve a hard error, not something
+averaged past. The first full anchors run (after fixing D18) surfaced two real,
+reproducible non-monotonic points, both at the extreme low-quality end of a codec's own
+range, and one coverage gap.
+
+**Finding.**
+1. **JPEG, `kodim01`... actually `kodim02.png`, quality 1 vs 2.** `cjpeg -quality 1` produced
+   *more* bytes (7215) and *far worse* PSNR-Y (15.4 dB) than `-quality 2` (7155 bytes,
+   25.5 dB) — quality 1 is not a lower-quality point than quality 2 on this image, it is a
+   worse point at essentially the same rate. Reproduced outside the harness with plain
+   `cjpeg`/`djpeg` invocations; not a measurement artifact. `kodim02` has strong periodic
+   high-frequency structure, and libjpeg's quality-to-quantiser-table scaling saturates at
+   the very bottom of its range in a way that is not smooth for content like this.
+2. **AVIF, `kodim08.png`, quality 2 vs 4.** A much smaller version of the same shape:
+   `-q 2` gives 21.52 dB at 0.1219 bpp, `-q 4` gives 21.44 dB at 0.1232 bpp — a 0.08 dB
+   dip, again at the bottom of the encoder's own quality range where aom's quantiser
+   selection saturates.
+3. **JPEG XL coverage gap.** The initial distance list (`9.0` down to `0.4`) never went low
+   enough in quality to reach much below ~0.4 bpp on several images (`cjxl -d 9`, its
+   original floor, gave 0.40 bpp on `kodim01`), so JPEG XL's curve had systematically less
+   overlap with the other anchors' low-bitrate points than the plan's 0.1–2.0 bpp target
+   implies it should.
+
+**Decision.** Per the plan's own framing ("sweep quality... the bpp range is validated as
+a result, not forced as an input"), the fix is a **config change**, not a tolerance change:
+`configs/anchors.json`'s JPEG floor moved from quality 1 to quality 3 (both 1 and 2 are
+inside the affected saturation zone once the neighbouring point is accounted for — see the
+arithmetic in the commit that added this entry), AVIF's floor moved from quality 2 to
+quality 4, and JPEG XL's distance list gained `21.0, 15.0, 11.0` above its previous ceiling
+of `9.0` to reach down to ~0.16–0.33 bpp on typical Kodak images. After this change, a
+full sweep of all 24 images × 5 codecs produces **zero** monotonicity violations and every
+`(codec, image)` pair keeps at least 6 points in 0.1–2.0 bpp (checked mechanically by
+`just gate-4`, not eyeballed). This is a decision about *which quality knobs to sweep*
+(§2.3 territory), not a change to `bdrate.rs`'s monotonicity requirement, which stayed
+exactly as strict as before and would still reject a genuinely non-monotonic curve.
+
+**Tolerance impact.** None. `bdrate::RdCurve::prepared`'s strict-monotonicity check was
+not touched.
