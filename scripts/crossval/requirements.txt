@@ -1,0 +1,7 @@
+# Pinned cross-validation reference implementations (Step 1, exit criteria).
+# These are REFERENCES, not dependencies of the codec. They exist so that
+# mars-bench's metrics can be checked against implementations we did not write.
+numpy==2.3.3
+scipy==1.16.2
+scikit-image==0.25.2
+Pillow==11.3.0

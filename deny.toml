@@ -1,0 +1,42 @@
+# cargo-deny configuration (Step 0).
+#
+# The licence question here is load-bearing, not cosmetic; see docs/licensing.md.
+#
+# Mars 2 is GPL-2.0-or-later. Apache-2.0 code cannot be combined into a GPL-2.0-*only*
+# work (its patent-termination and indemnification clauses are additional restrictions
+# under GPLv2), though it is compatible with GPL-3.0. Because "or later" lets a recipient
+# choose v3, an Apache-2.0 dependency is lawful -- but it removes the recipient's v2
+# option, making the effective licence of the distributed binary GPL-3.0.
+#
+# **Apache-2.0 is therefore deliberately absent from the allow-list below.** Almost the
+# whole Rust ecosystem is dual-licensed MIT OR Apache-2.0, and MIT alone is
+# GPLv2-compatible, so this costs nothing today and turns "prefer crates with an MIT
+# option" from a policy into a build failure. A dependency that offers *only* Apache-2.0
+# will fail this check; adding it means accepting GPL-3.0 as the effective licence, which
+# is a decision for docs/decisions.md and not for a one-line edit here.
+
+[licenses]
+# Kept minimal on purpose: every entry is a licence actually present in the graph, so an
+# unused allowance can never quietly pre-authorise something nobody examined.
+allow = [
+    "GPL-2.0-or-later", # the workspace crates themselves
+    "MIT",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# A duplicated version is worth knowing about but is not a build failure; a wildcard
+# dependency is, because it makes the build non-reproducible.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,23 @@
+[package]
+name = "mars-cli"
+description = "encmars / decmars / marsbench command-line front ends."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+mars-bench = { workspace = true }
+mars-core = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "marsbench"
+path = "src/bin/marsbench.rs"
+
+[lints]
+workspace = true

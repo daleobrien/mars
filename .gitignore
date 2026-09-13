@@ -1,1 +1,10 @@
+/target
 .DS_Store
+
+# Images are fetched by scripts/fetch-corpus.sh and verified against the committed
+# manifests (§M9). They are never committed: they are large, and Kodak is not ours to
+# redistribute.
+/corpus/images/
+
+# The pinned cross-validation reference venv. Recreate with `just crossval-setup`.
+/.venv-crossval/

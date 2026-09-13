@@ -1,0 +1,21 @@
+<!doctype html><meta charset="utf-8"><title>Harness smoke test — Mars 1 on Lena</title>
+<style>body{font:14px/1.5 ui-sans-serif,system-ui,sans-serif;margin:2rem auto;max-width:56rem;padding:0 1rem}table{border-collapse:collapse;margin:1rem 0;font-variant-numeric:tabular-nums}th,td{border-bottom:1px solid #0002;padding:.3rem .6rem;text-align:left}td.n{text-align:right}.err{color:#b00}.prov{color:#555;font-size:.9em}svg.rd{max-width:100%;height:auto;border:1px solid #0002;border-radius:4px;background:#fff}.grid{stroke:#0001}.tick,.legend,.axis{font:11px ui-sans-serif,system-ui,sans-serif;fill:#444}</style>
+<h1>Harness smoke test — Mars 1 on Lena</h1>
+<p class=prov>release @ b94d62441385-dirty · harness 0.1.0 · Apple M3 Pro (6 P-cores / 6 E-cores) · 2026-09-13T02:44:22Z</p>
+<svg class=rd viewBox="0 0 720 440" width="100%" role=img aria-label="rate-distortion curves"><line class=grid x1="64.0" y1="392.0" x2="704.0" y2="392.0"/><text class=tick x="56.0" y="396.0" text-anchor=end>26.3</text><line class=grid x1="64.0" y1="298.0" x2="704.0" y2="298.0"/><text class=tick x="56.0" y="302.0" text-anchor=end>29.0</text><line class=grid x1="64.0" y1="204.0" x2="704.0" y2="204.0"/><text class=tick x="56.0" y="208.0" text-anchor=end>31.6</text><line class=grid x1="64.0" y1="110.0" x2="704.0" y2="110.0"/><text class=tick x="56.0" y="114.0" text-anchor=end>34.3</text><line class=grid x1="64.0" y1="16.0" x2="704.0" y2="16.0"/><text class=tick x="56.0" y="20.0" text-anchor=end>37.0</text><line class=grid x1="64.0" y1="16.0" x2="64.0" y2="392.0"/><text class=tick x="64.0" y="410.0" text-anchor=middle>0.103</text><line class=grid x1="224.0" y1="16.0" x2="224.0" y2="392.0"/><text class=tick x="224.0" y="410.0" text-anchor=middle>0.213</text><line class=grid x1="384.0" y1="16.0" x2="384.0" y2="392.0"/><text class=tick x="384.0" y="410.0" text-anchor=middle>0.439</text><line class=grid x1="544.0" y1="16.0" x2="544.0" y2="392.0"/><text class=tick x="544.0" y="410.0" text-anchor=middle>0.904</text><line class=grid x1="704.0" y1="16.0" x2="704.0" y2="392.0"/><text class=tick x="704.0" y="410.0" text-anchor=middle>1.865</text><text class=axis x="384.0" y="432.0" text-anchor=middle>bpp (log scale)</text><text class=axis transform="translate(14,204.0) rotate(-90)" text-anchor=middle>PSNR-Y (dB)</text><polyline fill=none stroke="#4269d0" stroke-width=2 points="98.29,365.96 244.41,264.35 405.13,140.02 536.99,66.01 667.21,36.14"/><circle cx="98.29" cy="365.96" r=3 fill="#4269d0"/><circle cx="244.41" cy="264.35" r=3 fill="#4269d0"/><circle cx="405.13" cy="140.02" r=3 fill="#4269d0"/><circle cx="536.99" cy="66.01" r=3 fill="#4269d0"/><circle cx="667.21" cy="36.14" r=3 fill="#4269d0"/><rect x="544.0" y="23.0" width=10 height=10 fill="#4269d0"/><text class=legend x="560.0" y="32.0">Mars 1 · MassCenter</text><polyline fill=none stroke="#efb118" stroke-width=2 points="103.71,371.86 257.63,268.39 414.58,146.45 541.60,79.46 669.71,53.49"/><circle cx="103.71" cy="371.86" r=3 fill="#efb118"/><circle cx="257.63" cy="268.39" r=3 fill="#efb118"/><circle cx="414.58" cy="146.45" r=3 fill="#efb118"/><circle cx="541.60" cy="79.46" r=3 fill="#efb118"/><circle cx="669.71" cy="53.49" r=3 fill="#efb118"/><rect x="544.0" y="41.0" width=10 height=10 fill="#efb118"/><text class=legend x="560.0" y="50.0">Mars 1 · Fisher</text></svg>
+<h2>Operating points</h2><table><thead><tr><th>curve<th>bpp<th>PSNR (dB)</thead><tbody>
+<tr><td>Mars 1 · MassCenter<td class=n>0.1205<td class=n>27.049
+<tr><td>Mars 1 · MassCenter<td class=n>0.2333<td class=n>29.932
+<tr><td>Mars 1 · MassCenter<td class=n>0.4826<td class=n>33.459
+<tr><td>Mars 1 · MassCenter<td class=n>0.8761<td class=n>35.558
+<tr><td>Mars 1 · MassCenter<td class=n>1.5788<td class=n>36.405
+<tr><td>Mars 1 · Fisher<td class=n>0.1235<td class=n>26.882
+<tr><td>Mars 1 · Fisher<td class=n>0.2477<td class=n>29.817
+<tr><td>Mars 1 · Fisher<td class=n>0.5037<td class=n>33.276
+<tr><td>Mars 1 · Fisher<td class=n>0.8946<td class=n>35.176
+<tr><td>Mars 1 · Fisher<td class=n>1.5968<td class=n>35.913
+</tbody></table>
+<h2>BD-rate vs <code>Mars 1 · MassCenter</code></h2>
+<table><thead><tr><th>curve<th>BD-rate %<th>BD-PSNR dB<th>PSNR interval (dB)<th>bpp interval</thead><tbody>
+<tr><td>Mars 1 · Fisher<td class=n>+10.75<td class=n>-0.395<td>27.05 – 35.91<td>0.1205 – 1.5968
+</tbody></table>

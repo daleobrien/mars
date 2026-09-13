@@ -1,0 +1,87 @@
+name: ci
+
+# §M8 — the regression gate. The quick job has a two-minute budget and runs on every PR.
+# The cross-validation job is slower and needs python plus the corpus, so it is separate;
+# both are required.
+#
+# §M4 is the reason no timing number is produced here. CI machines are shared and noisy;
+# real performance work is measured on a pinned box, and a speedup figure without a
+# machine fingerprint is not a result.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  quick:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # check-contract.sh needs history to find the merge base
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+
+      - name: build the 1998 C reference with pinned flags
+        run: ./scripts/build-mars1.sh
+      - name: the reference binaries actually run
+        run: |
+          # Mars 1 stores filenames in char[50] (reference/mars1/globals.h), so it must
+          # be driven from a short working directory with relative paths.
+          work="$(mktemp -d /tmp/m1.XXXX)"
+          cp reference/mars1/lena.raw "$work/"
+          cd "$work"
+          "$GITHUB_WORKSPACE/target/mars1/encmars" -W 512 -H 512 -r 8 lena.raw lena.ifs > /dev/null
+          "$GITHUB_WORKSPACE/target/mars1/decmars" lena.ifs lena.dec.pgm > /dev/null
+          test -s lena.ifs && test -s lena.dec.pgm
+
+      - name: "§A2 — no silently weakened assertions or tolerances"
+        run: ./scripts/check-contract.sh "origin/${{ github.base_ref || 'main' }}"
+
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories bans sources
+
+  crossval:
+    # §M1's load-bearing check: our metrics must agree with implementations we did not
+    # write. Slower than the quick gate and therefore its own job, but not optional.
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install ffmpeg
+        run: brew install ffmpeg
+      - name: pinned reference implementations
+        run: |
+          python3.12 -m venv .venv-crossval
+          .venv-crossval/bin/pip install --quiet --upgrade pip
+          .venv-crossval/bin/pip install --quiet -r scripts/crossval/requirements.txt
+      - name: fetch and verify the Kodak corpus
+        run: ./scripts/fetch-corpus.sh
+      - name: cross-validate every metric
+        run: cargo test -p mars-bench --test crossval -- --ignored --nocapture

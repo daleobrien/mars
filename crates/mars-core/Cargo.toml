@@ -1,0 +1,16 @@
+[package]
+name = "mars-core"
+description = "Image types, IO, and the single pinned implementation of every quality metric (§M1)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+image = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
