@@ -150,6 +150,15 @@ gate-4:
     ./target/release/marsbench anchors-check
     @echo "gate-4: PASS"
 
+# Step 5 — the `.ifs` reader recovers exactly the transform counts `encmars` printed, and a
+# Rust iterative decode agrees with `decmars -i` to within 0.1 dB on every golden fixture.
+# Needs `just mars1` (for `decmars`) but not the corpus — the golden `.ifs` files and their
+# source images are all fixture-committed or hash-pinned.
+gate-5:
+    cargo build --release -p mars-cli
+    ./target/release/marsbench ifs-check
+    @echo "gate-5: PASS"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval

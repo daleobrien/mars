@@ -56,6 +56,8 @@ enum Cmd {
     AnchorsReport(AnchorsReportArgs),
     /// Step 4's exit criteria as a command that exits 0 or 1 (§A1, gate-4).
     AnchorsCheck(AnchorsCheckArgs),
+    /// Step 5's exit criteria as a command that exits 0 or 1 (§A1, gate-5).
+    IfsCheck(IfsCheckArgs),
 }
 
 #[derive(Args)]
@@ -104,6 +106,19 @@ struct AnchorsCheckArgs {
     markdown_out: PathBuf,
     #[arg(long, default_value = "results/anchors.html")]
     html_out: PathBuf,
+}
+
+#[derive(Args)]
+struct IfsCheckArgs {
+    #[arg(long, default_value = "fixtures/mars1/manifest.toml")]
+    manifest: PathBuf,
+    #[arg(long, default_value = "configs/mars1-fixtures.json")]
+    config: PathBuf,
+    /// Where `just mars1` put the 1998 binaries; only `decmars` is used.
+    #[arg(long, default_value = "target/mars1")]
+    mars1_dir: PathBuf,
+    #[arg(long, default_value = "target/ifs-check")]
+    scratch: PathBuf,
 }
 
 #[derive(Args)]
@@ -275,6 +290,7 @@ fn main() -> Result<()> {
         Cmd::AnchorsSweep(a) => anchors_sweep(a),
         Cmd::AnchorsReport(a) => anchors_report_cmd(a),
         Cmd::AnchorsCheck(a) => anchors_check(a),
+        Cmd::IfsCheck(a) => ifs_check(a),
     }
 }
 
@@ -887,5 +903,29 @@ fn anchors_check(a: AnchorsCheckArgs) -> Result<()> {
         bail!("gate-4: {failed} of {} checks failed", checks.len());
     }
     println!("\ngate-4: PASS ({} checks)", checks.len());
+    Ok(())
+}
+
+// -------------------------------------------------------------------- .ifs reader (Step 5)
+
+fn ifs_check(a: IfsCheckArgs) -> Result<()> {
+    let root = Path::new(".");
+    let checks =
+        mars_bench::ifs_check::gate(root, &a.manifest, &a.config, &a.mars1_dir, &a.scratch)?;
+
+    let mut failed = 0;
+    for c in &checks {
+        let mark = if c.passed {
+            "PASS"
+        } else {
+            failed += 1;
+            "FAIL"
+        };
+        println!("{mark}  {}\n      {}", c.name, c.detail);
+    }
+    if failed > 0 {
+        bail!("gate-5: {failed} of {} checks failed", checks.len());
+    }
+    println!("\ngate-5: PASS ({} checks)", checks.len());
     Ok(())
 }

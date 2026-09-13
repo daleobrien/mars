@@ -521,3 +521,65 @@ recorded as refuted **for the range actually swept**, not as a claim about OpenJ
 absolute floor. **JPEG XL is a marginal confirm**: it reaches ≤ 0.1 bpp on exactly one
 image, and only after D19 extended the distance sweep up to 21 (its allowed range goes to
 25); the prediction was technically right but by a much thinner margin than expected.
+
+---
+
+## 2026-09-14 (not yet run) · Step 5 · `.ifs` reader + baseline bridge
+
+### P5.1 — the Rust parser will reproduce every golden fixture's transform count exactly
+
+`docs/mars1-format.md` was independently validated by a from-scratch Python parser at
+Step 3 (`just gate-3`, all 142 golden fixtures, transform count and DC-leaf count both
+exact). A Rust port written from the same document, with no reference to the Python or the
+C, should therefore also recover `Number of transformations` exactly on all 142 fixtures —
+this is now a test of the *port*, not of the *spec*, since the spec's own correctness was
+already the Step 3 result.
+
+### P5.2 — the Rust iterative decoder will agree with `decmars -i` to well under the 0.1 dB
+budget, not merely inside it
+
+`just gate-3`'s check 5 already reproduces `decmars -i` output **byte for byte** with a
+NumPy decoder on this toolchain (no `fmadd` contraction observed). Rust's `f64` arithmetic
+should behave identically to C's on the same hardware, so I expect the Rust decode to also
+match byte-for-byte on most or all fixtures, which would put the PSNR-vs-ground-truth
+agreement at 0.00 dB, not merely under 0.1. The 0.1 dB budget in the brief reads as
+headroom for a toolchain difference that Step 3 already showed does not materialise here,
+not as an expected gap.
+
+### P5.3 — if any fixture disagrees, it will be one with size-1 leaves
+
+`mixed_129x127` and `mixed_250x250` are the only golden images with leaves below
+`min_size` (§5.3, down to size 1), and size-1 leaves store a raw pixel truncated to
+`N_BITBETA` bits with no domain reference — the one payload shape that is pure table
+lookup rather than arithmetic. If there is a disagreement, `bound()`'s post-clamp
+truncation on a value very near a `.5` boundary is the most likely place: `(0.5 + v)`
+computed in a different instruction order between `rustc` and `clang` could round a
+different way on the rare pixel that lands exactly there. I do not expect this to happen —
+P5.2 predicts exact agreement — but if it does, this is where.
+
+---
+
+## 2026-09-14 · Step 5 · outcomes
+
+`just gate-5` runs both checks over all 142 golden fixtures, decoding each one with both
+the Rust reader and `decmars -i` and comparing PSNR-against-ground-truth.
+
+### P5.1 — **confirmed exactly**
+
+142/142 fixtures parse to the exact transform count `encmars` printed. No mismatches.
+
+### P5.2 — **confirmed, and at the predicted margin, not merely inside it**
+
+`max |ΔPSNR| = 0.0000 dB` across all 142 fixtures, including `mixed_129x127` and
+`mixed_250x250` — i.e. the Rust reconstruction and `decmars -i`'s own reconstruction agree
+with the original image to identical PSNR everywhere `f64` printing distinguishes, on this
+toolchain (`rustc`, like the pinned `clang`, does not contract `0.5 + d*alfa + beta` into an
+`fmadd`; both languages evaluate the double-precision expression term-by-term as written).
+This is the outcome P5.2 called: the 0.1 dB budget in the brief was headroom for a
+divergence Step 3 already showed does not occur here, and it did not occur in the Rust port
+either.
+
+### P5.3 — **not reached**
+
+No fixture disagreed, so there was nothing to localise. Recorded as moot rather than
+confirmed or refuted — the size-1-leaf hypothesis was never exercised.

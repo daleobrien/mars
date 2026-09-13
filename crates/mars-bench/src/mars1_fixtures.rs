@@ -105,6 +105,28 @@ impl FixtureConfig {
         })
     }
 
+    /// Every image the config can name: its indexes' images plus `extra_images`, checked
+    /// for duplicate names. Shared by `plan` and by anything else that needs to resolve an
+    /// `image` name from `manifest.toml` back to a file and dimensions (e.g. `ifs_check`).
+    pub fn image_index(&self, root: &Path) -> Result<Vec<ImageEntry>, FixtureError> {
+        let mut images: Vec<ImageEntry> = Vec::new();
+        for index in &self.indexes {
+            let set = ImageSet::read(&root.join(index)).map_err(|e| FixtureError::ImageSet {
+                path: index.display().to_string(),
+                message: e.to_string(),
+            })?;
+            images.extend(set.images);
+        }
+        images.extend(self.extra_images.iter().cloned());
+
+        let unique: std::collections::BTreeSet<&str> =
+            images.iter().map(|i| i.name.as_str()).collect();
+        if unique.len() != images.len() {
+            return Err(FixtureError::DuplicateImage);
+        }
+        Ok(images)
+    }
+
     fn params(&self, variant: &Variant, method: Method, t_rms: f64) -> EncodeParams {
         EncodeParams {
             method,
@@ -126,21 +148,9 @@ impl FixtureConfig {
     /// in it, and a manifest whose row order wandered between runs would produce a diff
     /// on every regeneration.
     pub fn plan(&self, root: &Path) -> Result<Vec<Case>, FixtureError> {
-        let mut images: Vec<ImageEntry> = Vec::new();
-        for index in &self.indexes {
-            let set = ImageSet::read(&root.join(index)).map_err(|e| FixtureError::ImageSet {
-                path: index.display().to_string(),
-                message: e.to_string(),
-            })?;
-            images.extend(set.images);
-        }
-        images.extend(self.extra_images.iter().cloned());
-
+        let images = self.image_index(root)?;
         let by_name: BTreeMap<&str, &ImageEntry> =
             images.iter().map(|i| (i.name.as_str(), i)).collect();
-        if by_name.len() != images.len() {
-            return Err(FixtureError::DuplicateImage);
-        }
 
         let mut cases = Vec::new();
         for group in &self.groups {
