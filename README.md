@@ -13,8 +13,8 @@ what order*, and *how we know it worked*.
 
 | Group | Steps | State |
 |---|---|---|
-| **A — measure before building** | 0 Repo/CI/result store · 1 Metrics engine | **done** |
-| | 2 Mars 1 baselines · 3 Format spec · 4 Anchors | next |
+| **A — measure before building** | 0 Repo/CI/result store · 1 Metrics engine · 2 Mars 1 baselines · 3 Format spec | **done** |
+| | 4 Anchor codecs | next |
 | B — decoder, encoder, oracle | 5–9 | not started |
 | C — optimisation | 10–14 | not started |
 | D — research | 15–21 | not started |
@@ -47,7 +47,7 @@ crates/mars-cli/      marsbench (encmars/decmars arrive with the encoder)
 reference/mars1/      the unmodified 1998 C, plus a pinned build wrapper
 corpus/               manifests; images are fetched and hash-verified, never committed
 results/              append-only JSONL — committed
-docs/                 measurement.md, licensing.md, predictions.md, decisions.md
+docs/                 mars1-format.md, measurement.md, licensing.md, predictions.md, decisions.md
 ```
 
 ## The rules that matter
