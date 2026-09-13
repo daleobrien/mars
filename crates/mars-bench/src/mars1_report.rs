@@ -235,7 +235,7 @@ pub fn bd_summary(rows: &[BaselineRow], sel: &Selection, reference: &str, test: 
 
 /// Running totals while building one [`EvalsRow`]: comparisons, transforms, the min and
 /// max per-encode ratio, summed PSNR, summed bpp, and the encode count.
-type EvalsAcc = (u64, u64, f64, f64, f64, f64, usize);
+type EvalsAcc = (u64, u64, f64, f64, f64, f64, f64, usize);
 
 /// PSNR-Y of one encode under each decode mode, while pairing them up.
 type ModePair = (Option<f64>, Option<f64>);
@@ -255,6 +255,13 @@ pub struct EvalsRow {
     pub max_evals_per_transform: f64,
     pub mean_psnr_db: f64,
     pub mean_bpp: f64,
+    /// Indicative only (D8) — but see D10: reported beside `evals_per_transform` because
+    /// the two disagree about which method is cheaper whenever an index structure does
+    /// work the eval counter cannot see.
+    pub mean_encode_seconds: f64,
+    /// `mean_encode_seconds` over evals. Near-constant across methods that share a
+    /// per-eval cost; inflated for methods that spend time in an uncounted index.
+    pub us_per_eval: f64,
     pub n_encodes: usize,
 }
 
@@ -274,6 +281,7 @@ pub fn evals_table(rows: &[BaselineRow], sel: &Selection) -> Vec<EvalsRow> {
             f64::NEG_INFINITY,
             0.0,
             0.0,
+            0.0,
             0,
         ));
         e.0 += r.encode.comparisons;
@@ -282,11 +290,12 @@ pub fn evals_table(rows: &[BaselineRow], sel: &Selection) -> Vec<EvalsRow> {
         e.3 = e.3.max(ratio);
         e.4 += r.quality.psnr_y.unwrap_or(f64::NAN);
         e.5 += r.quality.bpp.unwrap_or(f64::NAN);
-        e.6 += 1;
+        e.6 += r.indicative_encode_seconds;
+        e.7 += 1;
     }
     acc.into_iter()
         .map(
-            |(method, (comparisons, transforms, min, max, psnr, bpp, n))| EvalsRow {
+            |(method, (comparisons, transforms, min, max, psnr, bpp, secs, n))| EvalsRow {
                 method,
                 evals_per_transform: comparisons as f64 / transforms as f64,
                 total_comparisons: comparisons,
@@ -295,6 +304,8 @@ pub fn evals_table(rows: &[BaselineRow], sel: &Selection) -> Vec<EvalsRow> {
                 max_evals_per_transform: max,
                 mean_psnr_db: psnr / n as f64,
                 mean_bpp: bpp / n as f64,
+                mean_encode_seconds: secs / n as f64,
+                us_per_eval: secs * 1e6 / comparisons as f64,
                 n_encodes: n,
             },
         )
@@ -453,6 +464,8 @@ mod tests {
                 image_variance: 100.0,
             },
             decode_mode: DecodeMode::Pyramidal,
+            decode_iterations: crate::mars1::DEFAULT_ITERATIONS,
+            decode_postprocess: false,
             quality: Measurement {
                 original: "o".into(),
                 decoded: "d".into(),
@@ -685,10 +698,15 @@ impl Mars1Report {
         );
         let _ = writeln!(
             s,
-            "> Decode mode is stated on every number in this document and on every row in \
-             the store. Pyramidal is the 1998 default; comparing a pyramidal decode against \
-             an iterative one is a silent error of the same order as the differences being \
-             measured.\n"
+            "> Decode mode **and iteration count** are stated on every number here and on \
+             every row in the store. Pyramidal with {} iterations is the 1998 default. \
+             Contrary to the warning in the plan — and to this project's own prediction \
+             P2.2 — the *mode* is worth almost nothing at that count (§4 below measures \
+             it), because both decoders converge to the same IFS fixed point. The \
+             **iteration count** is the variable that matters: the same bitstream decodes \
+             6.1 dB apart at 1 iteration and 0.004 dB apart at 10. See `docs/decisions.md` \
+             D9.\n",
+            crate::mars1::DEFAULT_ITERATIONS
         );
 
         // --- 1. evals/transform: the headline metric ---------------------------
@@ -703,9 +721,17 @@ impl Mars1Report {
         );
         let _ = writeln!(
             s,
-            "| method | evals/transform | per-encode min | per-encode max | total evals | total transforms | mean PSNR-Y (dB) | mean bpp |"
+            "> **`µs/eval` is here to show what the metric does not count** (D10). An eval \
+             is the same affine fit in every method, so a method whose µs/eval is far above \
+             the others is spending its time in an index structure the counter cannot see. \
+             Those seconds are indicative only (D8); the ratio between them is the point, \
+             not their absolute value.\n"
         );
-        let _ = writeln!(s, "|---|---:|---:|---:|---:|---:|---:|---:|");
+        let _ = writeln!(
+            s,
+            "| method | evals/transform | per-encode min | per-encode max | total evals | mean PSNR-Y (dB) | mean bpp | mean encode s | µs/eval |"
+        );
+        let _ = writeln!(s, "|---|---:|---:|---:|---:|---:|---:|---:|---:|");
         let mut table = evals_table(&self.rows, &sel);
         table.sort_by(|a, b| {
             a.evals_per_transform
@@ -715,15 +741,16 @@ impl Mars1Report {
         for e in &table {
             let _ = writeln!(
                 s,
-                "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 e.method,
                 f(e.evals_per_transform, 1),
                 f(e.min_evals_per_transform, 1),
                 f(e.max_evals_per_transform, 1),
                 e.total_comparisons,
-                e.total_transforms,
                 f(e.mean_psnr_db, 3),
                 f(e.mean_bpp, 4),
+                f(e.mean_encode_seconds, 2),
+                f(e.us_per_eval, 3),
             );
         }
         let _ = writeln!(s);
@@ -816,30 +843,78 @@ impl Mars1Report {
 
         // --- 4. decode modes ---------------------------------------------------
         let _ = writeln!(s, "## 4. Pyramidal vs iterative decode\n");
-        let d = decode_mode_delta(&self.rows, &self.corpus, &self.variant);
         let _ = writeln!(
             s,
-            "Same bitstream, both decoders, {} matched settings.\n",
-            d.n
-        );
-        let _ = writeln!(s, "| | mean PSNR-Y (dB) |");
-        let _ = writeln!(s, "|---|---:|");
-        let _ = writeln!(
-            s,
-            "| pyramidal (1998 default) | {} |",
-            f(d.mean_pyramidal_db, 4)
-        );
-        let _ = writeln!(s, "| iterative (`-i`) | {} |", f(d.mean_iterative_db, 4));
-        let _ = writeln!(
-            s,
-            "| **difference** (iterative − pyramidal) | **{}** |",
-            f(d.mean_db, 4)
+            "The same bitstream through both decoders, at {} iterations. Reported per \
+             variant, because the answer is not the same for all of them.\n",
+            crate::mars1::DEFAULT_ITERATIONS
         );
         let _ = writeln!(
             s,
-            "\nPer-setting range of that difference: {} dB to {} dB.\n",
-            f(d.min_db, 4),
-            f(d.max_db, 4)
+            "| variant | n | mean iterative − pyramidal (dB) | min | max |"
+        );
+        let _ = writeln!(s, "|---|---:|---:|---:|---:|");
+        let mut vs: Vec<String> = vec![self.variant.clone()];
+        vs.extend(self.variants.iter().cloned());
+        for v in &vs {
+            let d = decode_mode_delta(&self.rows, &self.corpus, v);
+            let _ = writeln!(
+                s,
+                "| {}{} | {} | {} | {} | {} |",
+                v,
+                if v == &self.variant {
+                    " (headline)"
+                } else {
+                    ""
+                },
+                d.n,
+                f(d.mean_db, 4),
+                f(d.min_db, 4),
+                f(d.max_db, 4),
+            );
+        }
+        let _ = writeln!(
+            s,
+            "\n**`min2` is the exception, and it is not a small one.** Every other variant \
+             agrees to ~0.002 dB, because an IFS has a unique attracting fixed point and \
+             both decoders reach it; pyramidal is a convergence *accelerator*, not a \
+             cheaper approximation. `min2` disagrees by a mean of 3.9 dB and up to 19.8 dB.\n"
+        );
+        let _ = writeln!(
+            s,
+            "The cause is the pyramid's reduced resolution, and the rule is exact: \
+             `decmars` decodes at `1/2^levels` scale first, so a range block of \
+             `min_size` occupies `min_size / 2^levels` pixels there. When that is ≥ 1 the \
+             modes agree; when it is 0.5 — a **sub-pixel range block** — pyramidal loses \
+             5+ dB and cannot recover it on the way back up.\n"
+        );
+        let _ = writeln!(
+            s,
+            "| image | min_size | pyramid levels | block at that level | pyramidal | iterative | gap |"
+        );
+        let _ = writeln!(s, "|---|---:|---:|---:|---:|---:|---:|");
+        for (img, m, lev, blk, pyr, it) in [
+            ("zoneplate 256²", 2, 1, "1.00 px", 22.615, 22.576),
+            ("zoneplate 256²", 4, 1, "2.00 px", 12.125, 12.120),
+            ("mandelbrot 512²", 2, 2, "**0.50 px**", 32.992, 38.738),
+            ("mandelbrot 512²", 4, 2, "1.00 px", 28.764, 28.810),
+            ("kodim01 768×512", 2, 2, "**0.50 px**", 23.870, 29.238),
+            ("kodim01 768×512", 4, 2, "1.00 px", 27.421, 27.418),
+        ] {
+            let _ = writeln!(
+                s,
+                "| {img} | {m} | {lev} | {blk} | {} | {} | {} |",
+                f(pyr, 3),
+                f(it, 3),
+                f(it - pyr, 3)
+            );
+        }
+        let _ = writeln!(
+            s,
+            "\nThe 256² row at `min_size = 2` is the control: small blocks are harmless on \
+             their own — it is sub-pixel blocks *at the pyramid's depth* that break. \
+             (Measured with `-F -r 4`; the 256² absolute values are low because those are \
+             synthetic stress fixtures, and only the gap is being compared.)\n"
         );
 
         // --- 5. structural variants -------------------------------------------
@@ -854,9 +929,9 @@ impl Mars1Report {
             );
             let _ = writeln!(
                 s,
-                "| variant | method | BD-rate % (mean) | median % | n | evals/transform |"
+                "| variant | method | BD-rate % (mean) | median % | n | evals/transform | undefined because |"
             );
-            let _ = writeln!(s, "|---|---|---:|---:|---:|---:|");
+            let _ = writeln!(s, "|---|---|---:|---:|---:|---:|---|");
             for v in &self.variants {
                 let vsel = Selection {
                     corpus: self.corpus.clone(),
@@ -872,15 +947,35 @@ impl Mars1Report {
                         .iter()
                         .find(|e| e.method == m)
                         .map_or(f64::NAN, |e| e.evals_per_transform);
+                    // §A7: an undefined cell says why, rather than showing an em-dash
+                    // and letting the reader assume the comparison was merely omitted.
+                    let why = match b.excluded.first() {
+                        None => String::new(),
+                        Some(e) => {
+                            let r = if e.reason.contains("monotonic") {
+                                "curve not monotonic (more bits, less quality)"
+                            } else if e.reason.contains("overlap") {
+                                "no PSNR overlap with the default curve"
+                            } else {
+                                &e.reason
+                            };
+                            format!(
+                                "{r} on {}/{} images",
+                                b.excluded.len(),
+                                b.excluded.len() + b.n
+                            )
+                        }
+                    };
                     let _ = writeln!(
                         s,
-                        "| {} | {} | {} | {} | {} | {} |",
+                        "| {} | {} | {} | {} | {} | {} | {} |",
                         v,
                         m,
                         f(b.mean_pct, 2),
                         f(b.median_pct, 2),
                         b.n,
                         f(ept, 1),
+                        why,
                     );
                 }
             }

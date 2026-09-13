@@ -222,3 +222,163 @@ efficiency number for Step 2 is `evals/transform`, which is machine-independent,
 deterministic, and unaffected by how many jobs were in flight (§M5).
 
 **Tolerance impact.** None.
+
+---
+
+## D9 · 2026-09-13 · Decode iterations are recorded per row; the decode *mode* is nearly free
+
+**Context.** §4 Step 2 and the `mars1-reference` skill both warn that comparing a pyramidal
+decode against an iterative one is "a silent 0.2–1 dB error", and require the mode to be
+stated on every reported number. P2.2 predicted the same 0.2–1 dB.
+
+**Finding.** Measured over 720 matched settings on Kodak, the two modes differ by a mean of
+**+0.0022 dB** (range −0.0146 to +0.0476) — two orders of magnitude below the warning. The
+warning is not wrong so much as attributed to the wrong variable. Sweeping iterations on
+one bitstream gives −6.11 dB at 1 iteration, −0.26 dB at 5, **−0.0039 dB at the default
+10**, +0.0033 dB at 20.
+
+An IFS has a unique attracting fixed point, so both decoders converge to the same image;
+pyramidal reaches it sooner by iterating at reduced resolution first. It is a **convergence
+accelerator, not an approximation**, which also explains why it is *better* than iterative
+wherever the two differ — the opposite of the predicted direction.
+
+**Decision.**
+
+1. `decode_iterations` and `decode_postprocess` are recorded on **every** result row, and
+   the sweep was re-run to produce rows carrying them. The mode was already recorded and
+   stays recorded — it costs nothing — but the count is the variable that can actually move
+   a PSNR by 6 dB, and a row that omits it is not reproducible.
+2. The claim is pinned by a test asserting **both** halves: the modes must be
+   distinguishable at 1 iteration (or `-i` is not taking effect and recording the mode
+   measures nothing) and converged by 10 (or the mode is a genuine confound and every
+   comparison must be mode-matched).
+
+**What this rules out.** Treating a mode mismatch as an explanation for a ~0.5 dB
+discrepancy at default settings. At 10 iterations it cannot produce one, and reaching for
+it would mask the real cause.
+
+**Scope — this holds at `min_size = 4`, and fails badly at `min_size = 2`.** See D11, which
+was found while writing up this entry and which corrects an overgeneralisation in it: the
+0.002 dB figure is the `default` variant's. On the `min2` variant the two modes differ by a
+mean of **3.89 dB** and a maximum of **19.77 dB**.
+
+**What would reverse it.** A `MAX_ALFA` above 1.0, which weakens contractivity and could
+leave 10 iterations short of convergence. The sweep holds `-y 1.0` throughout, so this is
+untested outside that setting and the test would catch it.
+
+**Tolerance impact.** None. The new assertions are additions.
+
+---
+
+## D10 · 2026-09-13 · `evals/transform` does not count index-structure work, and Gate D should say so
+
+**Context.** §M5 names `evals/transform` the project's primary efficiency metric and calls
+it "machine-independent, deterministic, and **non-gameable**" — "the most trustworthy
+number the project will produce". Gate D requires it to be "≥ 10× reduced".
+
+**Finding.** All six `comparisons++` sites in `coding_func.c` (lines 98, 266, 445, 634,
+811, 972) are at the *exactly* analogous point — the top of the innermost loop, immediately
+before loading `s1`/`s2` for the affine fit — so the six methods' counts **are** mutually
+comparable, and §M5's definition is met. But the metric counts only the fits, and the
+kd-tree methods do substantial *uncounted* work in `kdtree_search` before reaching them:
+
+| method | evals/transform | mean encode s | µs per eval |
+|---|---:|---:|---:|
+| saupe-fisher | 64.3 | 0.77 | 1.128 |
+| mc-saupe | 127.9 | 0.28 | 0.192 |
+| saupe | 513.7 | 4.29 | 0.800 |
+| fisher | 626.4 | 0.58 | 0.085 |
+| masscenter | 1162.4 | 0.95 | 0.076 |
+| hurtgen | 1506.8 | 1.19 | 0.073 |
+
+The three classification methods cost 0.073–0.085 µs per eval — near-identical, as they
+should be, since an eval is the same affine fit in each. The kd-tree methods cost 0.19–1.13
+µs per eval. **Saupe performs fewer evals per transform than Fisher (513.7 vs 626.4) and
+takes 7.4× longer in wall-clock** (4.29 s vs 0.58 s). On this pair the metric and the clock
+disagree about which method is cheaper.
+
+**Decision.** Record the limitation now, at the point where it was first measured, and
+report `µs per eval` alongside `evals/transform` in the Step 2 tables so the gap is visible
+rather than latent. `evals/transform` remains the headline metric: it is exact, machine-
+independent, and the right measure of *search* work.
+
+**What this rules out.** Reading `evals/transform` as a proxy for encode time across
+methods that differ in index structure. It is a valid cost model only within a family
+sharing the same per-eval cost and the same (or no) index.
+
+**What this flags for later, and does not decide.** Gate D's "`evals/transform` ≥ 10×
+reduced" is satisfiable by moving work into an uncounted index — which is precisely the
+shape of Step 13's hierarchical funnel and Step 17's learned pruning, the headline
+experiment. As written, Mars 2 could pass Gate D while encoding more slowly than it does
+today, and the one method here that is 10× cheaper in evals than Fisher (Saupe-Fisher, at
+64.3) is 1.3× *slower* in wall-clock. Whether Gate D should therefore carry a companion
+wall-clock condition is a change to the plan's success criteria and belongs to the human at
+a gate (§A8), not to this step. It is raised here so that it is raised *before* the steps
+that would exploit it, rather than discovered at Gate D.
+
+**Tolerance impact.** None.
+
+---
+
+## D11 · 2026-09-13 · Pyramidal decode breaks on sub-pixel range blocks; the rule is `min_size / 2^levels ≥ 1`
+
+**Context.** D9 concluded from the `default` variant that the decode mode is worth ~0.002 dB
+and that the iteration count is the only variable that matters. Checking the `min2`
+variant's BD-rate column — which came back undefined for five of six methods — showed that
+conclusion was drawn too narrowly.
+
+**Finding.** Per-variant decode-mode deltas over 720 matched settings each:
+
+| variant | mean iterative − pyramidal | min | max |
+|---|---:|---:|---:|
+| default | +0.0022 dB | −0.0146 | +0.0476 |
+| **min2** | **+3.8912 dB** | −0.0046 | **+19.7733** |
+| max32 | +0.0018 dB | −0.0247 | +0.0676 |
+| step8 | +0.0019 dB | −0.0225 | +0.0366 |
+| alfa5 | +0.0028 dB | −0.0182 | +0.0547 |
+| beta6 | +0.0026 dB | −0.0162 | +0.0479 |
+
+`decmars` decodes at `1/2^levels` scale before raising resolution (`mars_dec.c:108-123`), so
+a range block of `min_size` occupies `min_size / 2^levels` pixels there. Varying image size
+and `min_size` independently isolates it:
+
+| image | min_size | levels | block at that level | pyramidal | iterative | gap |
+|---|---:|---:|---|---:|---:|---:|
+| zoneplate 256² | 2 | 1 | 1.00 px | 22.615 | 22.576 | −0.039 |
+| zoneplate 256² | 4 | 1 | 2.00 px | 12.125 | 12.120 | −0.005 |
+| mandelbrot 512² | 2 | 2 | **0.50 px** | 32.992 | 38.738 | **+5.746** |
+| mandelbrot 512² | 4 | 2 | 1.00 px | 28.764 | 28.810 | +0.046 |
+| kodim01 768×512 | 2 | 2 | **0.50 px** | 23.870 | 29.238 | **+5.368** |
+| kodim01 768×512 | 4 | 2 | 1.00 px | 27.421 | 27.418 | −0.003 |
+
+The 256² row at `min_size = 2` is the control that makes this a mechanism rather than a
+correlation: there the pyramid is one level deep, the block is a full pixel, and the penalty
+does not appear. **Small blocks are harmless; sub-pixel blocks at the pyramid's depth are
+not.** The threshold is exact in every case measured — ≥ 1 px agrees to < 0.05 dB, 0.5 px
+costs 5+ dB.
+
+The consequence for the RD curves is severe enough to be worth stating separately: under
+pyramidal decode the `min2` curves run **backwards**. kodim01 reaches 25.38 dB at 1.05 bpp
+and only 23.71 dB at 6.30 bpp. That is why `bd_metrics` refuses them, and refusing is
+correct — interpolating through that shape would manufacture a number.
+
+**Decision.**
+
+1. Report decode-mode deltas **per variant**, never pooled. A single corpus-wide mean would
+   have averaged a 19.8 dB effect into a 0.002 dB one.
+2. The report states why `min2`'s BD-rate is undefined rather than printing an em-dash, so
+   an unusable cell reads as a result and not as an omission (§A7).
+3. A test pins the rule in both directions: sub-pixel must cost > 1 dB, whole-pixel must
+   cost < 0.05 dB.
+
+**What this rules out.** Quoting any `min_size = 2` result from a pyramidal decode, and the
+general claim in D9 that the decode mode is cheap — it is cheap only while range blocks stay
+at or above one pixel at the pyramid's reduced resolution.
+
+**What this means for Mars 2.** Mars 2 has no pyramidal decoder (the plan specifies a
+~80-line iterative one), so it does not inherit the defect. But any future multi-resolution
+or progressive decoder — **Step 19 is exactly that** — reintroduces the hazard, and its
+minimum block size and level count are not independent parameters. Worth knowing before
+Step 19 rather than during it.
+
+**Tolerance impact.** None; the new assertions are additions.

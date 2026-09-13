@@ -269,6 +269,15 @@ impl std::str::FromStr for DecodeMode {
     }
 }
 
+/// `decmars`'s compiled-in iteration count (`globals.h`: `iterations INIT(= 10)`).
+///
+/// This is the variable that actually moves decoded PSNR, and it moves it a long way:
+/// measured on kodim01, pyramidal and iterative decode of the *same* bitstream differ by
+/// 6.1 dB at 1 iteration, 0.26 dB at 5, and 0.004 dB at 10. Both modes converge to the
+/// same IFS fixed point, so by the default count the choice of mode is worth almost
+/// nothing — see `docs/decisions.md` D9.
+pub const DEFAULT_ITERATIONS: u32 = 10;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecodeParams {
     pub mode: DecodeMode,
@@ -290,6 +299,13 @@ impl Default for DecodeParams {
 }
 
 impl DecodeParams {
+    /// The count actually in force, with the reference's default resolved. Recorded on
+    /// every row rather than left implicit: a PSNR whose iteration count is unstated is
+    /// not reproducible, and at low counts it is not even close.
+    pub fn effective_iterations(&self) -> u32 {
+        self.iterations.unwrap_or(DEFAULT_ITERATIONS)
+    }
+
     pub fn args(&self, input: &str, output: &str) -> Vec<String> {
         let mut a: Vec<String> = Vec::new();
         if self.mode == DecodeMode::Iterative {

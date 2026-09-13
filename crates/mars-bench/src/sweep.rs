@@ -256,6 +256,12 @@ pub struct BaselineRow {
     pub method: String,
     pub encode: EncodeRow,
     pub decode_mode: DecodeMode,
+    /// Decode iterations actually in force. The mode alone does not determine the
+    /// reconstruction — the iteration count does, and by far more (D9).
+    pub decode_iterations: u32,
+    /// Whether the `-p` deblocking filter ran. Off for every baseline number: the
+    /// baseline is the codec, not the codec plus a postprocessor.
+    pub decode_postprocess: bool,
     pub quality: crate::measure::Measurement,
     pub indicative_encode_seconds: f64,
     pub indicative_decode_seconds: f64,
@@ -405,6 +411,8 @@ fn run_job(ctx: &RunContext, workdir: &Path, job: &Job) -> Result<Vec<BaselineRo
                 image_variance: enc.stats.image_variance,
             },
             decode_mode: mode,
+            decode_iterations: dec_params.effective_iterations(),
+            decode_postprocess: dec_params.postprocess,
             quality,
             indicative_encode_seconds: enc.indicative_seconds,
             indicative_decode_seconds: dec.indicative_seconds,

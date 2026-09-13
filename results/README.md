@@ -57,6 +57,16 @@ history of a wrong number is part of the evidence that the right one is right.
 
 ## What is here now
 
+`baseline-mars1.jsonl` · `baseline-mars1.md` · `baseline-mars1.html` — **the Step 2
+baseline.** 9360 rows: 4680 encodes (24 Kodak images + 12 fixtures × 6 speed-up methods ×
+5 RMS thresholds × 6 structural variants) each decoded in both modes. Regenerate with
+`just baseline-mars1` (~21 min on 6 P-cores) and `just baseline-mars1-report`; check with
+`just gate-2`.
+
+Read the report's §4 before quoting any `min_size = 2` number: under pyramidal decode those
+curves run backwards, for the reason in `docs/decisions.md` D11.
+
+
 `harness-smoke.jsonl` · `harness-smoke.md` · `harness-smoke.html` — **not a baseline.**
 Ten rows from real Mars 1 encodes of Lena (MassCenter and Fisher, `-r 2,4,8,16,32`,
 pyramidal decode with 10 iterations), produced at Step 1 purely to exercise the harness end
@@ -69,7 +79,7 @@ images, and the real baseline arrives at Step 2.
 | `kind` | `data` payload | Added at |
 |---|---|---|
 | `quality` | One `Measurement`: MSE/PSNR per plane, PSNR-Y/Cb/Cr/YUV, SSIM, MS-SSIM, coded bytes, bpp, and the pinned metric definitions inline. | Step 1 |
-| `baseline-mars1` | Mars 1 encode/decode under the harness: `transforms`, `comparisons`, `zero_alfa_transform`, bytes, decode mode. | Step 2 |
+| `baseline-mars1` | Mars 1 encode/decode under the harness: `transforms`, `comparisons`, `zero_alfa_transform`, bytes, decode mode **and iteration count** (D9/D11 — the mode alone does not determine the reconstruction). | Step 2 |
 | `timing` | Median + MAD over N ≥ 5 A/B-interleaved runs. | later |
 
 A row carries its own metric definitions in `data.definitions`. That is redundant with

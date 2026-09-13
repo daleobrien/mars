@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use mars_bench::mars1::{
     decode, encode, DecodeMode, DecodeParams, EncodeParams, Mars1Binaries, Mars1Error, Method,
+    DEFAULT_ITERATIONS,
 };
+use mars_bench::measure::{measure, MeasureRequest};
 
 fn repo_root() -> PathBuf {
     // CARGO_MANIFEST_DIR is crates/mars-bench.
@@ -211,34 +213,129 @@ fn a_dimension_mismatch_is_caught_not_absorbed() {
     std::fs::remove_dir_all(&work).ok();
 }
 
-/// **P2.2's mechanism.** Pyramidal and iterative decode the *same* bitstream, so any
-/// difference between them is a decoder property, not a coding one — which is exactly why
-/// mixing the two silently corrupts a comparison. This asserts only that the two modes are
-/// distinguishable; the size of the difference is measured by the sweep, not decided here.
+/// **P2.2, measured.** The plan and the `mars1-reference` skill both warn that comparing
+/// a pyramidal decode against an iterative one is "a silent 0.2–1 dB error". Measured on
+/// the same bitstream, that is true at **5** iterations and false at the 1998 default of
+/// **10**, where the two agree to ~0.004 dB.
+///
+/// The mechanism is convergence, not approximation: an IFS has a unique attracting fixed
+/// point, so both decoders approach the same image. Pyramidal is an *accelerator* — it
+/// iterates at reduced resolution first and arrives sooner — rather than a cheaper,
+/// worse reconstruction.
+///
+/// This test pins both halves of that, because each protects a different mistake:
+/// the modes must be **distinguishable at 1 iteration** (or `-i` is not taking effect and
+/// recording the mode measures nothing), and **converged by the default count** (or the
+/// baseline's decode mode really would be a confound and every row's PSNR would need a
+/// mode-matched comparison).
 #[test]
 #[ignore = "needs the 1998 binaries; run via `just gate-2`"]
-fn the_two_decode_modes_really_do_differ() {
+fn the_decode_modes_diverge_when_unconverged_and_agree_once_converged() {
     let (bins, work, w, h) = require_binaries!("decode");
     encode(&bins, &work, "i.raw", "o.ifs", w, h, &base()).expect("encode");
 
-    for (mode, name) in [
-        (DecodeMode::Pyramidal, "p.pgm"),
-        (DecodeMode::Iterative, "i.pgm"),
-    ] {
+    let psnr_at = |iterations: u32, mode: DecodeMode, name: &str| -> f64 {
         let params = DecodeParams {
             mode,
-            iterations: None,
+            iterations: Some(iterations),
             postprocess: false,
         };
         decode(&bins, &work, "o.ifs", name, (w, h), &params).expect("decode");
-    }
-    let p = std::fs::read(work.join("p.pgm")).expect("pyramidal output");
-    let i = std::fs::read(work.join("i.pgm")).expect("iterative output");
-    assert_ne!(
-        p, i,
-        "the two decode modes produced identical output; either -i is not taking effect \
-         or the modes have converged, and in both cases recording the mode per row would \
-         be measuring nothing"
+        let req = MeasureRequest::new(work.join("i.raw"), work.join(name))
+            .with_raw_dims(w as usize, h as usize);
+        measure(&req)
+            .expect("measure")
+            .psnr_y
+            .expect("a lossy decode has finite PSNR")
+    };
+
+    // Unconverged: the two modes are far apart, so `-i` demonstrably takes effect.
+    let gap_1 =
+        psnr_at(1, DecodeMode::Pyramidal, "p1.pgm") - psnr_at(1, DecodeMode::Iterative, "i1.pgm");
+    assert!(
+        gap_1 > 1.0,
+        "at 1 iteration the modes differed by only {gap_1:.4} dB; -i may not be taking \
+         effect, which would make the convergence assertion below vacuous"
     );
+
+    // Converged: at the 1998 default the mode is worth ~nothing. If this ever fails, the
+    // baseline's decode mode is a confound and every PSNR comparison must be mode-matched.
+    let gap_10 = (psnr_at(DEFAULT_ITERATIONS, DecodeMode::Pyramidal, "p10.pgm")
+        - psnr_at(DEFAULT_ITERATIONS, DecodeMode::Iterative, "i10.pgm"))
+    .abs();
+    assert!(
+        gap_10 < 0.05,
+        "at the default {DEFAULT_ITERATIONS} iterations the modes differed by {gap_10:.4} dB, \
+         far more than the ~0.004 dB measured when this was written; the two decoders are \
+         no longer converging to the same fixed point"
+    );
+
+    // And the ordering that makes "accelerator, not approximation" the right description.
+    assert!(
+        gap_1 > gap_10,
+        "the modes did not converge towards each other as iterations increased"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// **D11.** `decmars` decodes at `1/2^levels` scale before raising resolution, so a range
+/// block of `min_size` occupies `min_size / 2^levels` pixels there. At or above one pixel
+/// the two decode modes agree; at half a pixel pyramidal loses 5+ dB and never recovers it.
+///
+/// Both directions are asserted. The whole-pixel case alone would not distinguish "the
+/// rule holds" from "`-i` does nothing"; the sub-pixel case alone would not distinguish
+/// "sub-pixel blocks break" from "small blocks break", which is the wrong lesson and the
+/// one that would send someone hunting in the encoder.
+#[test]
+#[ignore = "needs the 1998 binaries; run via `just gate-2`"]
+fn pyramidal_decode_breaks_only_on_sub_pixel_range_blocks() {
+    let (bins, work, w, h) = require_binaries!("subpixel");
+
+    // lena is 512x512, so decmars builds a 2-level pyramid: min_size 2 lands at half a
+    // pixel there, min_size 4 at a whole one.
+    let gap_at = |min_size: u32| -> f64 {
+        let params = EncodeParams {
+            min_size,
+            t_rms: 4.0,
+            ..base()
+        };
+        encode(&bins, &work, "i.raw", "o.ifs", w, h, &params).expect("encode");
+        let psnr = |mode: DecodeMode, name: &str| {
+            decode(
+                &bins,
+                &work,
+                "o.ifs",
+                name,
+                (w, h),
+                &DecodeParams {
+                    mode,
+                    iterations: None,
+                    postprocess: false,
+                },
+            )
+            .expect("decode");
+            let req = MeasureRequest::new(work.join("i.raw"), work.join(name))
+                .with_raw_dims(w as usize, h as usize);
+            measure(&req).expect("measure").psnr_y.expect("lossy")
+        };
+        psnr(DecodeMode::Iterative, "it.pgm") - psnr(DecodeMode::Pyramidal, "py.pgm")
+    };
+
+    let sub_pixel = gap_at(2);
+    let whole_pixel = gap_at(4);
+
+    assert!(
+        sub_pixel > 1.0,
+        "min_size=2 on a 512x512 image puts range blocks at half a pixel in a 2-level \
+         pyramid, which cost 5+ dB when measured; the gap here was only {sub_pixel:.3} dB"
+    );
+    assert!(
+        whole_pixel.abs() < 0.05,
+        "min_size=4 keeps range blocks at a whole pixel and the modes agreed to ~0.05 dB \
+         when measured; the gap here was {whole_pixel:.3} dB, so the defect is not the \
+         sub-pixel one D11 describes"
+    );
+
     std::fs::remove_dir_all(&work).ok();
 }
