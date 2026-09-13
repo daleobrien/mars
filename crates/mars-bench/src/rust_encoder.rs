@@ -104,6 +104,20 @@ impl Divergence {
     }
 }
 
+/// §M5's headline metric, one row per image, summed over the whole rms grid.
+#[derive(Debug, Clone)]
+pub struct EvalsRow {
+    pub image: String,
+    pub evals: u64,
+    pub transforms: u64,
+}
+
+impl EvalsRow {
+    pub fn evals_per_transform(&self) -> f64 {
+        self.evals as f64 / self.transforms as f64
+    }
+}
+
 /// Run both checks over the fixtures/default/RMS-grid corpus and return one `Check` per
 /// criterion plus the f32-vs-f64 divergence measurement.
 pub fn gate(
@@ -112,7 +126,7 @@ pub fn gate(
     baseline_store: &Path,
     mars1_dir: &Path,
     scratch: &Path,
-) -> Result<(Vec<Check>, Divergence), GateError> {
+) -> Result<(Vec<Check>, Divergence, Vec<EvalsRow>), GateError> {
     let images = ImageSet::read(&root.join(fixtures_index))?.images;
     let bins = Mars1Binaries::from_dir(mars1_dir)?;
     std::fs::create_dir_all(scratch).map_err(|source| GateError::Io {
@@ -144,6 +158,10 @@ pub fn gate(
     let mut compared_curves = 0usize;
     let mut compared_total = 0usize;
     let mut differed_total = 0usize;
+    // §M5: `evals` is the headline search-cost metric, and Step 6's deliverable list
+    // names the counter explicitly — recorded per image (summed over the rms grid) rather
+    // than only threaded through and discarded.
+    let mut evals_by_image: Vec<EvalsRow> = Vec::with_capacity(images.len());
 
     for image in &images {
         let bytes = read(&root.join(&image.file))?;
@@ -162,9 +180,12 @@ pub fn gate(
         )?;
 
         let mut curve_points = Vec::with_capacity(RMS_GRID.len());
+        let (mut image_evals, mut image_transforms) = (0u64, 0u64);
         for &t_rms in &RMS_GRID {
             let params = EncodeParams { t_rms, ..BASE };
-            let (hdr, leaves, _evals) = encode_image(&ground_truth, &params);
+            let (hdr, leaves, evals) = encode_image(&ground_truth, &params);
+            image_evals += evals;
+            image_transforms += leaves.len() as u64;
             let ifs_bytes = write(&hdr, &leaves).unwrap_or_else(|e| {
                 panic!(
                     "{}: encoder produced an unwritable tree at rms {t_rms}: {e}",
@@ -224,6 +245,11 @@ pub fn gate(
                 psnr: psnr_rust,
             });
         }
+        evals_by_image.push(EvalsRow {
+            image: image.name.clone(),
+            evals: image_evals,
+            transforms: image_transforms,
+        });
 
         let rust_curve = RdCurve::new(format!("{} rust-exhaustive", image.name), curve_points);
         let Some(fisher_curve) =
@@ -321,5 +347,5 @@ pub fn gate(
         },
     ];
 
-    Ok((checks, divergence))
+    Ok((checks, divergence, evals_by_image))
 }

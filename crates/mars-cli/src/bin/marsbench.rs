@@ -951,7 +951,7 @@ fn ifs_check(a: IfsCheckArgs) -> Result<()> {
 
 fn rust_encoder_check(a: RustEncoderCheckArgs) -> Result<()> {
     let root = Path::new(".");
-    let (checks, divergence) = mars_bench::rust_encoder::gate(
+    let (checks, divergence, evals_by_image) = mars_bench::rust_encoder::gate(
         root,
         &a.fixtures_index,
         &a.baseline_store,
@@ -969,6 +969,33 @@ fn rust_encoder_check(a: RustEncoderCheckArgs) -> Result<()> {
         };
         println!("{mark}  {}\n      {}", c.name, c.detail);
     }
+
+    println!(
+        "\nevals/transform (§M5), summed over rms = {:?}:",
+        mars_bench::rust_encoder::RMS_GRID
+    );
+    let (mut total_evals, mut total_transforms) = (0u64, 0u64);
+    for row in &evals_by_image {
+        total_evals += row.evals;
+        total_transforms += row.transforms;
+        println!(
+            "  {:<16} {:>12} evals  {:>6} transforms  {:>8.1} evals/transform",
+            row.image,
+            row.evals,
+            row.transforms,
+            row.evals_per_transform()
+        );
+    }
+    if total_transforms > 0 {
+        println!(
+            "  {:<16} {:>12} evals  {:>6} transforms  {:>8.1} evals/transform",
+            "(all fixtures)",
+            total_evals,
+            total_transforms,
+            total_evals as f64 / total_transforms as f64
+        );
+    }
+
     println!(
         "\nf32-vs-f64 fit divergence: {:.4}% ({} of {} domain-referencing leaves picked a \
          different qalfa or qbeta; recorded, not gated — see docs/decisions.md)",
