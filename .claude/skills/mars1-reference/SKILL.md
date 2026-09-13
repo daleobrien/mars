@@ -28,7 +28,7 @@ compiler and version in every fixture manifest and result row.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `-F -X -C -S -Z -Y` | method: Fisher, Hurtgen, MassCenter, Saupe, Saupe-Fisher, Mc-Saupe | (none = exhaustive) |
+| `-F -X -C -S -Z -Y` | method: Fisher, Hurtgen, MassCenter, Saupe, Saupe-Fisher, Mc-Saupe | **none = MassCenter** |
 | `-r <f>` | RMS threshold `T_RMS` | 8.0 |
 | `-e <f>` / `-v <f>` | entropy / variance pre-split thresholds | 8.0 / 1e6 |
 | `-m <n>` / `-M <n>` | min / max range size (powers of two, 2–64) | 4 / 16 |
@@ -75,6 +75,11 @@ not comparable.
   the entropy pre-split can never fire (an 8-bit block's entropy is bounded by 8.0, and
   by 4.0 for a 4×4 block), and with `T_VAR = 1e6` the variance pre-split cannot fire
   either (8-bit variance is bounded by ~16256). Knowing this saves a week of confusion.
+- **There is no exhaustive mode, and no flag does not mean one.** `globals.h:201` is
+  `EXTERN int method INIT(= MassCenter)`, so an omitted or mistyped method flag silently
+  runs MassCenter instead of failing. Always pass a method explicitly and check the
+  `Speed-up method:` line the encoder echoes. The exhaustive RD upper bound (M6's oracle)
+  has no Mars 1 equivalent and is built in Rust at Step 6/7. See `docs/decisions.md` D5.
 - **Decode mode must be pinned and recorded.** Pyramidal is the default; comparing a
   pyramidal decode against an iterative one is a silent 0.2–1 dB error.
 - **Padding is not measured.** Mars 1 pads to `virtual_size`; MSE is over the original

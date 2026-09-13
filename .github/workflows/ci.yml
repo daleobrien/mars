@@ -50,6 +50,13 @@ jobs:
           "$GITHUB_WORKSPACE/target/mars1/decmars" lena.ifs lena.dec.pgm > /dev/null
           test -s lena.ifs && test -s lena.dec.pgm
 
+      - name: claims about the 1998 reference that Step 2 depends on
+        # Three seconds, and each one is a binary check of something the baseline sweep
+        # assumes but cannot itself reveal: that the pre-split thresholds really are inert
+        # at the 1998 defaults, that each method flag selects a distinct search (there is
+        # no exhaustive mode — docs/decisions.md D5), and that the two decode modes differ.
+        run: cargo test -p mars-bench --test mars1_reference -- --ignored --nocapture
+
       - name: "§A2 — no silently weakened assertions or tolerances"
         run: ./scripts/check-contract.sh "origin/${{ github.base_ref || 'main' }}"
 

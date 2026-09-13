@@ -1,0 +1,233 @@
+{
+  "count": 24,
+  "images": [
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim01.raw",
+      "height": 512,
+      "name": "kodim01",
+      "sha256": "4bcd9402749c018e7a3c5c5c921dfa51ac6e9037bb648310569ecb803be3012d",
+      "source": "corpus/images/kodak/kodim01.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim02.raw",
+      "height": 512,
+      "name": "kodim02",
+      "sha256": "4f5bc5300234a605ffdcd2170cb80a439f3409d9502e077e41985e3f74546d5b",
+      "source": "corpus/images/kodak/kodim02.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim03.raw",
+      "height": 512,
+      "name": "kodim03",
+      "sha256": "e9693cd72056d654f102c96a32f30c5fe8a7476fdf77c4b02389c5a8000b79ee",
+      "source": "corpus/images/kodak/kodim03.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim04.raw",
+      "height": 768,
+      "name": "kodim04",
+      "sha256": "a1cb2e6a7dc35c3aca68d2b133e5fc571ce020389500ddb112039fbab3382f78",
+      "source": "corpus/images/kodak/kodim04.png",
+      "width": 512
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim05.raw",
+      "height": 512,
+      "name": "kodim05",
+      "sha256": "801ea25bf31e9d3e2138e3a2f721c4aa54186a963cb8d3e73ff00e03e2b1868a",
+      "source": "corpus/images/kodak/kodim05.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim06.raw",
+      "height": 512,
+      "name": "kodim06",
+      "sha256": "f61ad126be727031be95f7e31b695fa7c68dc6c5ac7f16675492c29079ebe3cb",
+      "source": "corpus/images/kodak/kodim06.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim07.raw",
+      "height": 512,
+      "name": "kodim07",
+      "sha256": "83043517d2f7f6f96304286bca9c29c0e564b669122d1cfd2e7238cc2d6fdac2",
+      "source": "corpus/images/kodak/kodim07.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim08.raw",
+      "height": 512,
+      "name": "kodim08",
+      "sha256": "8e39bb16b7d2209bf4e40980ce97eb16a281cc402bfb89d10e945b58867326d1",
+      "source": "corpus/images/kodak/kodim08.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim09.raw",
+      "height": 768,
+      "name": "kodim09",
+      "sha256": "4eca8d4d2cc3310dc48e59087d13a14bdc737ce5de4f0e2e54cf729d291181f3",
+      "source": "corpus/images/kodak/kodim09.png",
+      "width": 512
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim10.raw",
+      "height": 768,
+      "name": "kodim10",
+      "sha256": "5be72b04dfd471d48f973daae0645d731123ae700a191c7f2b5b014d3ef9be21",
+      "source": "corpus/images/kodak/kodim10.png",
+      "width": 512
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim11.raw",
+      "height": 512,
+      "name": "kodim11",
+      "sha256": "381d0f5d7da5e8946d392354695211602eb97f3d00bfb6e08eb4a812d3f3a4af",
+      "source": "corpus/images/kodak/kodim11.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim12.raw",
+      "height": 512,
+      "name": "kodim12",
+      "sha256": "41d42067590125e2e4ed33379d3229e436417da1d2f53d397223318b10d7c985",
+      "source": "corpus/images/kodak/kodim12.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim13.raw",
+      "height": 512,
+      "name": "kodim13",
+      "sha256": "feee6d92793c8034763c84f5310354f01222eed3b3c62404b54e3ad38d170865",
+      "source": "corpus/images/kodak/kodim13.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim14.raw",
+      "height": 512,
+      "name": "kodim14",
+      "sha256": "8d077f844723f7e7aa9b2c2f93912cef0731e01fe864fa6788b62f3a957e3f8f",
+      "source": "corpus/images/kodak/kodim14.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim15.raw",
+      "height": 512,
+      "name": "kodim15",
+      "sha256": "1ea70c51e9b9a71de0b60bc9686447204d5286aee6ed120c52335fb62a5e3097",
+      "source": "corpus/images/kodak/kodim15.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim16.raw",
+      "height": 512,
+      "name": "kodim16",
+      "sha256": "e2dd25f1968ba2546f79c7219c5a2b44d897c12bde7dee6959b27dffb44c8c46",
+      "source": "corpus/images/kodak/kodim16.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim17.raw",
+      "height": 768,
+      "name": "kodim17",
+      "sha256": "6862ef6402dde36d79d975fa9cd8d93fe42cc7e7c9824e4eef2f226ed4637aca",
+      "source": "corpus/images/kodak/kodim17.png",
+      "width": 512
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim18.raw",
+      "height": 768,
+      "name": "kodim18",
+      "sha256": "4955f4901d35495f2a56d375fbd337e2e376066ac2f518194fb8fb6d2ec1171d",
+      "source": "corpus/images/kodak/kodim18.png",
+      "width": 512
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim19.raw",
+      "height": 768,
+      "name": "kodim19",
+      "sha256": "cfaa805f1889e544876ae53d41c26501e000a8d8264dd6248003f2f287337557",
+      "source": "corpus/images/kodak/kodim19.png",
+      "width": 512
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim20.raw",
+      "height": 512,
+      "name": "kodim20",
+      "sha256": "7926e745e23bd97aa5cd5728c25ab7b68cab0ffaef0fe92ad0bb955b68a05b75",
+      "source": "corpus/images/kodak/kodim20.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim21.raw",
+      "height": 512,
+      "name": "kodim21",
+      "sha256": "4da3ee2431a0d411c486be1adf4e4f26e92cfd11b3e203d3ee262628e04b0c0b",
+      "source": "corpus/images/kodak/kodim21.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim22.raw",
+      "height": 512,
+      "name": "kodim22",
+      "sha256": "15f575af751da23a250c32555d4da6033a6b04d7a26c7755213d2d96d1dd2d2f",
+      "source": "corpus/images/kodak/kodim22.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim23.raw",
+      "height": 512,
+      "name": "kodim23",
+      "sha256": "9f034d7e216c3d950f9d46db42eb2a96e13e1791d5f845fe7f2ed7d951dc810c",
+      "source": "corpus/images/kodak/kodim23.png",
+      "width": 768
+    },
+    {
+      "bytes": 393216,
+      "file": "corpus/images/kodak-gray/kodim24.raw",
+      "height": 512,
+      "name": "kodim24",
+      "sha256": "057ac82c68a9e7024ca2c731cb735097968fed4c2b197f22e282c7733ad7e98a",
+      "source": "corpus/images/kodak/kodim24.png",
+      "width": 768
+    }
+  ],
+  "provenance": {
+    "container_decode_cmd": "ffmpeg -i IN.png -pix_fmt rgb24 -f image2 -c:v ppm OUT.ppm",
+    "container_decoder": "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+    "gray_definition": "Y = 0.299R + 0.587G + 0.114B (Rec.601 luma on sRGB-encoded values), rounded half away from zero, clamped to [0,255]",
+    "gray_script": "scripts/ppm2raw.py",
+    "gray_script_sha256": "52107184e225b6846a4f43207c26bbbb8c86e32421ae37557ea2f6632339f7a4",
+    "layout": "8-bit grayscale, headerless, row-major, width-fast",
+    "source_manifest": "corpus/kodak.manifest.json",
+    "source_manifest_sha256": "52999a4ef242de42ad3bc2fe5632d86250e58a11a7f3bef2b817eb1e427f98c0"
+  },
+  "role": "M9 `standard`: Kodak, 24 images. All headline RD numbers.",
+  "set": "standard"
+}

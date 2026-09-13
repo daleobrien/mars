@@ -1,0 +1,81 @@
+{
+  "name": "baseline-mars1",
+  "description": "Step 2 \u2014 the 1998 C codec under the harness. Six speed-up methods x five RMS thresholds give the RD curves and the first evals/transform table; five one-at-a-time structural variants probe the parameters the plan's grid lists as alternatives to the 1998 defaults. Every encode is decoded in both modes because pyramidal and iterative differ by enough to reorder curves.",
+  "decode_modes": [
+    "pyramidal",
+    "iterative"
+  ],
+  "methods": [
+    "fisher",
+    "hurtgen",
+    "masscenter",
+    "saupe",
+    "saupe-fisher",
+    "mc-saupe"
+  ],
+  "rms": [
+    2.0,
+    4.0,
+    8.0,
+    16.0,
+    32.0
+  ],
+  "base": {
+    "min_size": 4,
+    "max_size": 16,
+    "shift": 4,
+    "bits_alfa": 4,
+    "bits_beta": 7,
+    "max_alfa": 1.0
+  },
+  "variants": [
+    {
+      "label": "default",
+      "description": "The 1998 defaults: min/max range 4/16, domain step 4, 4 scale bits, 7 offset bits, MAX_ALFA 1.0. Carries the headline RD curves."
+    },
+    {
+      "label": "min2",
+      "description": "min range 2 (grid row `-m`: (2,16)). Finer partition floor: more transforms, more bits, better RMS fit.",
+      "min_size": 2
+    },
+    {
+      "label": "max32",
+      "description": "max range 32 (grid row `-M`: (4,32)). Coarser partition ceiling: fewer transforms on flat regions.",
+      "max_size": 32
+    },
+    {
+      "label": "step8",
+      "description": "domain step 8 (grid row `-d`). Quarters the domain pool, so it should cut evals/transform roughly 4x at some RD cost.",
+      "shift": 8
+    },
+    {
+      "label": "alfa5",
+      "description": "5 scale bits (grid row `-A`). One more bit per transform against a finer alfa quantiser.",
+      "bits_alfa": 5
+    },
+    {
+      "label": "beta6",
+      "description": "6 offset bits (grid row `-B`). One fewer bit per transform against a coarser beta quantiser.",
+      "bits_beta": 6
+    }
+  ],
+  "corpora": [
+    {
+      "index": "corpus/standard.images.json",
+      "variants": [
+        "default",
+        "min2",
+        "max32",
+        "step8",
+        "alfa5",
+        "beta6"
+      ]
+    },
+    {
+      "index": "corpus/fixtures.images.json",
+      "variants": [
+        "default"
+      ]
+    }
+  ]
+}

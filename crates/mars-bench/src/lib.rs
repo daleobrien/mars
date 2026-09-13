@@ -6,13 +6,20 @@
 //! so that exactly one implementation exists.
 
 pub mod bdrate;
+pub mod mars1;
+pub mod mars1_report;
 pub mod measure;
 pub mod pchip;
 pub mod provenance;
 pub mod report;
 pub mod store;
+pub mod sweep;
 
 pub use bdrate::{bd_metrics, BdResult, RdCurve, RdPoint};
+pub use mars1::{
+    decode as mars1_decode, encode as mars1_encode, DecodeMode, DecodeParams, EncodeParams,
+    Mars1Binaries, Method,
+};
 pub use measure::{measure, MeasureRequest, Measurement};
 pub use provenance::{Machine, Provenance, HARNESS_VERSION};
 pub use report::Report;

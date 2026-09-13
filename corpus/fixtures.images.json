@@ -1,0 +1,123 @@
+{
+  "count": 12,
+  "images": [
+    {
+      "bytes": 65536,
+      "file": "fixtures/images/flat128.raw",
+      "height": 256,
+      "name": "flat128",
+      "sha256": "086317bd0c9bcd77537c8a6cfe66f8e7dd84ded162673903b29f9b3f5e5ea244",
+      "source": "fixtures/images/manifest.toml",
+      "width": 256
+    },
+    {
+      "bytes": 65536,
+      "file": "fixtures/images/ramp_h.raw",
+      "height": 256,
+      "name": "ramp_h",
+      "sha256": "7daca2095d0438260fa849183dfc67faa459fdf4936e1bc91eec6b281b27e4c2",
+      "source": "fixtures/images/manifest.toml",
+      "width": 256
+    },
+    {
+      "bytes": 65536,
+      "file": "fixtures/images/checker8.raw",
+      "height": 256,
+      "name": "checker8",
+      "sha256": "788cb23b62c27e1b56ff06e42c6a3b91034681d4878e010c1288bb2efaa1b597",
+      "source": "fixtures/images/manifest.toml",
+      "width": 256
+    },
+    {
+      "bytes": 65536,
+      "file": "fixtures/images/noise_u8.raw",
+      "height": 256,
+      "name": "noise_u8",
+      "sha256": "ba7d3e9e01a69e16034039a4632ce585368a5c58c0f74477346b8736283dff4c",
+      "source": "fixtures/images/manifest.toml",
+      "width": 256
+    },
+    {
+      "bytes": 65536,
+      "file": "fixtures/images/impulse.raw",
+      "height": 256,
+      "name": "impulse",
+      "sha256": "a052a011337b728214edeff05705fd09919f2ff75000e8041487f4f52f07f1ee",
+      "source": "fixtures/images/manifest.toml",
+      "width": 256
+    },
+    {
+      "bytes": 65536,
+      "file": "fixtures/images/step_edge.raw",
+      "height": 256,
+      "name": "step_edge",
+      "sha256": "3494849570a1572e721ef0792d95ae4214f525f12c92080ca8a1718c5a18ac6b",
+      "source": "fixtures/images/manifest.toml",
+      "width": 256
+    },
+    {
+      "bytes": 65536,
+      "file": "fixtures/images/selfsim_iso.raw",
+      "height": 256,
+      "name": "selfsim_iso",
+      "sha256": "eba04d808ee14bf6d33ee3b895c9364ece49794ea5ac82c6e6fc5c845932b338",
+      "source": "fixtures/images/manifest.toml",
+      "width": 256
+    },
+    {
+      "bytes": 262144,
+      "file": "fixtures/images/sierpinski.raw",
+      "height": 512,
+      "name": "sierpinski",
+      "sha256": "4395b6cd11f79ae131684608cc4f8abe80d02ab06ffe7c74957727e2d1ddcdd9",
+      "source": "fixtures/images/manifest.toml",
+      "width": 512
+    },
+    {
+      "bytes": 262144,
+      "file": "fixtures/images/mandelbrot.raw",
+      "height": 512,
+      "name": "mandelbrot",
+      "sha256": "4011154b033ea814d538b9b4bd594a3542b104cba1d7037d7ddb81ffb59218ea",
+      "source": "fixtures/images/manifest.toml",
+      "width": 512
+    },
+    {
+      "bytes": 65536,
+      "file": "fixtures/images/zoneplate.raw",
+      "height": 256,
+      "name": "zoneplate",
+      "sha256": "e37786156fc31216c24e0f86642f0153a347bf582b645e4bdeff4a034ad1b6ca",
+      "source": "fixtures/images/manifest.toml",
+      "width": 256
+    },
+    {
+      "bytes": 62500,
+      "file": "fixtures/images/mixed_250x250.raw",
+      "height": 250,
+      "name": "mixed_250x250",
+      "sha256": "b5aa920902d372cc5755878331529cec99aa2860e485ee55890a4ebb3dcd47e3",
+      "source": "fixtures/images/manifest.toml",
+      "width": 250
+    },
+    {
+      "bytes": 16383,
+      "file": "fixtures/images/mixed_129x127.raw",
+      "height": 127,
+      "name": "mixed_129x127",
+      "sha256": "d8cfe8f7a300e567b7c9dfa2edaaf5753191c4123f53772c582c153dbc31980b",
+      "source": "fixtures/images/manifest.toml",
+      "width": 129
+    }
+  ],
+  "provenance": {
+    "generator": "scripts/gen-fixtures.py",
+    "generator_sha256": "eb089deb6fe1930836837fc8869c9a3444f16743c5d27a55fe39290bb06f1c22",
+    "gray_definition": "synthetic, generated directly as 8-bit grayscale",
+    "layout": "8-bit grayscale, headerless, row-major, width-fast",
+    "source_manifest": "fixtures/images/manifest.toml",
+    "source_manifest_sha256": "0b02f6626b23fc72094d7ee3a645b6a2e53a05583fe7b4c38d583299f124093f"
+  },
+  "role": "M9 `fixtures`: synthetic edge cases. Not a headline corpus.",
+  "set": "fixtures"
+}

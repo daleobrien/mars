@@ -42,6 +42,36 @@ mars1:
 corpus manifest="corpus/kodak.manifest.json":
     ./scripts/fetch-corpus.sh {{manifest}}
 
+# Build the grayscale image-set indexes the Mars 1 sweep reads. Kodak is colour PNG and
+# Mars 1 reads headerless 8-bit gray, so the conversion is pinned in scripts/ppm2raw.py
+# rather than left to whichever ImageMagick is installed.
+corpus-gray:
+    python3 scripts/build-imageset.py --set fixtures
+    python3 scripts/build-imageset.py --set standard
+
+# Verify the image sets still hash to what the indexes say.
+corpus-gray-check:
+    python3 scripts/build-imageset.py --set fixtures --check
+    python3 scripts/build-imageset.py --set standard --check
+
+# ------------------------------------------------------------- mars 1 baseline (Step 2)
+
+# The whole Step 2 sweep, from one command. ~35 minutes on 6 P-cores.
+baseline-mars1 jobs="":
+    cargo build --release -p mars-cli
+    ./target/release/marsbench mars1-sweep {{ if jobs == "" { "" } else { "--jobs " + jobs } }}
+
+# Regenerate the committed report from the committed results.
+baseline-mars1-report:
+    cargo build --release -p mars-cli
+    ./target/release/marsbench mars1-report \
+        --markdown-out results/baseline-mars1.md \
+        --html-out results/baseline-mars1.html
+
+# Claims about the 1998 reference that the sweep depends on but does not itself test.
+mars1-claims:
+    cargo test -p mars-bench --test mars1_reference -- --ignored --nocapture
+
 # ------------------------------------------------------------------ crossval
 
 # Create the pinned python venv holding the independent reference implementations.
@@ -68,6 +98,13 @@ contract-check base="origin/main":
 # codec code written." Steps 0-4. Run it before starting Group B.
 gate-a: fmt-check clippy test deny mars1 crossval
     @echo "gate-a: PASS"
+
+# Step 2 — the Mars 1 baseline is captured, complete, and internally consistent.
+# Reads the committed results; run `just baseline-mars1` first if they are missing.
+gate-2: test mars1 corpus-gray-check mars1-claims
+    cargo build --release -p mars-cli
+    ./target/release/marsbench mars1-check
+    @echo "gate-2: PASS"
 
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
