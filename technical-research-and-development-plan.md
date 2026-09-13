@@ -1,5 +1,15 @@
 # Mars — Technical Research & Development Plan
 
+> **Status:** research direction document (the *why* and *what*).
+> The executable counterpart — ordered steps, gates, measurement contract, kill
+> criteria — lives in [implementation-plan.md](implementation-plan.md).
+> Where the two disagree, the implementation plan wins; §11 of that document lists
+> every deliberate divergence and its reason.
+>
+> **Revision note (2026-09-13):** this document has been revised for measurement-first
+> sequencing, falsifiable success criteria, and honest positioning against modern
+> codecs. Revised passages are marked **[rev]**.
+
 ## 1. The central idea
 
 The original Mars (in the folder fratal-mars) is actually a remarkably good starting point because it already separates several ideas that we can now recombine much more intelligently.
@@ -391,6 +401,18 @@ Rust's own portable SIMD API has also evolved substantially, although the standa
 
 I'd therefore initially use `pulp` for the performance-critical abstraction rather than coupling Mars 2 directly to x86 intrinsics.
 
+**[rev] Superseded by the platform decision.** With Apple M3 (aarch64) as the sole target,
+NEON is unconditional and there is nothing to dispatch between. Use `std::arch::aarch64`
+or `core::simd` directly; `pulp` was the right call for a portable x86/ARM codec and is
+pure overhead for a single-target one. Revisit if portability ever becomes a goal.
+
+**[rev] And one kernel that belongs on this list ahead of `SSD`:** the six block moments
+`(s1, s2, t0, t1, t2)`. Mars 1 accumulates them in `double`, but range pixels are `u8` and
+domain pixels are 2:1 contractions, so `4d` is always an integer — which makes every
+moment **exactly representable in fixed-point integer arithmetic**. That is faster than
+the float version, more accurate, and it is what allows a GPU backend to agree with the
+CPU bit-for-bit. See implementation-plan.md Step 6.
+
 The important SIMD kernels will be:
 
 * block mean
@@ -494,7 +516,27 @@ which matches the direction of the 2026 fractal-compression work.
 
 ## 10. GPU comes later — but the architecture should permit it
 
-I would not begin with CUDA.
+**[rev] Reversed by the platform decision — the GPU should come early, and for a
+different reason than speed.**
+
+The reasoning below is sound for *discrete* GPUs, where host↔device transfer has to be
+amortised and a GPU only pays once everything else is already fast. Neither premise holds
+on Apple Silicon: unified memory means there is no transfer to amortise.
+
+More importantly, the workload most worth accelerating is not the product encoder — it is
+the **oracle**, the full exhaustive `N × M × 8` sweep that yields the RD upper bound, the
+top-k recall metric, and the training labels for §20–21. It is embarrassingly parallel,
+needs no cleverness, is exact and so carries no rate-distortion risk, and is otherwise too
+expensive to run across a corpus at all.
+
+So the GPU does not make the codec faster here. **It makes the measurement methodology
+affordable**, which is worth more. It moves from Phase 9 to implementation-plan.md Step 7,
+where it sits inside the reference group rather than after it.
+
+One constraint that follows: **Metal has no fp64**, which is the other reason the moment
+arithmetic in §7 needs to be integer-exact rather than floating-point.
+
+I would not begin with CUDA — and on this target, not with CUDA at all; Metal via `wgpu`.
 
 First get:
 
@@ -766,6 +808,13 @@ mars2/
 └── docs/
 ```
 
+**[rev] Do not create all thirteen crates on day one.** `mars-gpu`, `mars-residual`
+and `mars-entropy` would sit empty for months, and workspace churn costs real build
+time, import noise and merge conflicts. Start with four — `mars-core`, `mars-codec`,
+`mars-bench`, `mars-cli` — and split each remaining crate out at the step that
+introduces it, when the boundary is known rather than guessed. The layout above is the
+*destination*, not the starting point.
+
 And the key public API should remain tiny:
 
 ```rust
@@ -862,6 +911,23 @@ cost = distortion + lambda * estimated_bits + mu * decode_cost;
 ```
 
 This gives us a single mathematical framework into which almost every future technique can plug.
+
+**[rev] λ is not a constant to be tuned once — it *is* the quality control.**
+
+This needs saying explicitly, because getting it wrong invalidates every rate-distortion
+comparison in the project:
+
+* the encoder exposes λ as its primary knob;
+* a "quality preset" is a λ value;
+* **an RD curve is a λ sweep**, not a sweep of some other threshold with λ held fixed.
+
+Two further consequences:
+
+* `estimated_bits` must come from the *live* entropy models, not a constant-bits
+  approximation — a fixed estimate biases every decision toward whichever modes have
+  cheap headers.
+* The resulting RD curve must be monotone and roughly convex. Non-convexity is the
+  cheapest available diagnostic for a rate-estimation bug; check it on every sweep.
 
 ---
 
@@ -988,6 +1054,19 @@ with:
 
 Not legal advice, and not a freedom-to-operate opinion. If the project ever changes from non-commercial research to commercial distribution, we'd do a proper patent review.
 
+**[rev] The same discipline should extend to the papers cited in this document**, not
+just the patents. Several of the works referenced above are very recent and none were
+verified while drafting. Keep `docs/claims.md` with one row per external claim recording
+the citation, an access date, a status (`unverified` / `verified` / `contradicted` /
+`withdrawn`), whether any design decision depends on it, and what we independently
+measured.
+
+The rule that matters: **no design decision may depend on an unverified claim.** This is
+not pedantry in this particular field — reported speedups in the fractal-compression
+literature are frequently measured against unoptimised exhaustive-search baselines on
+unstated hardware, which makes them incomparable to ours by construction. Our own
+recorded baseline is the only thing our numbers are ever quoted against.
+
 ---
 
 ## 23. Licensing
@@ -1007,14 +1086,37 @@ So I would make Mars 2 a clean Rust implementation, using the original Mars sour
 
 That also gives us a much cleaner codebase.
 
+**[rev] One concrete interaction to settle before dependencies accumulate.**
+Apache-2.0 code cannot be combined into a GPL-2.0-**only** work — its patent-termination
+and indemnification clauses count as additional restrictions under GPLv2. It *is*
+compatible with GPL-3.0. Most of the Rust ecosystem is dual-licensed MIT/Apache-2.0, and
+MIT alone is GPLv2-compatible, so this is navigable — but the consequence should be a
+decision rather than a discovery:
+
+* keeping **GPL-2.0-or-later** means a recipient may choose v3, so the combination is
+  lawful, but **the effective licence of the distributed binary becomes GPL-3.0**;
+* any Apache-2.0-only dependency (with no MIT option) forces that outcome.
+
+Enable `cargo-deny` license checking in the very first commit, record the decision in
+`docs/licensing.md`, and prefer dual-licensed crates where there is a choice. Cheap now;
+expensive once a dependency tree exists.
+
 ---
 
 ## 24. Development phases
 
 Here's the roadmap I'd actually follow.
 
+**[rev] The phase table below had benchmarking at Phase 13. That was backwards** — it
+made every intermediate claim an assertion rather than a measured delta. Measurement is
+now Phase 0, and its first subject is Mars 1, not Mars 2. Phases are also grouped into
+four gated blocks with explicit kill criteria; see
+[implementation-plan.md](implementation-plan.md) §4–§6.
+
 | Phase | Goal | Result |
 |---|---|---|
+| **0a** | **Measurement harness** | **Metrics, BD-rate, result store, CI gate — before any codec code** |
+| **0b** | **Baseline capture** | **Mars 1 RD curves + `evals/transform`, recorded** |
 | 0 | Archaeology | Exact Mars 1 behavioural specification |
 | 1 | Rust reference | Correct, boring Mars-compatible codec |
 | 2 | Modern representation | New .mars2 format |
@@ -1028,7 +1130,12 @@ Here's the roadmap I'd actually follow.
 | 10 | Learned pruning | ML-assisted candidate search |
 | 11 | Progressive codec | Quality refinement layers |
 | 12 | INR experiment | Hybrid representation |
-| 13 | Final research | Benchmark + papers + release |
+| 13 | Final research | Papers + reproducibility package + release |
+
+**[rev]** Phases 9 (GPU), 10 (learned pruning), 11 (progressive) and 12 (INR) are
+*hypotheses with entry conditions*, not commitments. Each carries an abort rule. In
+particular, the GPU backend should not be started if the hierarchical search and learned
+pruning have already removed the workload it was meant to accelerate.
 
 ---
 
@@ -1076,7 +1183,33 @@ iteration
 image
 ```
 
-Then establish bit-exact or mathematically equivalent reference behaviour where possible.
+**[rev] Correction: build the decoder first, not the encoder.**
+
+The decoder is roughly 500 lines against the encoder's 3,500, it needs no search
+infrastructure at all, and it can be validated against artefacts that already exist —
+`.ifs` files produced by the 1998 binary. That ordering keeps format bugs and encoder
+bugs from masking each other, and it means the encoder later gets validated three ways
+(Rust→Rust, Rust-encode→C-decode, C-encode→Rust-decode) instead of one.
+
+**[rev] "Bit-exact or mathematically equivalent" needs to be made precise**, because the
+hazards are specific and would otherwise be discovered a month in:
+
+1. **x87 excess precision** — on 32-bit x86, C `double` intermediates may be evaluated at
+   80-bit precision, which Rust will not reproduce. Pin the reference build to x86-64 or
+   aarch64.
+2. **`-ffast-math` must stay off** in the reference build, or the C itself becomes
+   compiler-dependent.
+3. **libm `log` is not correctly rounded** and differs across platforms — and Mars 1 calls
+   it in three places that affect the *bitstream*: `virtual_size`,
+   `bits_per_coordinate_*`, and the adaptive-threshold update. The first two take small
+   integer arguments and should be replaced by exact integer `ilog2`, with equivalence
+   proven by exhaustive check over the parameter domain. The third depends on libm for
+   arbitrary `adapt` — but at the default `adapt = 1.0`, `log(1.0)` is exactly `0.0` on
+   every conforming implementation, so the term vanishes and the default path is
+   bit-exact.
+
+So the honest claim is: **bit-exact at default settings; numerically equivalent within a
+stated tolerance otherwise.** Say that in the documentation rather than claiming more.
 
 Only after that do we optimise.
 
@@ -1111,6 +1244,39 @@ candidate evaluations / range block
 
 because that's the metric that will tell us whether our search innovations are actually working.
 
+**[rev] Three things this table needs before it means anything.**
+
+**First — the modern codecs are context, not targets.** Fractal coding is not going to
+beat AVIF or JPEG XL on rate-distortion. It was not competitive with JPEG 2000 in 2001,
+and nothing in this plan changes that; transform coding plus learned entropy modelling
+has had twenty-five more years of investment. Listing AVIF and JXL without saying so
+invites the project to adopt a success criterion it cannot meet and then to read a
+predictable loss as failure. They answer "where does this sit?" — they do not define
+success. See §27.
+
+**Second — a single `(bpp, PSNR)` pair is not a comparison.** Every RD claim needs
+BD-rate: at least four quality points per curve, an overlapping bpp range, interpolation
+over (log bpp, PSNR), and the overlap interval reported alongside the percentage. Rows in
+the table above are curves, not cells.
+
+**Third — timing needs a protocol.** Median of at least five runs with the median
+absolute deviation, A/B interleaved rather than grouped so thermal drift cancels, and a
+recorded machine fingerprint. A speedup figure without absolute times and a fingerprint
+is not a result.
+
+**[rev] Corpus.** Lena should be kept only as a Mars 1 compatibility fixture — the
+original ships `lena.raw`, so golden outputs require it — and never used for a reported
+number; major imaging venues have discouraged it. Kodak is the reporting corpus. Add
+USC-SIPI textures deliberately: fractal coding's whole premise is block self-similarity,
+so a corpus of photographs alone will systematically misattribute where the method works.
+
+**[rev] One metric to add now, because it is nearly free and unlocks several later
+steps: the oracle.** Run exhaustive search once per configuration and cache, per range
+block, the true best match and the top-32 candidates. That single artefact yields the
+RD upper bound for fractal-only mode, a **top-k recall and RMS-regret** measurement for
+every fast search method, and the labelled training corpus that §20 and §21 would
+otherwise have to generate as a separate effort.
+
 ---
 
 ## 27. Success criteria
@@ -1123,12 +1289,17 @@ Demonstrate that modern search reduces fractal encoding complexity dramatically 
 
 **Goal B — codec success**
 
-Beat the original Mars by an absurd margin in:
+**[rev]** "Beat the original Mars by an absurd margin" is not testable — a criterion that
+cannot be failed cannot be passed either. Replaced with numbers, each with a measurement
+protocol:
 
-* speed
-* image size
-* image quality
-* supported image types
+* **encode ≥ 20× faster at matched BD-rate**, on a pinned machine, timed per the protocol
+  in §26;
+* **BD-rate ≥ 35% better than Mars 1** on Kodak;
+* colour support, progressive decoding, and a fuzzed format parser.
+
+The original list of dimensions was right; it just needed thresholds and a way to check
+them.
 
 **Goal C — experimental success**
 
@@ -1137,6 +1308,15 @@ Demonstrate at least one interesting new result, such as:
 > A learned candidate-pruning system reduces exact fractal evaluations by 90–99% while maintaining essentially the same rate-distortion curve.
 
 That would be a very respectable result even before INR/GPU work.
+
+**[rev]** To make Goal C falsifiable, it needs two additions. Model inference cost must be
+counted inside the evaluation budget — a model that costs more than the evaluations it
+saves is not an acceleration. And generalisation must be demonstrated across corpora
+(train on Kodak, evaluate on CLIC and USC-SIPI), with the cross-corpus gap reported
+explicitly; that is the first thing a reviewer will ask for.
+
+**[rev] And one criterion that is explicitly *not* on the list:** beating AVIF or
+JPEG XL on rate-distortion. See §26.
 
 ---
 
@@ -1226,3 +1406,15 @@ I would now design the actual Mars 2 repository and Rust API in detail — crate
 That would give us something close to a buildable v0.1 engineering specification, rather than just a research roadmap.
 
 And I'd make the first implementation deliberately small enough that we could start writing Rust immediately, while keeping all the extension points for the more exotic research later.
+
+---
+
+**[rev] That next step now exists: [implementation-plan.md](implementation-plan.md).**
+
+It contains the ordered steps, the binding measurement contract, four gates with kill
+criteria, the reverse-engineered Mars 1 bitstream specification (header layout, tree
+encoding, and the exact quantisation formulas), the first twenty issues ready to file,
+and a table of every point at which it deliberately diverges from this document.
+
+Its first instruction is the one that matters most: **build the measurement harness
+before the codec, and point it at Mars 1 first.**
