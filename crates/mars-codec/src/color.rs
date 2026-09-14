@@ -159,6 +159,17 @@ const MODE_GRAY: u8 = 0;
 const MODE_RGB_444: u8 = 1;
 const MODE_RGB_420: u8 = 2;
 
+/// Wrap one already-written grayscale `mars_format` plane stream in the same `MARC`
+/// single-plane container [`encode_color_image`]'s own `Gray` arm produces -- for callers
+/// (CLI-C's `encmars --method`, `mars-search`-driven grayscale-only encodes) that build
+/// the plane stream themselves via a different encoder (`mars_search::encode_image`, not
+/// this module's own `encode_image_rd_with_modes_and_density`) but still need to hand
+/// `decmars` something it can read. Colour is not supported through this path -- callers
+/// needing colour go through [`encode_color_image`] itself.
+pub fn wrap_gray_stream(plane_bytes: Vec<u8>) -> Vec<u8> {
+    write_container(MODE_GRAY, &[plane_bytes])
+}
+
 /// Encode an [`Image`] (gray or RGB) to a colour `.mars` container.
 ///
 /// For `Gray` input, `params.y` is used and `params.chroma`/`params.subsampling` are

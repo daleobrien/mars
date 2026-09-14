@@ -547,3 +547,36 @@ gate-cli-b:
     cargo build --release -p mars-cli
     cargo test -p mars-cli --release --test cli_b_gate -- --nocapture
     @echo "gate-cli-b: PASS (--modes 0,1,2,3 byte-identical to omitting the flag; --modes 2 forces every leaf to mode 2, verified by parsing the real .mars leaves the CLI wrote, not just its stdout summary; out-of-range mode numbers are rejected)"
+
+# CLI-C (encmars-decmars-cli-plan.md) -- expose mars-search's nine candidate-restriction
+# methods (Step 9's six classical ports plus Exhaustive, and Step 13's Funnel) as
+# `encmars --method`, via `mars_search::encode_image` -- a distinct code path from
+# mars-codec's own exhaustive walk (every other encmars invocation), kept for
+# cross-validation, not a faster/slower version of the same implementation.
+#
+# **Design question resolved (mutual exclusivity, not an implicit interaction).**
+# `mars_search::encode_image` has no RD-pruning implementation -- it only runs the legacy
+# top-down --t-rms partition. `--method` and `--lambda` together are refused outright
+# rather than silently picking one.
+#
+# **Colour scope cut.** `--method` is grayscale-only for now: mars-search's encode_image
+# has no per-plane YCbCr/subsampling wrapping wired to it (mars_codec::color's own
+# container internals are largely private to that module). Colour input with --method set
+# is refused rather than silently encoding only the luma plane.
+#
+# **A real bug found along the way.** `encmars --method funnel` on a real photograph
+# (kodim01) panicked -- `Funnel`'s Stage 1-3 feature distances go NaN on a perfectly flat
+# region (common in real images), and `sort_and_truncate` used to `.expect()` that never
+# happened. Fixed in `mars-search/src/funnel.rs` (NaN distances now sort as tied, not a
+# panic) with a new regression test
+# (`funnel::tests::flat_region_does_not_panic_on_nan_features`); this was invisible to
+# every prior Funnel test/gate because none of them exercised a genuinely flat region on a
+# real image, only small synthetic fixtures.
+#
+# Fast -- one small synthetic image, default params, no corpus RD sweep (mars-search's
+# methods are restricted-candidate searches, not exhaustive RD sweeps like CLI-A's gate).
+gate-cli-c:
+    cargo build --release -p mars-cli
+    cargo test -p mars-search --release --lib
+    cargo test -p mars-cli --release --test cli_c_gate -- --nocapture
+    @echo "gate-cli-c: PASS (all 9 methods produce a decodable .mars file whose reported evals count matches the library path exactly; --method+--lambda and --method on colour input are both refused)"

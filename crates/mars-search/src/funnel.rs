@@ -325,6 +325,20 @@ fn thumbnail_distance(a: &[Vec<f32>], b: &[Vec<f32>]) -> f64 {
     total
 }
 
+/// **Bugfix, found via `encmars-decmars-cli-plan.md`'s CLI-C work (real corpus images,
+/// not just synthetic test fixtures, surfaced it).** A perfectly flat domain block gives
+/// [`compute_saupe_vector`]'s `(x - mean) / sqrt(variance)` a zero denominator, so its
+/// Stage 3 thumbnail is all-`NaN`; Stage 1/2's own normalised features have the same
+/// zero-variance hazard. `dist(...)` propagates that `NaN` into
+/// [`thumbnail_distance`]/Stage 1-2's own scalar distances, and `f64::partial_cmp` returns
+/// `None` for any comparison involving `NaN` -- previously `.expect("features are never
+/// NaN")` on that `None`, which was wrong: real images (kodim01's sky, for one) do contain
+/// flat regions. `NaN` distances are now treated as tied with everything (`Ordering::
+/// Equal`), which is a conservative, order-preserving fallback -- a flat, feature-less
+/// domain has no principled Stage 1-3 ranking anyway (every one of Funnel's own features
+/// is a *contrast-normalised* shape descriptor, undefined for a block with none), so
+/// falling through to Stage 4's real affine fit rather than crashing is the correct
+/// behaviour, not merely the safe one.
 fn sort_and_truncate(idx: &mut Vec<usize>, keep: usize, mut dist: impl FnMut(usize) -> f64) {
     if keep >= idx.len() {
         return;
@@ -332,7 +346,7 @@ fn sort_and_truncate(idx: &mut Vec<usize>, keep: usize, mut dist: impl FnMut(usi
     idx.sort_by(|&a, &b| {
         dist(a)
             .partial_cmp(&dist(b))
-            .expect("features are never NaN")
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     idx.truncate(keep);
 }
@@ -504,6 +518,60 @@ mod tests {
             pixels[i * size_u..(i + 1) * size_u].copy_from_slice(&px[src..src + size_u]);
         }
         pixels
+    }
+
+    /// **Regression test for the `sort_and_truncate` NaN panic**, found running
+    /// `encmars --method funnel` on a real photograph (kodim01) --
+    /// `encmars-decmars-cli-plan.md`'s CLI-C work. A perfectly flat region (common in real
+    /// images -- sky, a wall) gives every domain/range feature in this file a zero
+    /// denominator (`compute_saupe_vector`'s `variance.sqrt()`, and Stage 1/2's own
+    /// normalisation), so `Funnel::candidates` used to panic on the very first `NaN`
+    /// comparison. Fixed by treating `NaN` distances as tied (`Ordering::Equal`) rather
+    /// than `.expect()`-ing they never occur; this test builds an image with a genuinely
+    /// flat quadrant and confirms the full `index()`/`candidates()` path no longer panics.
+    #[test]
+    fn flat_region_does_not_panic_on_nan_features() {
+        let (w, h) = (32usize, 32usize);
+        let mut data = vec![0u8; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                data[r * w + c] = if c < w / 2 {
+                    128 // perfectly flat: zero variance, zero-mean-normalised features are NaN
+                } else {
+                    (((r * 37 + c * 19) % 256) as i32) as u8
+                };
+            }
+        }
+        let image = Plane::from_vec(w, h, data);
+        let contracted = build_contracted(&image);
+
+        for size in [4u32, 8, 16] {
+            let pool = DomainPool {
+                contracted: &contracted,
+                size,
+                shift: 4,
+                image_width: image.width() as u32,
+                image_height: image.height() as u32,
+            };
+            let mut funnel = Funnel::new(FunnelMode::Scaled);
+            funnel.index(&pool);
+
+            // Query with both a flat range block (row 0, col 0) and a textured one (row
+            // 0, col w/2) -- either NaN source alone used to be enough to panic.
+            for &(row, col) in &[(0u32, 0u32), (0, (w / 2) as u32)] {
+                if row + size > h as u32 || col + size > w as u32 {
+                    continue;
+                }
+                let pixels = range_pixels(&image, row, col, size);
+                let range = RangeBlock {
+                    row,
+                    col,
+                    size,
+                    pixels: &pixels,
+                };
+                let _ = funnel.candidates(&range).count();
+            }
+        }
     }
 
     /// P13.3 — the harness sanity check: with narrowing disabled, the funnel must
