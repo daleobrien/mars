@@ -1781,17 +1781,31 @@ warm-up that itself runs `walk_rd` once would roughly double every encode's cost
 deferral, and flags the gate's own calibrated ceiling as an open concern for the kill-
 criteria audit rather than asserting it is obviously fine.
 
-### Follow-up — the named fix was implemented and attempted; it did not close the gap
+### Follow-up — the named fix was implemented and attempted; it made things worse, and was reverted (final state: the single-pass warm-up's understood +2.05% regression)
 
 Per the parent session's direction, the self-consistent two-pass rate-estimation warm-up
 named above was implemented (`mars_codec::encode::build_rate_snapshot`, `docs/
 decisions.md`'s D41). It was verified correct (the search's superset-minimisation
 property and cross-thread determinism both still hold), but the re-measured BD-rate
-regression is **larger**, not smaller: mean **+3.90%** (kodim01 +3.94%, kodim02 +3.85%),
-up from the single-pass warm-up's +2.05%. This is the opposite of the intended effect,
-reported plainly rather than smoothed over or fixed further per the parent session's own
-instruction ("report that back plainly rather than trying further workarounds"). D41 has
-a candidate mechanism (freezing a single warm-up pass's marginal mode-3 adoption can look
-artificially cheap in the final snapshot, encouraging more of it rather than converging),
-offered as a hypothesis, not established with the same rigour as D40's root-cause finding.
-This remains an open finding for the parent session to weigh.
+regression was **larger**, not smaller: mean **+3.90%** (kodim01 +3.94%, kodim02 +3.85%),
+up from the single-pass warm-up's +2.05%. This was the opposite of the intended effect,
+reported plainly rather than smoothed over per the parent session's own instruction
+("report that back plainly rather than trying further workarounds"). D41 offered a
+candidate mechanism (freezing a single warm-up pass's marginal mode-3 adoption can look
+artificially cheap in the final snapshot, encouraging more of it rather than converging)
+as an unconfirmed hypothesis, not established with the same rigour as D40's root-cause
+finding.
+
+**Final disposition (D42):** the parent session decided not to chase this further for
+time-budget reasons (a multi-step session deliberately economising across steps) and
+reverted the two-pass warm-up, restoring the single-pass warm-up's +2.05% mean regression
+as Step 15's accepted, gated, closing measurement — the smaller, fully-understood one, not
+a claim that it is acceptable in any absolute sense. `just gate-15` reproduces these exact
+numbers (kodim01 +1.88%, kodim02 +2.23%, mean +2.05%) as the final state. P15.3 remains
+falsified (a regression, not the predicted 3-12% improvement); P15.1 remains falsified in
+the same direction (fractal dominant at 85%, not "well under half"); the two-pass
+attempt's own outcome (a *larger* regression, +3.90%, under a mechanism verified correct
+by construction) is an additional, separate falsified expectation — the fix was expected
+to help, and empirically did not — recorded here rather than only in `docs/decisions.md`,
+since it is itself a predicted-then-measured outcome in the same spirit as the numbered
+predictions above.

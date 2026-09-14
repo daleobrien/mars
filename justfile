@@ -390,7 +390,7 @@ gate-15:
     cargo build --release -p mars-cli
     cargo test -p mars-codec --release
     MARS_RUN_RESIDUAL_GATE=1 cargo test -p mars-bench --release --test residual_gate -- --nocapture
-    @echo "gate-15: PASS (scoped to kodim01/kodim02; measured BD-rate is a +3.90% mean REGRESSION vs. the Step-14-equivalent mode mask, not an improvement -- the self-consistent two-pass rate-estimation warm-up (D41) intended to fix D40's originally-measured +2.05% regression instead made it larger, an honest, not-yet-resolved open finding, not hidden or papered over; mode-usage histogram -- fractal dominant at ~69-85% corpus-wide across both measurements -- is the header finding; see docs/decisions.md's D40/D41 and docs/predictions.md's Step 15 entries)"
+    @echo "gate-15: PASS (scoped to kodim01/kodim02; measured BD-rate is a +2.05% mean REGRESSION vs. the Step-14-equivalent mode mask, not an improvement -- a real, fully root-caused anomaly (D40); a candidate fix (a two-pass rate-estimation warm-up, D41) was implemented, verified correct, and empirically made it worse (+3.90%), then reverted per a time-budget decision rather than investigated further (D42); mode-usage histogram -- fractal dominant at 85% corpus-wide -- is the header finding; see docs/decisions.md's D40/D41/D42 and docs/predictions.md's Step 15 entries)"
 
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.

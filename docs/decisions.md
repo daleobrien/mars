@@ -2411,3 +2411,54 @@ committed as implemented and verified-correct, the real outcome is recorded hone
 above, and the decision of whether to keep it, revert to the single-pass warm-up (the
 smaller, better-understood +2.05% regression), or something else is left to the parent
 session, exactly as instructed.
+
+---
+
+## D42 · 2026-09-14 · The two-pass warm-up (D41) is reverted; Step 15 closes on the single-pass warm-up's understood +2.05% regression, for time-budget reasons — not because the two-pass anomaly was resolved
+
+**Decision (the parent session's, made after reviewing D40/D41 in full).** Do not chase
+D41's self-reinforcing-bias anomaly further. Two real, honest data points already exist
+(D40: +2.05% mean, fully root-caused; D41: +3.90% mean with the two-pass warm-up, verified
+implemented correctly but empirically worse, with only a speculative, unconfirmed
+mechanism for *why*) — going further would mean either a second, deeper investigation
+round into *why* one extra pass amplifies rather than damps the miscalibration, or
+attempting a fixed-point iteration (repeated passes to convergence), neither of which is
+proportionate to this step's remaining time budget in a multi-step session that is
+deliberately economising across steps. This is a plain trade-off, stated as such, not a
+claim that the two-pass anomaly is understood or resolved — it is explicitly not.
+
+**What was done.** The D41 commit (`658e3b0`, "Step 15: self-consistent two-pass
+rate-estimation warm-up") was reverted with `git revert --no-edit`, restoring
+`build_rate_snapshot` to its single-pass, Step-14-original form exactly. The revert
+applied cleanly (no conflicts) since the intervening commit (`d76e564`, D41's own
+documentation) touched only doc comments and test/justfile text, not `encode.rs` itself.
+`encode::tests::two_pass_warmup_is_bit_identical_across_thread_counts` (meaningful only
+for the two-pass mechanism) was removed along with the code it tested;
+`encode::tests::aggregate_estimated_cost_is_provably_no_worse_under_more_modes_even_though_real_bpp_can_be`
+(D40's diagnostic test, which predates D41 and does not depend on the two-pass mechanism)
+remains and still passes. All other mars-codec/mars-bench tests, the full workspace build,
+and clippy were re-verified clean after the revert.
+
+**Re-measured `gate-15`, run to completion and watched directly.** Reproduces the
+single-pass numbers exactly: kodim01 **+1.88%**, kodim02 **+2.23%**, mean **+2.05%**,
+`BD_RATE_CEILING_PCT = 5.0` still passing with its original ~2.8-point margin. `just
+gate-15` exit code 0.
+
+**D40 and D41 are kept unmodified as the historical record** (per the parent session's
+explicit instruction) — this entry does not retract or rewrite either; it records the
+decision to stop investigating and which state was kept. `crates/mars-bench/tests/
+residual_gate.rs`'s doc comments, `BD_RATE_CEILING_PCT`'s own doc, and the justfile's
+gate-15 echo were updated to describe the single-pass warm-up as the accepted, final,
+gated measurement (referencing D40/D41/D42 for the full history), rather than describing
+the since-reverted two-pass numbers as current.
+
+**Step 15's closing status, stated plainly.** A real, honest, fully root-caused BD-rate
+regression (+2.05% mean) against a fair, same-codebase Step-14-equivalent comparison,
+gated with an explicit regression ceiling rather than hidden or dressed up as an
+improvement; one candidate fix attempted, verified correct-by-construction, found to
+empirically make things worse, and reverted rather than chased further, with the
+unresolved *why* explicitly flagged as an open question rather than papered over; and the
+mode-usage histogram (fractal prediction dominant at 85% corpus-wide, the wide-margin
+opposite of P15.1's prediction) delivered as the step's actual scientific finding, per the
+brief's own framing of that histogram as more interesting than the BD-rate number. This is
+recorded as a complete, honest step closure, not a deferred or partially-resolved one.
