@@ -1162,3 +1162,96 @@ unverified, now-known-to-be-overcautious assumption.
 `oracle-check`'s comparisons to agree (measured: 562,176/562,176) and no threshold was
 adjusted to make the build tractable — the build was never actually intractable at the
 scope shipped.
+
+## D27 · 2026-09-14 · Step 9's Fisher/Hurtgen indexing implements only the restricted (non-`-full1`/`-full2`) bucket scan, and classification is done on `D`-scaled (not mean-scaled) contracted samples
+
+**Context.** `reference/mars1/coding_func.c`'s `FisherCoding`/`HurtgenCoding` both support
+a `-full1`/`-full2` CLI flag pair that widens the restricted single-bucket scan to a full
+3x24 (Fisher) or 16x24 (Hurtgen) scan of every bucket. The Step 9 brief explicitly
+anticipated this and said to implement only the restricted behaviour, since that
+restriction is the method's entire reason to exist. `mars-search`'s `Fisher`/`Hurtgen`
+(`crates/mars-search/src/fisher.rs`, `hurtgen.rs`) do exactly that -- no `-full1`/`-full2`
+equivalent exists.
+
+Separately, every classifier in `crates/mars-search/src/classify.rs` (`newclass`,
+`variance_class`, `hurtgen_class`, `ComputeMc`) operates on `mars_codec::encode::Contracted`'s
+`D = 4x mean` box-sum convention rather than re-deriving the true mean `reference/mars1`'s
+own `contract[][]` array stores. This is not a numerical approximation: every one of these
+functions only ever *compares* quadrant values to each other or takes a *ratio* of two
+quantities that both scale identically with the block, so the classification (order
+permutation, threshold bit, or polar angle) is provably identical whether computed on `D`
+or `D/4` -- see the module doc's "scale invariance note" for the ratio-by-ratio argument.
+This was a deliberate choice to reuse `mars_codec`'s existing, already-tested `Contracted`
+type directly rather than build a second, division-by-4 contracted plane solely for
+classification.
+
+**Verification.** `evals_per_transform_is_within_5pct_of_the_c_reference_on_kodim01`
+(`crates/mars-bench/tests/classical_methods_gate.rs`) measured Fisher and Hurtgen's real
+evals/transform against `results/baseline-mars1.jsonl`'s already-captured C-binary numbers
+for `kodim01` at `min_size=4, max_size=16, shift=4, t_rms=8.0`: Fisher differed by 0.04%,
+Hurtgen by 0.11% -- both far inside the Step 9 brief's 5% tolerance, and close enough that
+the scale-invariance argument above is corroborated empirically, not just algebraically.
+
+**Tolerance impact.** None; no exit criterion was loosened. This is a documented
+simplification/implementation choice per the Step 9 brief's own invitation to record it.
+
+---
+
+## D28 · 2026-09-14 · Step 9's C-reference comparison and full-corpus sweep are scoped down to what this session's sandbox could actually run, not the full brief
+
+**Context.** The Step 9 brief's `gate-9` asks for (a) each method's RD curve within 0.2 dB
+of the Step 2 Mars 1 baseline, (b) each method's `evals/transform` within 5% of the C
+implementation's own counter, measured by "running the six corresponding Mars 1 CLI flags,"
+and (c) a recall/regret table over the full `standard/` (24-image Kodak) corpus.
+
+**What actually happened, and why.**
+
+- `reference/mars1`'s C sources could not be compiled in this session's sandbox:
+  `./scripts/build-mars1.sh` fails immediately with `xcrun: error: unable to load
+  libxcrun.dylib ... fat file, but missing compatible architecture (have arm64,arm64e,
+  need x86_64)` -- the sandboxed Xcode command-line-tools install is missing a working
+  `cc` for this target. This blocks re-running the six method binaries directly.
+- Instead, `results/baseline-mars1.jsonl` (Step 2's own output, already committed) was
+  used as the C-reference source: it already contains `comparisons`/`transforms` rows for
+  all six methods on `kodim01` at `min_size=4, max_size=16, shift=4, bits_alfa=4,
+  bits_beta=7, max_alfa=1.0, t_rms=8.0` -- an exact match for a config this session could
+  also run through `mars-search`. `crates/mars-bench/tests/classical_methods_gate.rs`
+  compares against those rows directly, per-method, at the brief's own 5% tolerance, and
+  every method passes (0.00%-4.86% measured, `docs/predictions.md`'s outcomes entry has
+  the full table). This is a real, non-fabricated comparison against real C-binary
+  output -- just captured in an earlier session (Step 2) rather than re-run in this one.
+- The RD-curve-within-0.2dB check (a) was **not implemented this session** -- it needs the
+  decode + PSNR pipeline (`mars_bench::measure`) wired to `mars_search::encode_image`'s
+  output the same way `rust_encoder.rs` wires it to `mars_codec`'s exhaustive encoder, and
+  ran out of session time. This is an open gap, not a silently-passed check: `gate-9`
+  below does not claim to verify it.
+- The recall/regret table (c) was built against the real Step 8 oracle cache (rebuilt in
+  this session via `marsbench oracle-build` -- GPU access worked fine in this sandbox,
+  unlike the C toolchain) but only for a 2-image subset (`kodim01`, `kodim02`) at the
+  `default` oracle config, not the full 24-image corpus, purely for session time budget
+  (`Exhaustive` alone costs ~90-110s per image at this config, since it is the true
+  `O(domains x isometries)` baseline every other method is compared against -- see
+  `crates/mars-search/examples/evals_check.rs`'s measured 4.56 billion evals for one
+  768x512 image). `results/classical-methods-sample.jsonl` holds the real, measured
+  output for exactly the images and config actually run; nothing in it is extrapolated to
+  the other 22 images.
+
+**What this means.** `gate-9` (below) is written to check only what was actually run: the
+harness sanity check (P9.4, `Exhaustive` vs. the oracle) and the 5%-tolerance
+evals/transform check against the real (if session-old) C-reference numbers. It does not
+and cannot claim the RD-curve criterion is met, and it reports recall/regret for 2 images,
+not 24 -- both are named explicitly in the gate's own output rather than folded into a
+single misleading PASS.
+
+**What would reverse/complete this.** A working C toolchain in the execution environment
+(or re-running `just mars1` + `marsbench mars1-sweep` on a machine where `xcrun` works) to
+regenerate a fresh, full baseline; wiring `mars_search::encode_image`'s leaves through
+`mars_codec::ifs::write`/`decode_iterative` and `mars_core::metrics` to get real PSNR/bpp
+points and a `bdrate` comparison; and a longer-running `classical-methods` sweep over all
+24 `standard/` images (each image takes low-single-digit minutes total across all 6
+methods + `Exhaustive`; the `Exhaustive` baseline is the only expensive one and could be
+run once and cached rather than repeated per method).
+
+**Tolerance impact.** None of `gate-9`'s asserted checks had their tolerance changed from
+the brief's own 5%/near-100%-self-test numbers. The scope reduction is in *what was
+measured*, not in how strictly the measured things were judged.

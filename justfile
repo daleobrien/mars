@@ -199,6 +199,22 @@ gate-8:
     ./target/release/marsbench oracle-check
     @echo "gate-8: PASS"
 
+# Step 9 -- the six classical speed-up methods, behind `mars_search::CandidateRetriever`
+# (`crates/mars-search`). Checks what this session could actually run end to end
+# (docs/decisions.md D28 records the scope cut and why): the harness sanity check
+# (`Exhaustive` vs. the Step 8 oracle, ~100% top-1 recall / ~0dB regret expected -- a
+# harness bug otherwise) and each method's evals/transform within 5% of the C
+# reference's own counter, reusing `results/baseline-mars1.jsonl`'s already-captured
+# numbers since this sandbox cannot compile `reference/mars1` (`xcrun` has no working
+# `cc` here). Needs a real GPU adapter (oracle-build) and `corpus-gray` run once.
+# Does NOT check the RD-curve-within-0.2dB criterion (D28) -- that remains open.
+gate-9:
+    cargo build --release -p mars-cli
+    cargo test -p mars-search -p mars-bench --release
+    ./target/release/marsbench oracle-build --images kodim01 --configs default
+    cargo test -p mars-bench --release --test classical_methods_gate -- --nocapture
+    @echo "gate-9: PASS (scoped per docs/decisions.md D28 -- RD-curve check not yet implemented)"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval
