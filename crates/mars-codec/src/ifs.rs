@@ -264,6 +264,46 @@ pub fn decode_iterative(hdr: &Header, leaves: &[Leaf], iterations: u32) -> Plane
     Plane::from_vec(w, h, img)
 }
 
+/// Same fixed-point iteration as [`decode_iterative`], but stops as soon as the image has
+/// stabilised instead of running a caller-chosen fixed count. The IFS map is contractive
+/// (that is what guarantees the fixed point exists at all — §10.1), so the per-pixel delta
+/// between successive iterations decreases monotonically in the limit; stopping once the
+/// worst-case pixel moves by at most `threshold` gives a decode that is visually converged
+/// without spending iterations past the point of diminishing returns.
+///
+/// Returns the decoded plane and the number of iterations actually run, so callers can
+/// report how quickly convergence was reached. Runs at most `max_iterations` — a required
+/// cap, since a `threshold` of 0 combined with 8-bit rounding can cycle between two states
+/// forever rather than settling on one.
+pub fn decode_until_stable(
+    hdr: &Header,
+    leaves: &[Leaf],
+    threshold: u8,
+    max_iterations: u32,
+) -> (Plane, u32) {
+    let (w, h) = (hdr.width as usize, hdr.height as usize);
+    let mut img = vec![128u8; w * h];
+    let mut used = 0;
+    for i in 0..max_iterations.max(1) {
+        let mut next = vec![0u8; w * h];
+        for leaf in leaves {
+            decode_leaf(hdr, leaf, &img, w, &mut next);
+        }
+        let max_delta = img
+            .iter()
+            .zip(next.iter())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        img = next;
+        used = i + 1;
+        if max_delta <= threshold {
+            break;
+        }
+    }
+    (Plane::from_vec(w, h, img), used)
+}
+
 /// §7 dequantisation and §9/§10.1 reconstruction for one leaf, reading `img` (the
 /// previous iteration) and writing `next` — the double-buffering of §10.1 is what makes
 /// leaves independent of each other and safe to iterate in any order.

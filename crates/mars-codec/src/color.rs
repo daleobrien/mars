@@ -32,7 +32,7 @@ use mars_core::metrics::{rgb_from_ycbcr, ycbcr};
 use mars_core::Plane;
 
 use crate::encode::{encode_image, EncodeParams};
-use crate::ifs::decode_iterative;
+use crate::ifs::{decode_iterative, decode_until_stable};
 use crate::mars_format::{self, MarsFormatError};
 
 // ---------------------------------------------------------------------------
@@ -225,6 +225,50 @@ pub fn decode_color_image(data: &[u8], iterations: u32) -> Result<Image, ColorFo
                 (cb_small, cr_small)
             };
             Ok(rgb_from_ycbcr(&y, &cb, &cr))
+        }
+        other => Err(ColorFormatError::UnknownMode(other)),
+    }
+}
+
+/// Mirror of [`decode_color_image`] using [`decode_until_stable`] instead of a fixed
+/// iteration count for each plane. Each plane converges independently (luma and chroma
+/// stabilise at different rates), so the return value reports the worst-case (maximum)
+/// iteration count across planes — the number a caller would need to reproduce this
+/// decode with the fixed-count API.
+pub fn decode_color_image_auto(
+    data: &[u8],
+    threshold: u8,
+    max_iterations: u32,
+) -> Result<(Image, u32), ColorFormatError> {
+    let (mode, streams) = read_container(data)?;
+    match mode {
+        MODE_GRAY => {
+            let (hdr, leaves) = mars_format::read(&streams[0])?;
+            let (plane, used) = decode_until_stable(&hdr, &leaves, threshold, max_iterations);
+            Ok((Image::gray(plane), used))
+        }
+        MODE_RGB_444 | MODE_RGB_420 => {
+            let (y_hdr, y_leaves) = mars_format::read(&streams[0])?;
+            let (cb_hdr, cb_leaves) = mars_format::read(&streams[1])?;
+            let (cr_hdr, cr_leaves) = mars_format::read(&streams[2])?;
+
+            let (y, y_used) = decode_until_stable(&y_hdr, &y_leaves, threshold, max_iterations);
+            let (cb_small, cb_used) =
+                decode_until_stable(&cb_hdr, &cb_leaves, threshold, max_iterations);
+            let (cr_small, cr_used) =
+                decode_until_stable(&cr_hdr, &cr_leaves, threshold, max_iterations);
+            let used = y_used.max(cb_used).max(cr_used);
+
+            let (w, h) = (y.width(), y.height());
+            let (cb, cr) = if mode == MODE_RGB_420 {
+                (
+                    upsample_nearest(&cb_small, w, h),
+                    upsample_nearest(&cr_small, w, h),
+                )
+            } else {
+                (cb_small, cr_small)
+            };
+            Ok((rgb_from_ycbcr(&y, &cb, &cr), used))
         }
         other => Err(ColorFormatError::UnknownMode(other)),
     }
