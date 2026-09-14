@@ -80,8 +80,23 @@ not comparable.
   runs MassCenter instead of failing. Always pass a method explicitly and check the
   `Speed-up method:` line the encoder echoes. The exhaustive RD upper bound (M6's oracle)
   has no Mars 1 equivalent and is built in Rust at Step 6/7. See `docs/decisions.md` D5.
-- **Decode mode must be pinned and recorded.** Pyramidal is the default; comparing a
-  pyramidal decode against an iterative one is a silent 0.2–1 dB error.
+- **Absolute paths silently corrupt the invocation.** `globals.h` declares `char
+  filein[50]`/`fileout[50]` and `getopt_enc` copies `argv` in with `strcpy` — no bounds
+  check. A path over 49 bytes overflows the buffer, and the failure mode is misleading:
+  the encoder reads the input fine, reports progress normally, then fails with `Can't open
+  output file`, which looks like a permissions problem rather than a buffer overflow.
+  Always `chdir` into a short scratch directory and pass **relative** filenames; never
+  drive `encmars`/`decmars` with absolute paths, including in CI. See `docs/decisions.md`
+  D3.
+- **Decode mode must be pinned and recorded — and pyramidal decode is not just "slightly
+  different," it can be catastrophic.** Pyramidal (`decmars` with no flags) renders at
+  `1/2^levels` scale before upsampling, so a range block of `min_size` occupies `min_size /
+  2^levels` pixels at that stage. The rule is exact: `min_size / 2^levels ≥ 1` costs under
+  0.05 dB versus iterative decode; once the effective footprint drops to 0.5 px, the gap is
+  **5–20 dB**, and RD curves measured under pyramidal decode can run *backwards* (kodim01
+  at `min_size=2`: 25.38 dB @ 1.05 bpp but only 23.71 dB @ 6.30 bpp). This bites hardest at
+  `min_size` below the default 4 — not just a rounding caveat, a load-bearing threshold.
+  See `docs/decisions.md` D11.
 - **Padding is not measured.** Mars 1 pads to `virtual_size`; MSE is over the original
   W×H region only.
 
