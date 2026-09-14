@@ -190,6 +190,76 @@ pub(crate) const AFFINE_GRAD_SCALE: f64 = 64.0;
 /// practice.
 pub(crate) const AFFINE_GRAD_CLAMP: i32 = 2048;
 
+// ------------------------------------------------------------------ Step 16: adaptive
+// domain-pool density
+//
+// `search`'s domain-position stride is, before this step, a single global constant
+// (`params.shift`) applied everywhere regardless of content. Step 16 varies it per block:
+// a denser stride (more candidate domain positions) where the block's own pixel-domain
+// complexity is high and a better match is more likely to be worth the extra evals, a
+// sparser stride where the block is nearly flat and every nearby domain position fits
+// about equally well. This reuses the *existing* `FIELD_DOM_ROW`/`FIELD_DOM_COL` bitstream
+// fields (only their coded *values* change, not the field vocabulary), which is why this
+// is a materially lower-risk change than Step 15's new leaf modes were against the frozen
+// `RateModels` snapshot (`docs/decisions.md`'s D40): there is no new field type for the
+// snapshot to have zero observations of.
+
+/// Pixel-domain RMS at or above this threshold routes a block to the denser
+/// (half-`params.shift`) search stride. `16.0` sits above `RD_WARMUP_T_RMS` (`8.0`) --
+/// deliberately higher, since this threshold gates *domain-search density*, a strictly
+/// more expensive knob than the warm-up's own leaf-vs-split threshold, and should only
+/// fire for blocks whose own pixel content (not just their eventual fractal-fit residual)
+/// is genuinely busy.
+const DENSITY_HIGH_RMS: f64 = 16.0;
+/// Pixel-domain RMS at or below this threshold routes a block to the sparser
+/// (double-`params.shift`) search stride -- a near-flat block, where doubling the domain
+/// stride costs almost nothing in fit quality (every nearby domain position is itself
+/// nearly flat) but roughly quarters the eval count spent searching it.
+const DENSITY_LOW_RMS: f64 = 4.0;
+
+/// This block's own pixel-domain RMS (population standard deviation of its `size x size`
+/// pixels), computed once, before the domain search runs, as the pre-search proxy for
+/// "local complexity" [`adaptive_shift`] routes on. Deliberately the *range* block's raw
+/// pixel statistics, not a fractal-fit residual (which is not known until after a domain
+/// search has already been spent) -- the same `t0`/`t2` accumulation [`search_with_shift`]
+/// performs internally for its own moments, duplicated here (an O(size²) pass, size <= 16
+/// in every config this project runs, so negligible next to the domain search itself) so
+/// the density decision can be made *before* that search runs at all.
+fn block_rms(image: &Plane, row: u32, col: u32, size: u32) -> f64 {
+    let px = image.as_slice();
+    let stride = image.width();
+    let size_u = size as usize;
+    let (mut t0, mut t2) = (0i64, 0i64);
+    for i in 0..size_u {
+        let src = (row as usize + i) * stride + col as usize;
+        for j in 0..size_u {
+            let v = i64::from(px[src + j]);
+            t0 += v;
+            t2 += v * v;
+        }
+    }
+    let s0 = i64::from(size) * i64::from(size);
+    let mean = t0 as f64 / s0 as f64;
+    let variance = (t2 as f64 / s0 as f64 - mean * mean).max(0.0);
+    variance.sqrt()
+}
+
+/// Map a block's own [`block_rms`] to a domain-search stride, relative to the run's base
+/// `params.shift`: denser (half, floor 1) above [`DENSITY_HIGH_RMS`], sparser (double)
+/// below [`DENSITY_LOW_RMS`], unchanged in between. Pure function of already-computed
+/// scalars -- no shared state, so calling it from parallel `rayon::join` subtrees
+/// introduces no thread-count dependence (the same determinism argument `crate::rate`'s
+/// module doc makes for the frozen `RateModels` snapshot).
+fn adaptive_shift(base_shift: u32, rms: f64) -> u32 {
+    if rms >= DENSITY_HIGH_RMS {
+        (base_shift / 2).max(1)
+    } else if rms <= DENSITY_LOW_RMS {
+        base_shift.saturating_mul(2)
+    } else {
+        base_shift
+    }
+}
+
 /// Mode 3's fixed dead-zone quantisation step for DCT coefficients (`crate::quant`). `8.0`
 /// is a mid-range choice on an 8-bit pixel scale: large enough that most AC coefficients of
 /// a well-predicted fractal residual quantise to zero (residual coding should cost little
@@ -318,6 +388,23 @@ fn search(
     size: u32,
     params: &EncodeParams,
 ) -> (Option<Candidate>, u64) {
+    search_with_shift(image, contracted, row, col, size, params, params.shift)
+}
+
+/// [`search`]'s actual body, taking the domain-search stride explicitly instead of always
+/// reading `params.shift` -- Step 16's hook for content-adaptive domain-pool density.
+/// [`search`] itself is `search_with_shift(.., params.shift)`, so every pre-Step-16 caller
+/// is byte-for-byte unaffected; only [`walk_rd`]'s new `Ctx::adaptive_density` path calls
+/// this directly with a per-block stride computed from [`block_rms`].
+fn search_with_shift(
+    image: &Plane,
+    contracted: &Contracted,
+    row: u32,
+    col: u32,
+    size: u32,
+    params: &EncodeParams,
+    shift: u32,
+) -> (Option<Candidate>, u64) {
     let (width, height) = (image.width() as u32, image.height() as u32);
     let px = image.as_slice();
     let stride = image.width();
@@ -365,8 +452,13 @@ fn search(
             let (s1_x4, s2_x16) = domain_sums(contracted, dr_half, dc_half, size_u);
 
             for &k in &isometry::ALL {
-                let t1_x4 =
-                    cross_term_permuted(contracted, dr_half, dc_half, size_u, &range_by_iso[k as usize]);
+                let t1_x4 = cross_term_permuted(
+                    contracted,
+                    dr_half,
+                    dc_half,
+                    size_u,
+                    &range_by_iso[k as usize],
+                );
                 let moments = RawMoments {
                     s0,
                     s1_x4,
@@ -390,9 +482,9 @@ fn search(
                     });
                 }
             }
-            dom_col += params.shift;
+            dom_col += shift;
         }
-        dom_row += params.shift;
+        dom_row += shift;
     }
     (best, evals)
 }
@@ -463,7 +555,14 @@ pub fn cross_term_permuted(
     size: usize,
     range_k: &[u8],
 ) -> i64 {
-    mars_simd::moments::dot_u8_i32_window(range_k, &contracted.data, contracted.stride, dr, dc, size)
+    mars_simd::moments::dot_u8_i32_window(
+        range_k,
+        &contracted.data,
+        contracted.stride,
+        dr,
+        dc,
+        size,
+    )
 }
 
 /// Recompute one leaf's raw moments from its stored domain reference. Used only by
@@ -542,7 +641,10 @@ pub fn encode_image(image: &Plane, params: &EncodeParams) -> (Header, Vec<Leaf>,
 /// (all zero on the legacy `lambda: None` path, which never runs [`walk_rd`] and so never
 /// makes a mode decision to count). Additive-only -- [`encode_image`] itself is unchanged
 /// and every pre-existing caller keeps compiling against its original three-tuple return.
-pub fn encode_image_rd(image: &Plane, params: &EncodeParams) -> (Header, Vec<Leaf>, u64, ModeStats) {
+pub fn encode_image_rd(
+    image: &Plane,
+    params: &EncodeParams,
+) -> (Header, Vec<Leaf>, u64, ModeStats) {
     encode_image_rd_with_modes(image, params, [true; 4])
 }
 
@@ -558,6 +660,24 @@ pub fn encode_image_rd_with_modes(
     image: &Plane,
     params: &EncodeParams,
     allowed_modes: [bool; 4],
+) -> (Header, Vec<Leaf>, u64, ModeStats) {
+    encode_image_rd_with_modes_and_density(image, params, allowed_modes, false)
+}
+
+/// [`encode_image_rd_with_modes`]'s superset: also takes Step 16's `adaptive_density` flag
+/// -- Step 16's own comparison tool, mirroring [`encode_image_rd_with_modes`]'s own
+/// same-codebase A/B pattern exactly (`docs/decisions.md`'s D40 has the reasoning for why
+/// this is the fairer comparison than a separate git revision). `false` reproduces every
+/// prior step's behaviour exactly, byte-for-byte -- [`encode_image_rd_with_modes`] always
+/// passes `false`, so this function is purely additive. `true` makes [`walk_rd`] compute a
+/// per-block domain-search stride from [`block_rms`]/[`adaptive_shift`] instead of the
+/// fixed `params.shift`, on the RD (`lambda: Some`) path only -- meaningless on the legacy
+/// `lambda: None` path, which never consults `Ctx::adaptive_density` at all.
+pub fn encode_image_rd_with_modes_and_density(
+    image: &Plane,
+    params: &EncodeParams,
+    allowed_modes: [bool; 4],
+    adaptive_density: bool,
 ) -> (Header, Vec<Leaf>, u64, ModeStats) {
     let hdr = Header {
         bits_alfa: params.bits_alfa,
@@ -580,6 +700,7 @@ pub fn encode_image_rd_with_modes(
             params,
             rate: Some(&rate),
             allowed_modes,
+            adaptive_density,
         };
         let result = walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda);
         return (hdr, result.leaves, result.evals, result.stats);
@@ -592,6 +713,7 @@ pub fn encode_image_rd_with_modes(
         params,
         rate: None,
         allowed_modes,
+        adaptive_density: false,
     };
     let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
     (hdr, leaves, evals, ModeStats::default())
@@ -626,6 +748,7 @@ fn build_rate_snapshot(
         params: &warmup_params,
         rate: None,
         allowed_modes: [true; 4],
+        adaptive_density: false,
     };
     let (leaves, _evals) = walk(&warmup_ctx, 0, 0, hdr.virtual_size());
     RateModels::from_leaves(hdr, &leaves)
@@ -655,6 +778,12 @@ struct Ctx<'a> {
     /// than diffing against a separate git revision would be (no risk of an incidental,
     /// unrelated code difference between commits leaking into the comparison).
     allowed_modes: [bool; 4],
+    /// Step 16: when `true`, [`walk_rd`] computes a per-block domain-search stride from
+    /// [`block_rms`]/[`adaptive_shift`] instead of always using `params.shift`. `false`
+    /// everywhere except the new [`encode_image_rd_with_modes_and_density`] entry point's
+    /// own `true` arm, so every pre-Step-16 caller (including [`walk`], which never reads
+    /// this field at all) is byte-for-byte unaffected.
+    adaptive_density: bool,
 }
 
 /// Step 12: below this block size, a `rayon::join`'s task-spawn/steal overhead costs more
@@ -845,7 +974,10 @@ impl ModeStats {
 
 /// Sum of [`RateModels::bits_for`] over every event a candidate leaf would emit.
 fn event_bits(rate: &RateModels, events: &[mars_entropy::Event]) -> f64 {
-    events.iter().map(|e| rate.bits_for(e.ctx, e.alphabet, e.symbol)).sum()
+    events
+        .iter()
+        .map(|e| rate.bits_for(e.ctx, e.alphabet, e.symbol))
+        .sum()
 }
 
 /// Step 15's five-way mode competition, per-leaf half (`docs/predictions.md`'s Step 15
@@ -912,7 +1044,10 @@ fn best_mode_leaf(
         let max_qbeta = (1u32 << hdr.bits_beta) - 1;
         let beta2 = f64::from(qbeta) / f64::from(max_qbeta) * 255.0;
         let sse: f64 = block.iter().map(|&p| (p - beta2).powi(2)).sum();
-        let r = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf, size_class));
+        let r = event_bits(
+            rate,
+            &crate::mars_format::leaf_events(hdr, &leaf, size_class),
+        );
         candidates.push((leaf, sse, r));
     }
 
@@ -933,7 +1068,10 @@ fn best_mode_leaf(
             qgy,
             residual: Vec::new(),
         };
-        let r = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf, size_class));
+        let r = event_bits(
+            rate,
+            &crate::mars_format::leaf_events(hdr, &leaf, size_class),
+        );
         candidates.push((leaf, sse, r));
     }
 
@@ -958,11 +1096,15 @@ fn best_mode_leaf(
                 residual: Vec::new(),
             };
             let sse2 = c.rms * c.rms * f64::from(size) * f64::from(size);
-            let r2 = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf2, size_class));
+            let r2 = event_bits(
+                rate,
+                &crate::mars_format::leaf_events(hdr, &leaf2, size_class),
+            );
             candidates.push((leaf2, sse2, r2));
         }
         if c.qalfa >= 1 && allowed[3] {
-            let (levels, sse3) = residual_for_candidate(&block, px, stride, size_u, &c, ctx.params, hdr);
+            let (levels, sse3) =
+                residual_for_candidate(&block, px, stride, size_u, &c, ctx.params, hdr);
             let leaf3 = Leaf {
                 row,
                 col,
@@ -977,7 +1119,10 @@ fn best_mode_leaf(
                 qgy: 0,
                 residual: levels,
             };
-            let r3 = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf3, size_class));
+            let r3 = event_bits(
+                rate,
+                &crate::mars_format::leaf_events(hdr, &leaf3, size_class),
+            );
             candidates.push((leaf3, sse3, r3));
         }
     }
@@ -1004,7 +1149,10 @@ fn best_mode_leaf(
         let max_qbeta = (1u32 << hdr.bits_beta) - 1;
         let beta2 = f64::from(qbeta) / f64::from(max_qbeta) * 255.0;
         let sse: f64 = block.iter().map(|&p| (p - beta2).powi(2)).sum();
-        let r = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf, size_class));
+        let r = event_bits(
+            rate,
+            &crate::mars_format::leaf_events(hdr, &leaf, size_class),
+        );
         candidates.push((leaf, sse, r));
     }
 
@@ -1104,7 +1252,8 @@ fn residual_for_candidate(
     hdr: &Header,
 ) -> (Vec<i32>, f64) {
     let alfa = f64::from(c.qalfa) / f64::from(1u32 << params.bits_alfa) * params.max_alfa;
-    let mut beta = f64::from(c.qbeta) / f64::from((1u32 << hdr.bits_beta) - 1) * ((1.0 + alfa.abs()) * 255.0);
+    let mut beta =
+        f64::from(c.qbeta) / f64::from((1u32 << hdr.bits_beta) - 1) * ((1.0 + alfa.abs()) * 255.0);
     if alfa > 0.0 {
         beta -= alfa * 255.0;
     }
@@ -1138,7 +1287,9 @@ fn residual_for_candidate(
         .map(|&l| crate::quant::dead_zone_dequantize(l, RESIDUAL_QSTEP_DEFAULT, RESIDUAL_DEAD_ZONE))
         .collect();
     let recon_resid = crate::dct::inverse_dct2d(&deq, size);
-    let sse: f64 = (0..size * size).map(|k| (resid[k] - recon_resid[k]).powi(2)).sum();
+    let sse: f64 = (0..size * size)
+        .map(|k| (resid[k] - recon_resid[k]).powi(2))
+        .sum();
     (levels, sse)
 }
 
@@ -1167,7 +1318,9 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
         return split_rd(ctx, row, col, half, lambda);
     }
 
-    let rate = ctx.rate.expect("walk_rd always runs with a rate snapshot (params.lambda is Some)");
+    let rate = ctx
+        .rate
+        .expect("walk_rd always runs with a rate snapshot (params.lambda is Some)");
     let size_class = size.trailing_zeros();
 
     // §5.3: a size-1 block is a raw, truncated pixel -- no search, no evals, always a
@@ -1204,8 +1357,19 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
         };
     }
 
-    let (candidate, block_evals) = search(ctx.image, ctx.contracted, row, col, size, ctx.params);
-    let (leaf, leaf_d, leaf_r) = best_mode_leaf(ctx, row, col, size, candidate, rate, lambda, size_class);
+    // Step 16: content-adaptive domain-pool density. Computed before the search itself so
+    // the density decision never depends on the search's own result (which would make the
+    // "which stride did we search at" question circular). `false` (every pre-Step-16
+    // caller) preserves `search(..)`'s original fixed-`params.shift` behaviour exactly.
+    let (candidate, block_evals) = if ctx.adaptive_density {
+        let rms = block_rms(ctx.image, row, col, size);
+        let shift = adaptive_shift(ctx.params.shift, rms);
+        search_with_shift(ctx.image, ctx.contracted, row, col, size, ctx.params, shift)
+    } else {
+        search(ctx.image, ctx.contracted, row, col, size, ctx.params)
+    };
+    let (leaf, leaf_d, leaf_r) =
+        best_mode_leaf(ctx, row, col, size, candidate, rate, lambda, size_class);
 
     if size <= hdr.min_size {
         // Never split below min_size -- mars_format never emits a split flag here either.
@@ -1287,7 +1451,13 @@ fn split_rd(ctx: &Ctx, row: u32, col: u32, half: u32, lambda: f64) -> RdResult {
         r += q.r;
         stats.merge(q.stats);
     }
-    RdResult { leaves, evals, d, r, stats }
+    RdResult {
+        leaves,
+        evals,
+        d,
+        r,
+        stats,
+    }
 }
 
 #[cfg(test)]
@@ -1467,8 +1637,8 @@ mod tests {
         let mut data = vec![0u8; w * h];
         for r in 0..h {
             for c in 0..w {
-                let v = ((r * 37 + c * 19) % 256) as i32
-                    + (((r / 8) as i32 * (c / 8) as i32 * 3) % 64);
+                let v =
+                    ((r * 37 + c * 19) % 256) as i32 + (((r / 8) as i32 * (c / 8) as i32 * 3) % 64);
                 data[r * w + c] = v.clamp(0, 255) as u8;
             }
         }
@@ -1530,7 +1700,9 @@ mod tests {
             "expected a mix of leaf sizes at a moderate lambda, got only {sizes:?}"
         );
         assert!(
-            leaves.iter().all(|l| l.size >= hdr.min_size && l.size <= hdr.max_size),
+            leaves
+                .iter()
+                .all(|l| l.size >= hdr.min_size && l.size <= hdr.max_size),
             "every leaf must respect min/max_size"
         );
     }
@@ -1572,13 +1744,121 @@ mod tests {
                 None => reference = Some((hdr, leaves)),
                 Some((ref_hdr, ref_leaves)) => {
                     assert_eq!(&hdr, ref_hdr, "header differs at {threads} threads");
-                    assert_eq!(
-                        &leaves, ref_leaves,
-                        "leaf set differs at {threads} threads"
-                    );
+                    assert_eq!(&leaves, ref_leaves, "leaf set differs at {threads} threads");
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------------ Step 16
+
+    /// [`adaptive_shift`]'s three-way routing, checked directly rather than only through
+    /// an end-to-end encode -- a cheap, exact-equality oracle for the density-selection
+    /// logic itself.
+    #[test]
+    fn adaptive_shift_routes_high_low_and_mid_rms_correctly() {
+        assert_eq!(
+            adaptive_shift(4, 20.0),
+            2,
+            "high RMS should halve the base shift"
+        );
+        assert_eq!(
+            adaptive_shift(4, 2.0),
+            8,
+            "low RMS should double the base shift"
+        );
+        assert_eq!(
+            adaptive_shift(4, 10.0),
+            4,
+            "mid RMS should leave the base shift unchanged"
+        );
+        assert_eq!(
+            adaptive_shift(1, 20.0),
+            1,
+            "halved shift is floored at 1, never 0"
+        );
+    }
+
+    /// `block_rms` must actually distinguish a flat block from a noisy one -- otherwise
+    /// [`adaptive_shift`]'s routing would never fire in practice regardless of the
+    /// thresholds chosen.
+    #[test]
+    fn block_rms_is_zero_on_flat_and_nonzero_on_noisy() {
+        let flat = Plane::from_vec(16, 16, vec![100u8; 16 * 16]);
+        assert_eq!(block_rms(&flat, 0, 0, 8), 0.0);
+
+        let image = half_flat_half_noisy_image(16, 16);
+        let flat_half = block_rms(&image, 0, 0, 4);
+        let noisy_half = block_rms(&image, 0, 12, 4);
+        assert_eq!(flat_half, 0.0, "left half is constant 128");
+        assert!(
+            noisy_half > 20.0,
+            "right half is uniform random bytes: rms={noisy_half}"
+        );
+    }
+
+    /// Step 16's own A/B: `adaptive_density: true` must actually change the domain
+    /// positions searched (and hence, generically, the resulting leaves) relative to
+    /// `false` on an image with genuinely non-uniform local complexity -- otherwise the
+    /// density knob would be wired in but inert. Not a BD-rate claim, just a harness-
+    /// sanity check that the feature does something observable.
+    #[test]
+    fn adaptive_density_changes_the_partition_on_a_mixed_complexity_image() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let params = rd_params(200.0);
+        let (_hdr, base_leaves, _evals, _stats) =
+            encode_image_rd_with_modes_and_density(&image, &params, [true; 4], false);
+        let (_hdr, adaptive_leaves, _evals, _stats) =
+            encode_image_rd_with_modes_and_density(&image, &params, [true; 4], true);
+        assert_ne!(
+            base_leaves, adaptive_leaves,
+            "adaptive density should change at least one leaf's chosen domain/partition \
+             on an image with genuinely non-uniform local complexity"
+        );
+    }
+
+    /// Step 12/14's determinism discipline, extended to Step 16's new density path:
+    /// `block_rms`/`adaptive_shift` are pure functions of already-read pixel data, so the
+    /// adaptive-density RD walk must be bit-identical across thread counts for exactly the
+    /// same reason `rd_walk_is_bit_identical_across_thread_counts` holds for the
+    /// fixed-density path.
+    #[test]
+    fn adaptive_density_rd_walk_is_bit_identical_across_thread_counts() {
+        let image = textured_image(96, 96);
+        let params = rd_params(0.05);
+        let mut reference: Option<(Header, Vec<Leaf>)> = None;
+        for threads in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let (hdr, mut leaves, _evals, _stats) = pool.install(|| {
+                encode_image_rd_with_modes_and_density(&image, &params, [true; 4], true)
+            });
+            leaves.sort_by_key(|l| (l.row, l.col, l.size));
+            match &reference {
+                None => reference = Some((hdr, leaves)),
+                Some((ref_hdr, ref_leaves)) => {
+                    assert_eq!(&hdr, ref_hdr, "header differs at {threads} threads");
+                    assert_eq!(&leaves, ref_leaves, "leaf set differs at {threads} threads");
+                }
+            }
+        }
+    }
+
+    /// `adaptive_density: false` (Step 16's default arm) must reproduce
+    /// `encode_image_rd_with_modes`'s output exactly -- the whole point of threading the
+    /// flag through as an additive superset rather than changing existing behaviour.
+    #[test]
+    fn adaptive_density_false_is_byte_identical_to_the_pre_step16_path() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let params = rd_params(200.0);
+        let via_old = encode_image_rd_with_modes(&image, &params, [true; 4]);
+        let via_new = encode_image_rd_with_modes_and_density(&image, &params, [true; 4], false);
+        assert_eq!(via_old.0, via_new.0, "header differs");
+        assert_eq!(via_old.1, via_new.1, "leaves differ");
+        assert_eq!(via_old.2, via_new.2, "evals differ");
+        assert_eq!(via_old.3, via_new.3, "mode stats differ");
     }
 
     // ------------------------------------------------------------------------ Step 15
@@ -1640,9 +1920,18 @@ mod tests {
             }
         }
         let (_qbeta, qgx, qgy, sse) = affine_fit(&block, size, 7);
-        assert!(sse < 5.0, "a pure ramp should fit almost exactly, got sse={sse}");
-        assert!(qgx > 0, "positive u-gradient should quantise to a positive qgx, got {qgx}");
-        assert!(qgy > 0, "positive v-gradient should quantise to a positive qgy, got {qgy}");
+        assert!(
+            sse < 5.0,
+            "a pure ramp should fit almost exactly, got sse={sse}"
+        );
+        assert!(
+            qgx > 0,
+            "positive u-gradient should quantise to a positive qgx, got {qgx}"
+        );
+        assert!(
+            qgy > 0,
+            "positive v-gradient should quantise to a positive qgy, got {qgy}"
+        );
     }
 
     /// A DCT residual's own round trip (encode-time quantise/dequantise, matching
@@ -1673,7 +1962,14 @@ mod tests {
             qalfa: 0,
             qbeta,
             rms: 0.0,
-            moments: RawMoments { s0: 1, s1_x4: 0, s2_x16: 0, t0: 0, t1_x4: 0, t2: 0 },
+            moments: RawMoments {
+                s0: 1,
+                s1_x4: 0,
+                s2_x16: 0,
+                t0: 0,
+                t1_x4: 0,
+                t2: 0,
+            },
         };
         let hdr = Header {
             bits_alfa: 4,
@@ -1685,8 +1981,12 @@ mod tests {
             height: 32,
             int_max_alfa: 32,
         };
-        let (levels, sse) = residual_for_candidate(&block, &px, 32, size, &c, &rd_params(1.0), &hdr);
-        assert!(sse < 1e-6, "an exact prediction should leave ~zero residual SSE, got {sse}");
+        let (levels, sse) =
+            residual_for_candidate(&block, &px, 32, size, &c, &rd_params(1.0), &hdr);
+        assert!(
+            sse < 1e-6,
+            "an exact prediction should leave ~zero residual SSE, got {sse}"
+        );
         assert!(
             levels.iter().all(|&l| l == 0),
             "an exact prediction's residual should quantise entirely to zero, got {levels:?}"
@@ -1716,7 +2016,8 @@ mod tests {
     /// the frozen snapshot disagree, exactly the already-documented Step 14 rate-estimation
     /// gap (`crate::rate`'s own module doc), not a new Step 15 defect.
     #[test]
-    fn aggregate_estimated_cost_is_provably_no_worse_under_more_modes_even_though_real_bpp_can_be() {
+    fn aggregate_estimated_cost_is_provably_no_worse_under_more_modes_even_though_real_bpp_can_be()
+    {
         let image = textured_image(96, 96);
         let params = EncodeParams {
             min_size: 4,
@@ -1755,6 +2056,7 @@ mod tests {
                 params: &params,
                 rate: Some(&rate),
                 allowed_modes,
+                adaptive_density: false,
             };
             walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda)
         };

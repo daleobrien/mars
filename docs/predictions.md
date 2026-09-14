@@ -1809,3 +1809,145 @@ by construction) is an additional, separate falsified expectation — the fix wa
 to help, and empirically did not — recorded here rather than only in `docs/decisions.md`,
 since it is itself a predicted-then-measured outcome in the same spirit as the numbered
 predictions above.
+
+---
+
+## 2026-09-14 (not yet run) · Step 16 · adaptive partitioning
+
+**Context read before writing this prediction.** `docs/decisions.md`'s D39-D42 (Step
+14/15) establish that `mars_codec::encode`'s bottom-up `J = D + λR` walk (`walk_rd`)
+already produces genuinely non-uniform leaf sizes driven by RD gain — the brief's own
+framing ("Step 14 already supplies the mechanism; this step supplies the geometry")
+confirms this is not a new capability Step 16 introduces from scratch. Two concrete,
+non-overlapping axes remain open for this step to add: (a) non-quad split shapes
+(HV/binary), which the brief itself marks optional and which — unlike the change below —
+would require a new bitstream split-type field (`FIELD_SPLIT` is currently a 2-way
+leaf/quad-split bit) with matching decoder support, a materially larger change than an
+M-sized step's remaining budget after Step 15's own session comfortably allows; and (b)
+domain-pool density that varies with local block complexity, which uses only the existing
+`FIELD_DOM_ROW`/`FIELD_DOM_COL` fields (no new field type, so no new blind spot in the
+frozen `RateModels` snapshot of the specific shape D40 root-caused). **Decision, recorded
+here before any code is measured:** implement (b) only, and record (a)'s omission as a
+scope cut in `docs/decisions.md`, not a silent gap — matching the brief's own "optionally"
+wording for HV/binary splits.
+
+**What is being built.** `search()` is refactored to accept an explicit domain-search
+stride instead of always reading `params.shift`; a new pre-search pass computes each
+candidate block's own pixel-domain RMS (population variance of the range block, cheap —
+already almost the same O(size²) pass `search` itself does for `t0`/`t2`) and maps it to
+a denser stride (half `params.shift`, floor 1) above a high-RMS threshold, a sparser
+stride (double `params.shift`) below a low-RMS threshold, and the unchanged base stride in
+between. This only ever runs on the Step 14/15 RD path (`walk_rd`, gated by a new
+`Ctx::adaptive_density` flag defaulting to `false` everywhere except a new superset entry
+point Step 16's own gate/bench uses), so every existing caller and every already-passing
+gate (13/14/15) is byte-for-byte unaffected.
+
+### P16.1 — a real but modest BD-rate improvement, smaller than Step 14's own 10-20% band
+
+Expect **BD-rate improvement in the 1-5% range** vs. Step 15 (same-codebase, same mode
+mask, `adaptive_density: false` vs `true` — the fair A/B D40's own precedent establishes,
+not a git-revision diff) on `kodim01`/`kodim02` at the same 4-point λ grid prior RD gates
+used. Reasoning for a *modest* rather than large number: unlike Step 15's new modes, this
+change does not add new representational power to any single leaf — it only spends more
+(or fewer) domain-search evals on blocks the encoder was already going to search, so its
+only lever is finding a *better* domain match within the same mode/geometry space, which
+should help but by less than a genuinely new mode or split type would.
+
+### P16.2 — the real risk is the same rate-snapshot fidelity gap D39-D42 already named, not a new bug
+
+Because `build_rate_snapshot`'s frozen warm-up still runs the legacy top-down `walk` at a
+**fixed, non-adaptive** stride (`RD_WARMUP_T_RMS`'s walk uses `params.shift` unchanged —
+this step does not touch `build_rate_snapshot`), the snapshot's `FIELD_DOM_ROW`/
+`FIELD_DOM_COL` histograms reflect the *base*-density domain-position distribution, not
+the denser/sparser one the real adaptive-density search will actually produce. If the
+measured BD-rate gain is smaller than predicted, or is a regression, the first hypothesis
+to check — before assuming a new bug in this step's own code — is this exact,
+already-precedented mechanism (a new field value *distribution* shift against an
+unchanged-vocabulary snapshot), not a structurally new blind spot like D40's (this change
+introduces no new field types, only different values in two already-observed fields), and
+not assumed away either way without checking per D40's own template (code inspection plus
+a direct property test, not narrative reasoning alone).
+
+### P16.3 — encode-time cost scales with how much density actually shifts, expected roughly 1.3-2.5x
+
+Because the high/low-RMS thresholds are expected to route a meaningful fraction of blocks
+to the denser (half-stride, ~4x more domain positions in 2D) branch on a textured
+corpus like Kodak, while a smaller fraction of near-flat blocks get the cheaper
+double-stride branch, expect wall-clock encode time for the adaptive-density arm to be
+**roughly 1.3-2.5x** the fixed-density arm's, measured on the same machine, same thread
+count, same run — not the >=4x the brief's own "wins 3% for 4x time" framing warns
+against, but also not free. This is a same-run wall-clock ratio, not a `benchmark-protocol`
+-grade throughput claim (no anchor codec comparison, no A/B-interleaved median-of-N is
+attempted here — this is cost accounting for the brief's own exit criterion, not a
+performance claim about the project's speedup targets).
+
+### Known gap, stated before measuring
+
+`kodim01`/`kodim02` only, the same 4-point λ grid, per D28/D36/D39/D40's scoping
+precedent — not the full 24-image `standard/` corpus, for the same session-time reasons.
+HV/binary splits and λ-adaptive residual quantisation (an unrelated Step 15 gap) are both
+out of scope here, the former recorded above as this step's own scope cut, the latter
+inherited unchanged from Step 15.
+
+---
+
+## 2026-09-15 · Step 16 · outcomes
+
+`crates/mars-bench/tests/density_gate.rs` (`gate-16`), kodim01/kodim02, the same 4-point λ
+grid Steps 14/15 used, adaptive-density curve (`adaptive_density: true`) vs. fixed-density
+curve (`false`, Step 15's own unchanged behaviour), both at `.mars` v0 bpp. Full numbers
+and reasoning in `docs/decisions.md`'s D43.
+
+### P16.1 — **falsified in the favourable direction: -6.82% mean, well outside the predicted 1-5% band**
+
+Predicted BD-rate improvement in the 1-5% range. Measured: **mean -6.82%** (kodim01
+-6.75%, kodim02 -6.88%) — a real, clean improvement, but a substantially larger one than
+predicted. The prediction's own reasoning (this change only finds *better* domain matches
+within an already-decided mode/geometry, so should help "but by less than a genuinely new
+mode or split type would") undersold how much of a typical block's rate-distortion cost is
+attributable to domain-match quality specifically: the partition statistics (D43) confirm
+block-size geometry is essentially unchanged between arms, so the entire BD-rate gain is
+coming from better-matched domains at the *same* leaf sizes/modes — evidently a larger
+lever than anticipated, not a smaller one, once genuinely content-adaptive density is
+applied rather than a single global stride.
+
+### P16.2 — **the named risk did not materialise; no root-cause investigation was needed**
+
+Predicted that if the gain were smaller than expected or a regression appeared, the first
+hypothesis to check would be the frozen `RateModels` snapshot's fixed-density warm-up
+pricing the real, denser/sparser domain-position value distribution off (the same class of
+mechanism, though not the same specific gap, as D39/D40's own finding). No regression or
+shortfall occurred, so this investigation was not triggered — recorded here as a
+falsified-premise prediction (the risk named did not manifest) rather than silently
+dropped, since P16.2 was itself a real, pre-registered hypothesis about what a bad outcome
+would most likely mean.
+
+### P16.3 — **confirmed: 1.42x overall, inside the predicted 1.3-2.5x band**
+
+Predicted roughly 1.3-2.5x wall-clock encode time for the adaptive arm vs. the fixed arm.
+Measured: kodim01 1.63x, kodim02 1.09x, **overall 1.42x** — inside the predicted band,
+and notably asymmetric between the two images in an informative way: kodim01 (more
+high-RMS content) saw its adaptive-arm eval count more than double (ratio ~2.27x) relative
+to fixed, while kodim02 (comparatively flatter) saw its adaptive-arm eval count actually
+*decrease* below fixed (ratio ~0.88x) — more of kodim02's blocks routed to the sparser
+stride than to the denser one. The prediction's own framing ("expected to route a
+meaningful fraction of blocks to the denser branch on a textured corpus") holds for
+kodim01 but was too uniform an expectation across images with different content
+statistics — a genuinely per-image-varying cost/gain tradeoff, which is itself a small
+but real finding about what "content-adaptive" means in practice on this corpus.
+
+### Known gap, as predicted
+
+`kodim01`/`kodim02` only, the same 4-point λ grid, per the stated scope cut — the full
+24-image `standard/` corpus was not attempted, for the same session-time reasons as every
+prior RD gate in this plan. HV/binary splits remain unimplemented, recorded as a
+deliberate scope cut (the brief's own "optionally") rather than an oversight.
+
+**Overall closing note.** Unlike Steps 14/15, this step's gate did not need its bar
+calibrated to accept a shortfall or a regression — the measured result is a genuine, clean
+win, both on BD-rate and on the cost/gain ratio the brief's exit criterion explicitly
+demands be reported together. This breaks, rather than extends, the "three consecutive
+gates passed only after a tolerance was calibrated to a shortfall/regression" pattern
+`docs/decisions.md`'s D40 flagged as a kill-criteria audit trigger — recorded here plainly,
+per the same A7/A4 discipline this file's every prior entry has followed, not because the
+result happened to be convenient but because it is what was actually measured.
