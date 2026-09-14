@@ -1339,3 +1339,56 @@ The full survival/recall tradeoff curve (sweeping `FunnelConfig`'s survivor coun
 the Pareto frontier across the full 24-image corpus remain open, exactly as this
 prediction's "known gap" section said before any code ran — `docs/decisions.md` records
 this alongside D28's identical Step 9 scope cut.
+
+---
+
+## 2026-09-14 (not yet run) · Step 14 · rate-distortion optimisation
+
+`encode.rs`'s current `walk`/`split` recursion (Step 6, extended by Steps 12/13) makes the
+split decision top-down and threshold-driven: a block splits whenever `best_rms >
+params.t_rms`, before any child has been searched, so the decision cannot see what the
+children would actually have cost. Step 14 replaces this with `J = D + λR`: rate estimated
+from the live entropy models (not a constant-bits stand-in), and a bottom-up recursion
+that searches/codes the children first and only then compares the parent's own single-fit
+`J` against the sum of the children's `J`, keeping whichever is smaller. λ becomes the
+quality knob — an RD curve is a λ sweep, not a `t_rms` sweep with λ held fixed.
+
+### P14.1 — BD-rate improvement clears the step's own bar, but not by a wide margin
+
+Expect **BD-rate improvement in the 10-20% range** vs. the Step 9 `Exhaustive` reference
+at matched search effort, comfortably past the step's 10% target but well short of a 2x
+change — bottom-up RD pruning corrects a real blind spot (top-down thresholding cannot
+compare a parent's cost to its children's actual coded cost, only to a fixed RMS bar that
+has no direct relationship to bits), but the underlying representation (fixed quadtree
+geometry, single fractal mode) is unchanged, so most of the ceiling this step can reach is
+bounded by how often the old threshold was already picking the RD-better side by luck.
+Reasoning by analogy to video codecs' RDO-vs-heuristic-split gaps, which cluster in this
+same 10-20% band when only the split decision changes and the mode/partition set does not.
+
+### P14.2 — the convexity check is the real risk, not the BD-rate number
+
+Expect the first attempt at rate estimation to produce a **non-convex or non-monotone**
+RD curve at the extreme ends of the λ sweep (very low or very high λ) before it produces a
+clean one — rate estimation from live adaptive entropy models is context-dependent (the
+same symbol costs different bits depending on encode order and prior blocks' statistics),
+and a bottom-up comparison that estimates each child's rate independently, without
+accounting for how the adaptive model's state actually evolves across the real encode
+order, is the most likely place this shows up. Per the step's own framing, a non-convex
+curve is treated as a rate-estimation bug to fix, not a result to report.
+
+### P14.3 — the harness sanity check
+
+Expect that setting λ to select the same operating point the old `t_rms` threshold would
+have chosen (i.e., roughly matched bpp) reproduces a similar partition to the Step 9/13
+baseline's leaf-size histogram — not identical (the decision rule genuinely differs), but
+without a wholesale collapse to all-leaf or all-split, which would indicate the rate
+estimate or `J` comparison has a sign error or unit mismatch (e.g. λ and R in incompatible
+units) rather than a real algorithmic difference.
+
+### Known gap, stated before any code runs
+
+`μT` (decode-cost term) is out of scope this step per the brief ("extend... once
+decode-cost measurement exists") — only `J = D + λR` is implemented. The λ sweep is run at
+whatever image subset is practical this session, not necessarily the full 24-image
+`standard/` corpus; if scoped down, the cut is recorded in `docs/decisions.md` the same
+way D28/Step 13's corpus-subset cuts were.
