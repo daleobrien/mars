@@ -425,11 +425,26 @@ pub fn decode_color_image_progression(
             let mut cb_img = vec![128u8; cw * ch];
             let mut cr_img = vec![128u8; cw * ch];
             let mut used = 0;
-            let mut image = rgb_from_ycbcr(
-                &Plane::from_vec(yw, yh, y_img.clone()),
-                &Plane::from_vec(cw, ch, cb_img.clone()),
-                &Plane::from_vec(cw, ch, cr_img.clone()),
-            );
+            // Bugfix: the flat-grey seed image must go through the same 4:2:0 upsample
+            // the loop below applies to every subsequent iteration -- `rgb_from_ycbcr`
+            // asserts its three planes share one size, and cb_img/cr_img are only
+            // (yw, yh)-sized post-upsample; at their native (cw, ch) they are half that
+            // in each dimension for 4:2:0, which panicked the assertion (not merely
+            // producing a wrong seed) before this pre-loop value was ever overwritten by
+            // the loop's own first iteration.
+            let (cb_seed, cr_seed) = if mode == MODE_RGB_420 {
+                (
+                    upsample_nearest(&Plane::from_vec(cw, ch, cb_img.clone()), yw, yh),
+                    upsample_nearest(&Plane::from_vec(cw, ch, cr_img.clone()), yw, yh),
+                )
+            } else {
+                (
+                    Plane::from_vec(cw, ch, cb_img.clone()),
+                    Plane::from_vec(cw, ch, cr_img.clone()),
+                )
+            };
+            let mut image =
+                rgb_from_ycbcr(&Plane::from_vec(yw, yh, y_img.clone()), &cb_seed, &cr_seed);
             for i in 0..max_iterations.max(1) {
                 let y_next = decode_step(&y_hdr, &y_leaves, &y_img);
                 let cb_next = decode_step(&cb_hdr, &cb_leaves, &cb_img);
@@ -660,6 +675,38 @@ mod tests {
         assert!(
             bytes_420.len() < bytes_444.len() || stats_420.total_bytes() <= stats_444.total_bytes()
         );
+    }
+
+    /// **Regression test for a real bug**, reported as a panic running `decmars -a
+    /// --progression <dir>` on a 4:2:0 file: `assertion left == right failed: left:
+    /// (768, 512) right: (384, 256)` -- `rgb_from_ycbcr` requires its three planes share
+    /// one size, but `decode_color_image_progression`'s pre-loop seed image built Cb/Cr
+    /// at their native (half-resolution, for 4:2:0) size instead of upsampling to Y's
+    /// size first, the way every other iteration in the same loop already does. The seed
+    /// value is always overwritten by the loop's own first iteration before being
+    /// returned, so this was a pure construction bug, not a real need for a differently-
+    /// sized seed.
+    #[test]
+    fn progression_decode_does_not_panic_on_420_input() {
+        let img = gradient_image(64, 64);
+        let cfg_420 = ColorEncodeParams {
+            y: params(4.0),
+            chroma: params(4.0),
+            subsampling: Subsampling::Yuv420,
+            adaptive_density: false,
+            allowed_modes: [true; 4],
+        };
+        let (bytes_420, _stats) = encode_color_image(&img, &cfg_420);
+
+        let mut frame_count = 0;
+        let (decoded, used) =
+            decode_color_image_progression(&bytes_420, 5, None, 1.0, |_n, _frame| {
+                frame_count += 1;
+            })
+            .expect("progression decode of a 4:2:0 stream must not panic or error");
+        assert_eq!(used, 5);
+        assert_eq!(frame_count, 5);
+        assert_eq!((decoded.width(), decoded.height()), (64, 64));
     }
 
     #[test]
