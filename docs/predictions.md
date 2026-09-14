@@ -1027,3 +1027,40 @@ position, just the previous leaf visited).
    falsified rather than merely off on magnitude: a weaker context model still recovered
    the brief's full expected gain on the two images where the brief's expectation actually
    applies. Filed alongside the scope note in `docs/decisions.md` D30.
+
+---
+
+## 2026-09-14 (not yet run) · Step 12 · Rayon parallelism
+
+### P12.1 — bitstream identity holds at every thread count, with no extra work needed
+beyond what determinism-by-default already guarantees
+
+The brief's only hard exit criterion is bit-identical output across thread counts. I
+predict this holds trivially once search is decoupled from emission: each range block's
+candidate is a pure function of `(image, contracted, row, col, size, params)` with no
+shared mutable accumulator across blocks (unlike, say, a running sum that could
+reassociate under a different reduction tree), and the parallel decomposition changes only
+*which thread* computes each block's search, never that block's own floating-point
+arithmetic. Concatenating each quadrant's leaves in the same TL/BL/TR/BR order the
+sequential walk already used should therefore reproduce the exact sequential bitstream at
+1, 2, 4, 8, and 16 threads with zero special-casing — the differential test is expected to
+pass on the first attempt, not after debugging a reordering bug.
+
+### P12.2 — scaling is markedly sub-linear past 4 threads on this machine, and the
+smallest range blocks are why
+
+This machine's P-core count (per `benchmark-protocol`) is well below 16, so threads beyond
+that count are E-cores or hyperthread-style oversubscription and I expect diminishing
+returns there regardless of the encoder. More specific to this step: `min_size` in the
+project's configs is typically 4-8, and Step 11's own finding (D31) was that the NEON
+kernel's per-row overhead stops paying off at larger sizes, which suggests the reverse
+problem here — at the smallest sizes, a `rayon::join`'s task-spawn/steal overhead is
+large relative to the actual search cost of a 4x4 or 8x8 block. I predict the parallel
+efficiency (speedup / thread count) measured at 2 threads will be the best of the sweep
+(>= 80%), degrading past 4 threads to well under 50% by 16, and that most of the shortfall
+traces to oversubscription on small blocks rather than to the sequential
+`Contracted::build` prefix (which is a small fraction of total work at exhaustive-search
+block counts). If parallel efficiency instead stays high (>= 70%) all the way to 16
+threads, that would mean the search cost per block dominates task overhead by a wider
+margin than expected, which would be worth noting as a reason *not* to bother with a
+size-based parallel cutoff in later steps.
