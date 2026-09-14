@@ -106,6 +106,7 @@ fn exhaustive_scores_near_perfect_recall_against_the_oracle() {
         max_alfa: cfg.max_alfa,
         t_rms: 1e9, // never split -- code every block at max_size, matching the oracle's own per-size-independent scoring
         zero_threshold: 0,
+        lambda: None,
     };
 
     let (_, _, picks) = run(&image, &params, MethodName::Exhaustive);
@@ -198,6 +199,7 @@ fn evals_per_transform_is_within_5pct_of_the_c_reference_on_kodim01() {
         max_alfa: 1.0,
         t_rms: 8.0,
         zero_threshold: 0,
+        lambda: None,
     };
 
     let methods = [

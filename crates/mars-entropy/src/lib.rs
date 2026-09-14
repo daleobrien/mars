@@ -87,6 +87,16 @@ impl AdaptiveModel {
         (left, right - left)
     }
 
+    /// Step 14: the bits it would cost to code `symbol` under this model's *current*
+    /// state, without mutating it -- `-log2(probability / 2^PRECISION)`. A pure query (no
+    /// `update`), so it is safe to call from multiple threads on a shared, read-only
+    /// model -- exactly what the rate estimator needs to price a candidate without
+    /// committing to it.
+    pub fn bits_for(&self, symbol: u32) -> f64 {
+        let (_, prob) = self.left_and_prob(symbol as usize);
+        -(f64::from(prob) / PRECISION_TOTAL as f64).log2()
+    }
+
     /// The inverse of [`Self::left_and_prob`]: the symbol whose interval contains
     /// `quantile`, plus that interval.
     fn symbol_for_quantile(&self, quantile: u32) -> (u32, u32, u32) {
@@ -192,6 +202,28 @@ pub fn encode(events: &[Event]) -> Vec<u8> {
         model.update(ev.symbol);
     }
 
+    encode_recorded(recorded)
+}
+
+/// Step 14: replay `events` against fresh per-context [`AdaptiveModel`]s exactly the way
+/// [`encode`] does, but return the resulting models instead of encoding -- the rate
+/// estimator's "warm-up" snapshot (`mars-codec`'s `rate` module) is built by handing this
+/// the event stream of a representative (not necessarily RD-optimal) partition, so its
+/// per-context statistics are real, observed frequencies rather than a constant-bits
+/// stand-in. Shares the exact model-building loop `encode` uses, so the snapshot is
+/// bit-for-bit what `encode` itself would have converged to on the same event stream.
+pub fn build_models(events: &[Event]) -> HashMap<ContextKey, AdaptiveModel> {
+    let mut models: HashMap<ContextKey, AdaptiveModel> = HashMap::new();
+    for ev in events {
+        let model = models
+            .entry(ev.ctx)
+            .or_insert_with(|| AdaptiveModel::new(ev.alphabet));
+        model.update(ev.symbol);
+    }
+    models
+}
+
+fn encode_recorded(recorded: Vec<(u32, FixedInterval)>) -> Vec<u8> {
     let mut ans = DefaultAnsCoder::new();
     for &(symbol, interval) in recorded.iter().rev() {
         ans.encode_symbol(symbol, interval)

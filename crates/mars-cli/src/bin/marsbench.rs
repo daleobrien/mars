@@ -730,6 +730,7 @@ fn gpu_search_check(a: GpuSearchCheckArgs) -> Result<()> {
                     max_alfa: 1.0,
                     t_rms: 0.0,
                     zero_threshold: 0,
+                    lambda: None,
                 };
                 let r =
                     mars_bench::gpu_search::ab_compare(&image, size, &params, &gpu, a.bench_runs);
@@ -806,6 +807,7 @@ fn gpu_search_bench(a: GpuSearchBenchArgs) -> Result<()> {
         max_alfa: 1.0,
         t_rms: 0.0,
         zero_threshold: 0,
+        lambda: None,
     };
     for entry in images
         .images
@@ -1185,6 +1187,7 @@ fn classical_methods_cmd(a: ClassicalMethodsArgs) -> Result<()> {
                 max_alfa: cfg.config.max_alfa,
                 t_rms: a.t_rms,
                 zero_threshold: 0,
+                lambda: None,
             };
 
             for method in mars_search::MethodName::ALL {
@@ -2151,6 +2154,7 @@ fn parallel_bench(a: ParallelBenchArgs) -> Result<()> {
         max_alfa: 1.0,
         t_rms: 8.0,
         zero_threshold: 0,
+        lambda: None,
     };
 
     println!(

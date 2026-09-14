@@ -39,7 +39,9 @@ struct Cli {
 
     /// Split threshold (Mars 1's `-r`) for the luma (or the only, for grayscale) plane: a
     /// block splits when its best-fit RMS exceeds this. Higher = fewer/larger blocks =
-    /// more compression, lower quality. This is the compression-level knob.
+    /// more compression, lower quality. Superseded by `--lambda` (Step 14) as the
+    /// recommended quality knob; kept for the legacy top-down split rule, used whenever
+    /// `--lambda` is not given.
     #[arg(short = 'r', long, default_value_t = 8.0)]
     t_rms: f64,
 
@@ -54,6 +56,16 @@ struct Cli {
     /// (half-resolution Cb/Cr, box-filtered). Ignored for grayscale input.
     #[arg(long, value_enum, default_value = "444")]
     subsampling: SubsamplingArg,
+
+    /// Step 14's `J = D + lambda*R` quality knob: the encoder searches every candidate
+    /// block bottom-up and keeps whichever of "one leaf here" or "the four children" has
+    /// the smaller distortion-plus-lambda-times-estimated-bits. This is the RD-optimal
+    /// replacement for `--t-rms`/`-r`'s top-down threshold -- an RD curve is a lambda
+    /// sweep, not a t_rms sweep. When given, `--t-rms` is ignored for the split decision
+    /// (it still seeds the internal rate-estimation warm-up pass, unaffected by this
+    /// flag). Larger lambda = more weight on rate = fewer/larger blocks.
+    #[arg(long)]
+    lambda: Option<f64>,
 
     /// Smallest range-block size.
     #[arg(long, default_value_t = 4)]
@@ -112,6 +124,7 @@ fn main() -> Result<()> {
         max_alfa: cli.max_alfa,
         t_rms: cli.t_rms,
         zero_threshold: cli.zero_threshold,
+        lambda: cli.lambda,
     };
     let chroma = EncodeParams {
         t_rms: cli.chroma_t_rms.unwrap_or(cli.t_rms),

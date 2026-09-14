@@ -60,6 +60,7 @@ fn leaf_diff_kodim01() {
         max_alfa: m1_params.max_alfa,
         t_rms: m1_params.t_rms,
         zero_threshold: 0,
+        lambda: None,
     };
     let retrievers = SizedRetrievers::build(
         &contracted,

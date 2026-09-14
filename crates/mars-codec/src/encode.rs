@@ -17,6 +17,8 @@ use mars_core::Plane;
 
 use crate::ifs::{Header, Leaf};
 use crate::isometry;
+use crate::mars_format::{leaf_events, FIELD_SPLIT};
+use crate::rate::RateModels;
 
 /// What the encoder needs beyond the header fields `docs/mars1-format.md` already names.
 #[derive(Debug, Clone, Copy)]
@@ -28,11 +30,21 @@ pub struct EncodeParams {
     pub bits_beta: u32,
     pub max_alfa: f64,
     /// `-r`, the split threshold: a block splits when its best RMS exceeds this and it is
-    /// larger than `min_size`.
+    /// larger than `min_size`. Step 14: this remains the split rule for `mars-search`'s
+    /// candidate-restriction methods (Step 9/13), which are out of this step's scope, but
+    /// `mars-codec`'s own [`walk`] switches to [`Self::lambda`]-driven bottom-up RD
+    /// pruning whenever `lambda` is `Some` -- see `docs/decisions.md`'s Step 14 entry for
+    /// why `t_rms` was kept rather than removed.
     pub t_rms: f64,
     /// `-z`. The 1998 default is 0, meaning the override (§8.1) fires exactly when
     /// `qalfa == 0`.
     pub zero_threshold: u32,
+    /// Step 14's `J = D + λR` quality knob. `None` preserves the legacy `t_rms`
+    /// top-down threshold split exactly (used by every pre-Step-14 caller and test, and
+    /// by `mars-search`'s own methods); `Some(lambda)` switches [`walk`] to bottom-up RD
+    /// pruning: search/code the four children first, then keep whichever of "this block
+    /// as one leaf" or "the four children as they stand" has the smaller `D + lambda*R`.
+    pub lambda: Option<f64>,
 }
 
 /// The six integer moments of one candidate fit, kept alongside the winning candidate so
@@ -480,6 +492,12 @@ pub fn f32_f64_divergence(
 
 /// Encode one image exhaustively, per §5's partition and §8's fit. Returns the header, the
 /// leaves in `parse`'s order, and the total `evals` spent (§M5).
+///
+/// Step 14: dispatches on `params.lambda`. `None` runs the legacy top-down, `t_rms`
+/// threshold-driven `walk` unchanged (bit-identical to every pre-Step-14 caller and
+/// test). `Some(lambda)` runs the bottom-up `J = D + λR` walk instead -- see
+/// [`walk_rd`]/`crate::rate`'s module doc for the rate-estimation approximation this
+/// requires.
 pub fn encode_image(image: &Plane, params: &EncodeParams) -> (Header, Vec<Leaf>, u64) {
     let hdr = Header {
         bits_alfa: params.bits_alfa,
@@ -492,25 +510,79 @@ pub fn encode_image(image: &Plane, params: &EncodeParams) -> (Header, Vec<Leaf>,
         int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
     };
     let contracted = Contracted::build(image);
+
+    if let Some(lambda) = params.lambda {
+        let rate = build_rate_snapshot(image, &hdr, &contracted, params);
+        let ctx = Ctx {
+            image,
+            contracted: &contracted,
+            hdr: &hdr,
+            params,
+            rate: Some(&rate),
+        };
+        let result = walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda);
+        return (hdr, result.leaves, result.evals);
+    }
+
     let ctx = Ctx {
         image,
         contracted: &contracted,
         hdr: &hdr,
         params,
+        rate: None,
     };
     let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
     (hdr, leaves, evals)
+}
+
+/// Step 14's fixed warm-up threshold, deliberately independent of the run's own `lambda`
+/// (`crate::rate`'s module doc explains why a mutable, decision-order-updated model was
+/// rejected in favour of a frozen snapshot). Kept at the 1998 default so the snapshot's
+/// leaf-size mix is a plausible, moderate partition regardless of which `lambda` is being
+/// evaluated -- not this `lambda`'s own eventual partition, which is the documented
+/// fidelity gap (`docs/decisions.md`): no fixed-point iteration is attempted this step.
+const RD_WARMUP_T_RMS: f64 = 8.0;
+
+/// Run the legacy top-down encoder once, at [`RD_WARMUP_T_RMS`], and replay its leaves'
+/// real event stream through [`mars_entropy::build_models`] to obtain the frozen,
+/// read-only per-context snapshot [`walk_rd`]'s rate estimates are priced against.
+fn build_rate_snapshot(
+    image: &Plane,
+    hdr: &Header,
+    contracted: &Contracted,
+    params: &EncodeParams,
+) -> RateModels {
+    let warmup_params = EncodeParams {
+        t_rms: RD_WARMUP_T_RMS,
+        lambda: None,
+        ..*params
+    };
+    let warmup_ctx = Ctx {
+        image,
+        contracted,
+        hdr,
+        params: &warmup_params,
+        rate: None,
+    };
+    let (leaves, _evals) = walk(&warmup_ctx, 0, 0, hdr.virtual_size());
+    RateModels::from_leaves(hdr, &leaves)
+        .expect("a warm-up partition from `walk` always writes as a valid `.mars` tree")
 }
 
 /// The read-only context one `walk` recursion shares — bundled so the recursive calls
 /// stay readable instead of threading four parameters through every one. Every field is
 /// a shared reference to plain data (no interior mutability), so `Ctx` is `Sync` and safe
 /// to share across the `rayon::join` calls below.
+///
+/// `rate` is `Some` only on the Step 14 RD path ([`walk_rd`]/[`split_rd`]) — a frozen
+/// snapshot, never mutated after construction, so sharing it across parallel subtrees
+/// introduces no thread-count dependence (see `crate::rate`'s module doc).
 struct Ctx<'a> {
     image: &'a Plane,
     contracted: &'a Contracted,
     hdr: &'a Header,
     params: &'a EncodeParams,
+    rate: Option<&'a RateModels>,
 }
 
 /// Step 12: below this block size, a `rayon::join`'s task-spawn/steal overhead costs more
@@ -642,6 +714,223 @@ fn split(ctx: &Ctx, row: u32, col: u32, half: u32) -> (Vec<Leaf>, u64) {
         evals += q_evals;
     }
     (leaves, evals)
+}
+
+/// One subtree's bottom-up RD result: its leaves, the search effort spent producing them,
+/// and its total distortion/rate -- `d` is the summed sum-of-squared-error (SSE, matching
+/// `fit_f64`'s own `sum` before the final `/s0`.sqrt()), `r` the summed estimated bits
+/// (`crate::rate::RateModels::bits_for`), **including** this subtree's own split-flag bit
+/// where one was actually emitted (i.e. everywhere `size > min_size` and not `forced`).
+/// Distortion is SSE rather than RMS specifically so two branches covering the same pixel
+/// area can be compared by plain addition (`docs/decisions.md`'s Step 14 entry has the
+/// reasoning): `J = D + λR` with `D` in SSE units is the same convention H.26x-style RDO
+/// uses (`SSD + λ·bits`).
+struct RdResult {
+    leaves: Vec<Leaf>,
+    evals: u64,
+    d: f64,
+    r: f64,
+}
+
+/// Sum of [`RateModels::bits_for`] over every event a candidate leaf would emit.
+fn event_bits(rate: &RateModels, events: &[mars_entropy::Event]) -> f64 {
+    events.iter().map(|e| rate.bits_for(e.ctx, e.alphabet, e.symbol)).sum()
+}
+
+/// The §8.1 zero-alfa override, factored out of [`walk`] so [`walk_rd`] can reuse it while
+/// also recovering the resulting leaf's own SSE (needed for `D`, which the legacy
+/// RMS-threshold `walk` never had to compute in closed form). Returns `(leaf, sse)`.
+fn build_leaf_and_sse(
+    ctx: &Ctx,
+    row: u32,
+    col: u32,
+    size: u32,
+    candidate: Option<Candidate>,
+) -> (Leaf, f64) {
+    let hdr = ctx.hdr;
+    let mut leaf = candidate.map_or(
+        Leaf {
+            row,
+            col,
+            size,
+            qalfa: 0,
+            qbeta: 0,
+            isometry: 0,
+            dom_row: 0,
+            dom_col: 0,
+        },
+        |c| Leaf {
+            row,
+            col,
+            size,
+            qalfa: c.qalfa,
+            qbeta: c.qbeta,
+            isometry: c.isometry,
+            dom_row: c.dom_row,
+            dom_col: c.dom_col,
+        },
+    );
+    let mut sse = candidate.map_or(0.0, |c| c.rms * c.rms * f64::from(size) * f64::from(size));
+
+    if leaf.qalfa.abs_diff(0) <= ctx.params.zero_threshold {
+        let px = ctx.image.as_slice();
+        let stride = ctx.image.width();
+        let size_u = size as usize;
+        let mut range_sum = 0i64;
+        let mut t2 = 0i64;
+        for i in 0..size_u {
+            let src = (row as usize + i) * stride + col as usize;
+            for j in 0..size_u {
+                let v = i64::from(px[src + j]);
+                range_sum += v;
+                t2 += v * v;
+            }
+        }
+        let s0 = i64::from(size) * i64::from(size);
+        leaf.qbeta = best_beta(range_sum, s0, hdr.bits_beta);
+        leaf.qalfa = 0;
+        leaf.isometry = 0;
+        leaf.dom_row = 0;
+        leaf.dom_col = 0;
+
+        // alfa2 == 0 here, so `fit_f64`'s own `sum` formula collapses to
+        // t2 - 2*beta2*t0 + s0*beta2^2, with beta2 the real-valued beta the quantised
+        // qbeta represents (mirrors fit_f64's alfa2 == 0 branch exactly).
+        let max_qbeta = (1u32 << hdr.bits_beta) - 1;
+        let beta2 = f64::from(leaf.qbeta) / f64::from(max_qbeta) * 255.0;
+        let sum = t2 as f64 - 2.0 * beta2 * range_sum as f64 + s0 as f64 * beta2 * beta2;
+        sse = sum.max(0.0);
+    }
+    (leaf, sse)
+}
+
+/// Step 14's bottom-up `J = D + λR` walk: search this block, then recursively resolve its
+/// four children (each already deciding leaf-vs-further-split), then keep whichever of
+/// "this block as one leaf" or "the four children as they stand" has the smaller
+/// `D + λR`. Strictly more informed than [`walk`]'s top-down RMS threshold, which decides
+/// before any child has been searched (`implementation-plan.md` Step 14's own framing) --
+/// at the cost of visiting every node of the full quadtree down to `min_size` regardless
+/// of outcome, not just the nodes a threshold would have stopped early at (`evals` and
+/// wall time both reflect this; see `docs/predictions.md`'s Step 14 entry).
+fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
+    let hdr = ctx.hdr;
+    if row >= hdr.height || col >= hdr.width {
+        return RdResult {
+            leaves: Vec::new(),
+            evals: 0,
+            d: 0.0,
+            r: 0.0,
+        };
+    }
+    let forced = size > hdr.max_size || row + size > hdr.height || col + size > hdr.width;
+    if forced {
+        let half = size / 2;
+        return split_rd(ctx, row, col, half, lambda);
+    }
+
+    let rate = ctx.rate.expect("walk_rd always runs with a rate snapshot (params.lambda is Some)");
+    let size_class = size.trailing_zeros();
+
+    // §5.3: a size-1 block is a raw, truncated pixel -- no search, no evals, always a
+    // leaf. Its truncation error is technically nonzero whenever `bits_beta < 8`, but
+    // this project's configs all keep `min_size >= 2` (docs/decisions.md), so size == 1
+    // is never actually reached; D is approximated as 0 here rather than computed exactly
+    // for a path that never executes.
+    if size == 1 {
+        let pixel =
+            u32::from(ctx.image.as_slice()[row as usize * ctx.image.width() + col as usize]);
+        let leaf = Leaf {
+            row,
+            col,
+            size,
+            qalfa: 0,
+            qbeta: pixel & ((1 << hdr.bits_beta) - 1),
+            isometry: 0,
+            dom_row: 0,
+            dom_col: 0,
+        };
+        let r = event_bits(rate, &leaf_events(hdr, &leaf, size_class));
+        return RdResult {
+            leaves: vec![leaf],
+            evals: 0,
+            d: 0.0,
+            r,
+        };
+    }
+
+    let (candidate, block_evals) = search(ctx.image, ctx.contracted, row, col, size, ctx.params);
+    let (leaf, leaf_d) = build_leaf_and_sse(ctx, row, col, size, candidate);
+    let leaf_r = event_bits(rate, &leaf_events(hdr, &leaf, size_class));
+
+    if size <= hdr.min_size {
+        // Never split below min_size -- mars_format never emits a split flag here either.
+        return RdResult {
+            leaves: vec![leaf],
+            evals: block_evals,
+            d: leaf_d,
+            r: leaf_r,
+        };
+    }
+
+    let half = size / 2;
+    let children = split_rd(ctx, row, col, half, lambda);
+    let total_evals = block_evals + children.evals;
+
+    let split_flag_bits = |symbol: u32| rate.bits_for((FIELD_SPLIT, size_class), 2, symbol);
+    let leaf_j = leaf_d + lambda * (leaf_r + split_flag_bits(0));
+    let split_j = children.d + lambda * (children.r + split_flag_bits(1));
+
+    if leaf_j <= split_j {
+        RdResult {
+            leaves: vec![leaf],
+            evals: total_evals,
+            d: leaf_d,
+            r: leaf_r + split_flag_bits(0),
+        }
+    } else {
+        RdResult {
+            leaves: children.leaves,
+            evals: total_evals,
+            d: children.d,
+            r: children.r + split_flag_bits(1),
+        }
+    }
+}
+
+/// [`split`]'s Step 14 counterpart: recurse into the four quadrants via [`walk_rd`],
+/// preserving the exact same `rayon::join` structure and fixed TL/BL/TR/BR merge order
+/// (so RD-driven output is bit-identical across thread counts too), summing each child's
+/// `(leaves, evals, d, r)` rather than just `(leaves, evals)`.
+fn split_rd(ctx: &Ctx, row: u32, col: u32, half: u32, lambda: f64) -> RdResult {
+    let quadrants = if half >= PARALLEL_SIZE_CUTOFF {
+        let (tl, bl) = rayon::join(
+            || walk_rd(ctx, row, col, half, lambda),
+            || walk_rd(ctx, row + half, col, half, lambda),
+        );
+        let (tr, br) = rayon::join(
+            || walk_rd(ctx, row, col + half, half, lambda),
+            || walk_rd(ctx, row + half, col + half, half, lambda),
+        );
+        [tl, bl, tr, br]
+    } else {
+        [
+            walk_rd(ctx, row, col, half, lambda),
+            walk_rd(ctx, row + half, col, half, lambda),
+            walk_rd(ctx, row, col + half, half, lambda),
+            walk_rd(ctx, row + half, col + half, half, lambda),
+        ]
+    };
+    let mut leaves = Vec::new();
+    let mut evals = 0u64;
+    let mut d = 0.0;
+    let mut r = 0.0;
+    for q in quadrants {
+        leaves.extend(q.leaves);
+        evals += q.evals;
+        d += q.d;
+        r += q.r;
+    }
+    RdResult { leaves, evals, d, r }
 }
 
 #[cfg(test)]
@@ -812,5 +1101,126 @@ mod tests {
             64,
             "matches §11's worked example"
         );
+    }
+
+    /// A small textured synthetic image -- enough spatial structure that both "leaf" and
+    /// "split further" are genuinely live options at every level, unlike a flat or
+    /// perfectly self-similar fixture where one side trivially always wins.
+    fn textured_image(w: usize, h: usize) -> Plane {
+        let mut data = vec![0u8; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                let v = ((r * 37 + c * 19) % 256) as i32
+                    + (((r / 8) as i32 * (c / 8) as i32 * 3) % 64);
+                data[r * w + c] = v.clamp(0, 255) as u8;
+            }
+        }
+        Plane::from_vec(w, h, data)
+    }
+
+    /// Half flat, half noisy -- unlike [`textured_image`] (whose block-periodic texture
+    /// makes every same-size block statistically identical, so the whole image tends to
+    /// flip leaf size in lockstep), this deliberately gives different regions genuinely
+    /// different local complexity, so a *single* lambda can legitimately keep the flat
+    /// half as large leaves while the noisy half keeps splitting to `min_size`.
+    fn half_flat_half_noisy_image(w: usize, h: usize) -> Plane {
+        let mut data = vec![0u8; w * h];
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for r in 0..h {
+            for c in 0..w {
+                data[r * w + c] = if c < w / 2 {
+                    128
+                } else {
+                    (next() & 0xff) as u8
+                };
+            }
+        }
+        Plane::from_vec(w, h, data)
+    }
+
+    fn rd_params(lambda: f64) -> EncodeParams {
+        EncodeParams {
+            min_size: 4,
+            max_size: 16,
+            shift: 4,
+            bits_alfa: 4,
+            bits_beta: 7,
+            max_alfa: 1.0,
+            t_rms: 8.0,
+            zero_threshold: 0,
+            lambda: Some(lambda),
+        }
+    }
+
+    /// Step 14's P14.3 harness-sanity check: at a moderate lambda, the RD walk must not
+    /// degenerate to "every block is one leaf" or "every block splits to min_size" --
+    /// either would indicate a sign error or unit mismatch in `J = D + lambda*R`
+    /// (`docs/predictions.md`'s Step 14 prediction), not a genuine partition decision.
+    #[test]
+    fn moderate_lambda_produces_a_real_mixed_partition_not_a_degenerate_one() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let (hdr, leaves, evals) = encode_image(&image, &rd_params(1500.0));
+        assert!(evals > 0, "RD walk must actually search");
+        let sizes: std::collections::HashSet<u32> = leaves.iter().map(|l| l.size).collect();
+        assert!(
+            sizes.len() > 1,
+            "expected a mix of leaf sizes at a moderate lambda, got only {sizes:?}"
+        );
+        assert!(
+            leaves.iter().all(|l| l.size >= hdr.min_size && l.size <= hdr.max_size),
+            "every leaf must respect min/max_size"
+        );
+    }
+
+    /// Very low lambda (rate essentially free) should push the RD search toward the
+    /// smallest blocks the format allows far more often than a very high lambda (rate
+    /// dominates, large cheap-to-code blocks win) -- a basic monotonicity sanity check
+    /// independent of the exact BD-rate number.
+    #[test]
+    fn higher_lambda_yields_fewer_larger_leaves_than_lower_lambda() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let (_hdr, low_leaves, _) = encode_image(&image, &rd_params(1.0));
+        let (_hdr, high_leaves, _) = encode_image(&image, &rd_params(5000.0));
+        assert!(
+            high_leaves.len() < low_leaves.len(),
+            "high lambda ({}) leaves should be fewer than low lambda ({})",
+            high_leaves.len(),
+            low_leaves.len()
+        );
+    }
+
+    /// Step 12/14's determinism discipline: the RD walk shares `split`'s exact
+    /// `rayon::join` structure, so its output must also be bit-identical regardless of
+    /// how many threads searched it -- the frozen, read-only `RateModels` snapshot is
+    /// what makes this possible without a mutable-model race.
+    #[test]
+    fn rd_walk_is_bit_identical_across_thread_counts() {
+        let image = textured_image(96, 96);
+        let params = rd_params(0.05);
+        let mut reference: Option<(Header, Vec<Leaf>)> = None;
+        for threads in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let (hdr, mut leaves, _evals) = pool.install(|| encode_image(&image, &params));
+            leaves.sort_by_key(|l| (l.row, l.col, l.size));
+            match &reference {
+                None => reference = Some((hdr, leaves)),
+                Some((ref_hdr, ref_leaves)) => {
+                    assert_eq!(&hdr, ref_hdr, "header differs at {threads} threads");
+                    assert_eq!(
+                        &leaves, ref_leaves,
+                        "leaf set differs at {threads} threads"
+                    );
+                }
+            }
+        }
     }
 }
