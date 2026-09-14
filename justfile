@@ -458,6 +458,43 @@ gate-17:
     cargo test -p mars-bench --release --test learned_gate -- --nocapture
     @echo "gate-17: PASS (abort-rule negative result -- Learned does not beat Funnel on recall/regret/wall-clock at matched evals/transform, on either kodim01 (in-sample) or kodim02 (held-out); see docs/decisions.md's Step 17 entry and docs/predictions.md's Step 17 outcome)"
 
+# Step 19 -- progressive decoding (`mars_codec::progressive`: a 4-layer bitstream --
+# base (fixed `max_size` grid, no partition bits) -> partition refinement (real quadtree
+# + each leaf's final mode + flat/affine base fields) -> fractal refinement (real qalfa/
+# qbeta/isometry/domain for mode-2/3 leaves) -> residual refinement (real DCT residual for
+# mode-3 leaves)). Each layer is its own independent `mars_entropy` byte stream; a decode
+# of any prefix is done by building a real, full-resolution `Vec<Leaf>` for however many
+# layers are present and calling the existing, entirely unmodified `ifs::decode_iterative`
+# -- never a reduced-resolution spatial pyramid. This is a deliberate design choice, not
+# an oversight: D11 (docs/decisions.md) measured Mars 1's pyramidal decoder losing 5+ dB
+# whenever a range block's rendered footprint drops below 1 px at the pyramid's current
+# level, and named Step 19 as the step that would reintroduce the hazard if it reached for
+# that design -- see docs/decisions.md's D46 for the full reasoning and why refining leaf
+# *field content* at one fixed resolution sidesteps the mechanism entirely (no leaf's
+# rendered size is ever divided by a level).
+#
+# Checks, in order (all fast -- seconds, not minutes; the corpus RD-curve-of-prefixes and
+# progressive-penalty (BD-rate lost to truncatability, the brief's own honest metric)
+# measurement is run once by hand and recorded in docs/predictions.md's Step 19 outcome,
+# mirroring the gate-18/predictions.md split for the identical reason -- a multi-point
+# exhaustive RD sweep is minutes, not seconds, per image):
+#  1. `mars-codec`'s full unit-test suite, including `progressive`'s own new tests: the
+#     hard bit-exact equality oracle (`four_layer_decode_is_bit_exact_with_decode_
+#     iterative_on_the_original_leaves` -- once all 4 layers are present, the progressive
+#     decode must equal `decode_iterative` on the *original* leaves pixel-for-pixel, not a
+#     tolerance), every one of the 4 layer-boundary prefix lengths decoding without error
+#     and at the right dimensions (`every_prefix_length_decodes_without_error`), a
+#     mid-layer (non-boundary) byte prefix falling back to the last complete layer rather
+#     than panicking, a sanity check that per-layer PSNR does not regress sharply layer to
+#     layer (not asserted as strict monotonicity -- the brief explicitly leaves that an
+#     empirical question, not an a-priori requirement), and malformed-input handling (bad
+#     magic, truncated input, an oversized layer-length claim) erroring rather than
+#     panicking.
+gate-19:
+    cargo build --release -p mars-cli
+    cargo test -p mars-codec --release --lib
+    @echo "gate-19: PASS (progressive bitstream unit tests only -- fast, synthetic-image round trips and the bit-exact 4-layer oracle; the corpus RD-curve-of-prefixes / progressive-penalty measurement is run once by hand, scoped to kodim01 at lambda=200 -- measured progressive penalty 64.22% BD-rate, over 3x the brief's own 5-15% typical band and this step's own 10-20% prediction, root-caused to the fractal-leaf-dominated (91.7%) leaf population making layer 2's flat approximation nearly worthless; see docs/predictions.md's Step 19 outcome and docs/decisions.md's D46/D47)"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval

@@ -2882,3 +2882,133 @@ structural floor every method in this crate already clears). No aspirational bar
 and then calibrated down to a measured shortfall, unlike gate-13/14/15/16's own new-gate
 bars — there is no bar to calibrate here: the abort rule itself is the exit criterion, and
 it was checked honestly against real numbers.
+
+## D46 · 2026-09-15 · Step 19's layered bitstream design: refinement of leaf-field content at fixed full resolution, not a spatial pyramid — why this does not reintroduce D11's hazard
+
+**Context.** Step 19's brief (`implementation-plan.md` ~line 1047) asks for a layered
+bitstream — base -> partition refinement -> fractal refinement -> residual refinement —
+such that any prefix decodes to a valid image, with the exit criterion being the RD curve
+of the prefixes and, honestly, the *progressive penalty* (BD-rate lost to truncatability).
+D11 (this file, above) found that Mars 1's pyramidal multi-resolution decoder loses 5+ dB,
+with the RD curve running backwards, whenever a range block's *effective size at the
+current pyramid level* (`block_size / 2^levels`) drops below 1 px, and named Step 19
+explicitly as the step that would reintroduce this hazard if it reached for a spatial
+multi-resolution design, warning that "its minimum block size and level count are not
+independent parameters."
+
+**Decision: progressive layers refine leaf *field content*, never spatial resolution.**
+Every layer, at decode time, is rendered by constructing a complete `Vec<Leaf>` (real row/
+col/size for every leaf — either a fixed `max_size` grid for layer 1, or the image's true
+quadtree partition from layer 2 onward) and calling the existing, entirely unmodified
+`ifs::decode_iterative` once, at the image's one true resolution. What differs between
+layers is only which *fields* of each leaf are known accurately yet:
+- Layer 1: every leaf is a `max_size`-grid cell, mode 0 (flat), holding a quantised mean
+  of the source pixels in that cell.
+- Layer 2: the real quadtree partition and each leaf's final mode; mode-0/1 leaves get
+  their *real* qbeta (and qgx/qgy for mode 1) and are fully resolved from here on;
+  mode-2/3 leaves get a quantised source-pixel mean standing in for the not-yet-revealed
+  fractal prediction, rendered as mode 0.
+- Layer 3: mode-2/3 leaves get their real qalfa/qbeta/isometry/domain position, rendered
+  as mode 2 (fractal, no residual yet even for leaves whose final mode is 3).
+- Layer 4: mode-3 leaves get their real residual coefficients, rendered as mode 3.
+
+**Why this avoids D11's mechanism specifically, not just avoids the word "pyramid."**
+D11's defect is triggered by a single quantity: a leaf's *rendered pixel footprint* shrinking
+below 1 px because the decoder computes it as `size / 2^level`. Nothing in this design ever
+divides a leaf's `size` by anything level-dependent — `decode_iterative` receives each
+leaf's true, full-resolution `row`/`col`/`size` at every layer, unchanged from the header's
+own coordinate system, and iterates to a fixed point over the *whole* image at that one
+resolution every time it is called (four times per progressive decode: once per layer
+boundary a caller asks for). What changes across layers is strictly the leaf's `mode`,
+`qalfa`, `qbeta`, `isometry`, `dom_row`/`dom_col`, and `residual` fields — informational
+content, not geometry. A leaf is never asked to render into fewer than its own `size x
+size` pixels, so the exact threshold D11 pins (`effective size < 1 px`) cannot occur by
+construction, independent of `min_size`, `max_size`, or how many layers exist — there is no
+"level count" parameter in this design that divides anything, which is the specific
+independence D11 warned was missing from a spatial-pyramid design.
+
+**What was considered and rejected.** A true spatial pyramid (decode the image at 1/8,
+1/4, 1/2, then full resolution, coarser layers being genuinely lower-resolution renders)
+was the more literal reading of "base -> coarse image -> ... -> high-quality image" in
+R&D plan §13's own diagram. It was rejected specifically because of D11: the natural way
+to build it (reduce each leaf's effective footprint by the pyramid level, exactly Mars 1's
+`decmars -i` pyramidal mode) is the mechanism D11 measured as catastrophic once footprints
+drop below 1 px, and decoupling "minimum block size" from "level count" to dodge that
+threshold is exactly the coupled-parameter problem D11 says is not free to solve away. The
+brief's own design guidance (present in this session's task framing, tracing to R&D plan
+§13 and D11 together) independently converges on the same "refine information, not
+resolution" framing adopted here.
+
+**Consequence for the progressive penalty.** Because layer 1 is a `max_size`-grid flat
+render that is *entirely superseded* by layer 2 (none of its bits are reused — contrast
+with a true spatial pyramid, where a coarse layer's samples are sometimes reusable as a
+predictor for the next resolution), and because layer 2's flat approximation for mode-2/3
+leaves is a quantity the single-layer format never computes at all, this design is expected
+to pay a real, structural progressive-penalty cost distinct from "the cost of framing
+alone" — `docs/predictions.md`'s Step 19 prediction (written before any of this was
+measured) puts the expected number at 10-20% BD-rate, toward or past the brief's own
+5-15% typical band, and names exactly these two effects as the reasons. See that entry for
+the full reasoning and what would falsify it; see D47 below for the measured result, which
+falsified the 10-20% prediction by a wide margin.
+
+## D47 · 2026-09-15 · Step 19's progressive penalty measures 64.22% on kodim01 at lambda=200, not the predicted 10-20% — root-caused, not adjusted
+
+**Context.** `docs/predictions.md`'s Step 19 prediction (P19.2) expected a 10-20% BD-rate
+progressive penalty, naming two mechanisms: layer 1 being pure overhead, and layer 2's
+flat approximation for mode-2/3 leaves being wasted bits. `crates/mars-bench/tests/
+progressive_gate.rs` (`MARS_RUN_PROGRESSIVE_GATE=1`) measured `kodim01` at a 4-point
+`LAMBDA_GRID = [50, 200, 800, 3200]` single-layer reference curve against one progressive
+stream's own 4-layer prefix curve (λ=200, the sweep's mid-range point) — full numbers in
+`docs/predictions.md`'s Step 19 outcomes entry.
+
+**Finding.** The measured penalty is **64.22%** BD-rate (PSNR interval 21.52-26.51 dB),
+over three times the predicted band. At the single matched-quality point (26.5 dB), the
+gap alone is already ~24% more bits (0.6684 vs. 0.5391 bpp); the full BD-rate is larger
+because the progressive curve's *shape* across the measured range is far less efficient
+than the reference's smooth three-point climb.
+
+**Root cause, confirmed by the leaf-mode histogram, not asserted.** The λ=200 encode
+produced 7,737 leaves, 91.7% of them mode 2 (fractal). For a fractal-dominated leaf
+population, layer 2's flat-DC approximation is nearly worthless — quality moves only
+1.42 dB across layers 1-2 while paying 0.1364 bpp for it — and then almost the *entire*
+quality gain (6.01 dB) has to arrive in one expensive layer-3 jump (0.5072 bpp), a much
+worse RD shape than a smooth multi-step climb. Three compounding, named causes:
+1. Layer 2's flat-DC bits for fractal leaves are spent and then completely superseded by
+   layer 3 — real bits, zero reuse.
+2. `qbeta` is coded twice (once as layer 2's flat guess, once as layer 3's real fractal
+   value) with no delta between them — the "no cross-layer predictive coding" cost named
+   in the prediction, but biting on 7,097 leaves rather than a handful.
+3. **Not named in the prediction:** each of the 4 layers is its own independent
+   `mars_entropy` stream, so each layer's adaptive context models start cold rather than
+   sharing one continuously-adapting model the way the single-layer `.mars` v0 stream
+   does across its one interleaved event sequence. This is a real, structural cost of the
+   "each layer is an independent stream" simplification that P19.2 did not separately
+   account for.
+
+**Decision: report this honestly and stop here, rather than redesign under time
+pressure.** Per this project's explicit convention (D39/D40/D43's precedent, and this
+step's own working-agreement instructions): no field was moved between layers, no entropy
+design was changed, and `gate-19` was not given a BD-rate bar to loosen (it only ever
+asserted the bit-exact P19.1 oracle and structural "every prefix decodes" properties, both
+of which hold regardless of this number). The three root causes above point at concrete,
+specific next levers — delta-coding `qbeta` between layers 2 and 3, warm-starting each
+layer's entropy models from a frozen snapshot (the same idea Step 14's `crate::rate`
+module already uses for a different purpose), or making layer 3 code a true residual
+correction against layer 2's guess instead of an independent value — none of which were
+attempted this session. This is the honest shape of a first-cut progressive design that
+correctly avoids D11's hazard but has not yet been rate-optimised, and it is reported as
+such rather than iterated on until the number looks better.
+
+**What this rules out.** Quoting "10-20%, as predicted" for Step 19's progressive penalty,
+and any claim that this design's per-layer bit allocation is close to rate-optimal for a
+fractal-leaf-dominated image. It does not call into question P19.1 (the bit-exact 4-layer
+equality), which is a design consequence, independently confirmed, and unaffected by this
+finding.
+
+**Tolerance impact.** None — no assertion in `gate-19` was calibrated to, or against, this
+number; see the reasoning above for why there is nothing to widen.
+
+**Scope note.** One image, one λ. Whether the same fractal-leaf-population mechanism
+produces a smaller penalty at operating points with more flat/affine leaves, or on other
+images, is untested this session (`docs/predictions.md`'s Step 19 outcomes entry states
+this as the explicit remaining gap).

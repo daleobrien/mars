@@ -2057,3 +2057,216 @@ was narrowed to `Funnel` + `Exhaustive` (+ `saupe-fisher`'s already-recorded num
 for context), and no BD-rate/RD pipeline was wired up — with the standalone model already
 losing to the funnel on the recall/regret/evals/wall-clock frontier, wiring a full RD
 comparison would not change the outcome, per the abort rule's own reasoning.
+
+---
+
+## 2026-09-15 (not yet run) · Step 19 · progressive decoding — prediction, before any layered-bitstream code runs or is measured
+
+**Brief** (`implementation-plan.md` Step 19): a layered bitstream — base -> partition
+refinement -> fractal refinement -> residual refinement — such that any prefix decodes to
+a valid image, exit criterion is the RD curve *of the prefixes* against separately-encoded
+single-layer streams at matched rates, and the honest number to report is the
+**progressive penalty**: the BD-rate lost for truncatability, brief's own stated typical
+range 5-15%.
+
+**D11 read first.** Mars 1's pyramidal (sub-full-resolution) decode loses 5+ dB whenever a
+range block's effective size at the decode pyramid's current level drops below 1 px, and
+D11 names Step 19 explicitly as the step that reintroduces this hazard if it reaches for a
+spatial multi-resolution pyramid. The design below (recorded in full in `docs/decisions.md`
+as this step's own entry) deliberately does **not** decode at reduced spatial resolution at
+any layer: every layer, once decoded, is rendered by building a full `Vec<Leaf>` (real
+positions and sizes, sometimes with approximated *field values* — a flatter fit standing in
+for a not-yet-revealed fractal/residual detail) and calling the existing, unmodified
+`ifs::decode_iterative` at the image's one true resolution. Leaf sizes are never divided by
+a pyramid level; the "coarseness" of an early layer is entirely in the *information content*
+of each leaf's fields (DC-only vs. affine vs. fractal vs. fractal+residual), never in a
+smaller effective block footprint. This is why the design does not, in this author's
+judgement, reintroduce D11's hazard — no leaf's rendered size is ever computed as
+`size / 2^level`, the exact quantity D11 pins as the failure trigger.
+
+**What will be built:** `crates/mars-codec/src/progressive.rs`, four additive layers over an
+already-encoded `(Header, Vec<Leaf>)` (Step 14/15's mode-competed output):
+
+1. **Base** — a fixed grid at `max_size` cells (position derived from the header alone, no
+   split bits transmitted), each cell a quantised mean of the *source* image pixels in that
+   cell, rendered as a flat (mode-0) leaf.
+2. **Partition** — the true quadtree split flags plus, per leaf, its final mode (0-3) and a
+   flat/affine approximation: mode-0/1 leaves get their *real* qbeta (and qgx/qgy for mode
+   1) — these two modes are therefore fully resolved at this layer and never revisited —
+   while mode-2/3 leaves get a quantised mean of the source pixels in their own region,
+   standing in for the not-yet-revealed fractal prediction.
+3. **Fractal** — for mode-2/3 leaves only: real qalfa, the real (fractal-scaled) qbeta,
+   isometry, and domain position (zigzag-delta coded against the previous fractal leaf's
+   domain position, mirroring `mars_format`'s own predictor), rendered as mode 2 (no
+   residual yet even for leaves whose final mode is 3).
+4. **Residual** — for mode-3 leaves only: the real DCT residual coefficients, via
+   `crate::residual`'s existing event vocabulary and entropy coder, unchanged. After this
+   layer, every leaf's rendered fields are bit-identical to the original `(Header,
+   Vec<Leaf>)`, so the 4-layer decode is expected to reproduce `decode_iterative` on the
+   original leaves exactly — this is the hard, checkable invariant the unit tests pin,
+   stronger than "looks plausible."
+
+Each layer is its own independent `mars_entropy` byte stream (own event vocabulary, own
+adaptive models) — the container is a small fixed header plus four `(length, payload)`
+sections; any byte prefix landing on a layer boundary decodes via the existing
+`decode_iterative`, never a new decoder.
+
+### P19.1 — the four-layer decode is exact once all four layers are present
+
+`decode(encode(image, hdr, leaves))` at 4 layers should equal `ifs::decode_iterative(hdr,
+&leaves, N)` pixel-for-pixel, for the same iteration count `N`, on any real encode. This is
+a design consequence, not an empirical guess — falsified only by a bug in the field
+plumbing (e.g. a layer-3 leaf accidentally rendered with `mode: 3` instead of `2` before
+its residual is revealed, silently reading zero-initialised residual data instead of
+skipping the add). A strong, cheap oracle: this is asserted as a hard equality test, not a
+tolerance.
+
+### P19.2 — the progressive penalty is real, on the larger side of the brief's 5-15% band, and driven mostly by layers 1-2
+
+**Expectation: penalty in roughly the 10-20% BD-rate range**, i.e. at or somewhat past the
+brief's own upper bound, for three reasons specific to this design (not a generic "layering
+always costs ~10%" prior):
+- **Layer 1 is pure overhead relative to a single-layer stream at the same final rate** — a
+  fixed max-size grid of flat values that gets *entirely superseded* by layer 2's real
+  partition and fields. None of layer 1's bits are reused; every one of them is bits a
+  single-layer encoder would never spend. This is a structural cost the brief's framing
+  ("base -> refinement") accepts by construction, but it means the smallest prefix (1
+  layer) is expected to look disproportionately worse on the RD curve than the 4-layer
+  endpoint's own bpp would suggest, dragging the *curve-level* BD-rate down more than a
+  "just the truncation tax" framing would predict.
+- **Layer 2's flat approximation for mode-2/3 leaves (a quantised source-pixel mean) is a
+   real, if temporary, distortion cost paid only by the progressive stream** — the
+   single-layer reference never computes or transmits this value at all, so every bit spent
+   on it is pure progressive-format overhead from the single-layer stream's point of view,
+   even though it is exactly the intended "coarse-then-refine" behaviour.
+- **No cross-layer predictive coding**: layer 2's flat qbeta for mode-2/3 leaves and layer
+   3's real fractal qbeta are coded independently (no delta between the two), unlike a
+   more sophisticated progressive design that might code layer 3 as a *residual* against
+   layer 2's guess. This is a scope cut for session-time reasons (recorded as such if it
+   materially affects the number), and is expected to inflate the effective total bits at
+   the 4-layer endpoint somewhat relative to a maximally efficient progressive design —
+   though because both progressive and single-layer curves are measured on `.mars`-v0-scale
+   PSNR/bpp via the same `marsbench` machinery, this shows up in the BD-rate gap, not as a
+   silently absorbed cost.
+
+**What would falsify this:** a measured penalty comfortably inside 5-15% (design is more
+efficient than predicted, e.g. because layer 1's overhead turns out tiny relative to a
+typical stream's total size) or a penalty well above 20-25% (something is wrong with the
+per-layer entropy coding, most likely the *lack* of delta-coding between the flat and
+fractal qbeta values costing far more than expected, or the base grid being far coarser
+than useful groundwork). Either direction is reported as-is — this is exactly the kind of
+number this project's own history (D39/D40/D43) treats as a real result, not a target to
+hit.
+
+### Known scope cut, stated before measuring
+
+Given this session's remaining budget, the RD-curve/BD-rate measurement is expected to be
+scoped to **`kodim01` only**, at whatever 4 `t_rms`/`lambda` operating points the exhaustive
+RD encoder produces in a few minutes each (mirroring the D28/Step-13/Step-18 precedent for
+scoping a step's exit criteria down to what a session can actually run), with the
+single-layer reference being the *same* `(Header, Vec<Leaf>)` written via the existing
+`mars_format::write` (`.mars` v0) at each of those 4 points — the fairest possible
+single-layer comparison, since it is literally the same encode, just serialised without
+layering. A full 24-image sweep is named here as the explicit, deliberate gap this session
+leaves open, not a silent omission.
+
+---
+
+## 2026-09-15 · Step 19 · outcomes — P19.1 confirmed, P19.2 falsified: the measured progressive penalty is 64.22%, not 10-20%
+
+Measured on `kodim01` (768x512, fetched and converted via the pinned `ffmpeg` +
+`scripts/ppm2raw.py` pipeline, both the PNG's sha256 and the converted raw's sha256
+verified byte-for-byte against `corpus/kodak.manifest.json` and `corpus/standard.
+images.json`'s committed hashes — a real environment gap in this fresh worktree, exactly
+D45's precedent, fixed the same way). `crates/mars-bench/tests/progressive_gate.rs`,
+`MARS_RUN_PROGRESSIVE_GATE=1`, `BASE` matching every other RD gate's 1998-default
+`EncodeParams`, `LAMBDA_GRID = [50, 200, 800, 3200]`.
+
+### P19.1 — confirmed exactly, as a design consequence rather than an empirical guess
+
+`four_layer_decode_is_bit_exact_with_decode_iterative_on_the_original_leaves` passes: the
+4-layer progressive decode reproduces `decode_iterative` on the original `(Header,
+Vec<Leaf>)` pixel-for-pixel, for the same iteration count. No caveats.
+
+### P19.2 — falsified. Measured progressive penalty: **64.22%** BD-rate, over PSNR
+interval 21.52-26.51 dB, bpp interval 0.0860-0.6684 — more than 3x the predicted 10-20%
+band and well past the brief's own 5-15% "typical" framing.
+
+**Raw numbers, not smoothed over:**
+
+| curve | point | bpp | PSNR (dB) |
+|---|---|---:|---:|
+| single-layer (λ sweep) | λ=50 | 1.2075 | 29.279 |
+| | λ=200 | 0.5391 | 26.513 |
+| | λ=800 | 0.1677 | 23.137 |
+| | λ=3200 | 0.0860 | 21.521 |
+| progressive prefixes (λ=200) | layer 1 (base) | 0.0237 | 19.080 |
+| | layer 2 (partition) | 0.1601 | 20.500 |
+| | layer 3 (fractal) | 0.6673 | 26.511 |
+| | layer 4 (residual) | 0.6684 | 26.513 |
+
+The source encode at λ=200 (the progressive side's own operating point) produced 7,737
+leaves with mode histogram `[633, 3, 7097, 4]` — flat 633 (8.2%), affine 3 (0.04%),
+**fractal 7,097 (91.7%)**, fractal+residual 4 (0.05%). Layer 3/4's PSNR (26.511/26.513 dB)
+matches the single-layer reference's own λ=200 point (26.513 dB) almost exactly, as
+expected (same underlying leaves, same decoder) — a clean cross-check that this is a real
+rate measurement, not a decode-correctness bug (consistent with P19.1's own hard-equality
+test already ruling that class of bug out at the unit level).
+
+**Root cause, not just the number.** The dominant leaf population at this operating point
+is fractal (mode 2), and fractal leaves are the one case where layer 2's approximation
+carries almost no information: quality moves only 19.08 -> 20.50 dB across layers 1-2
+(1.42 dB for 0.1364 bpp), then jumps 20.50 -> 26.51 dB in a single step at layer 3 (6.01 dB
+for 0.5072 bpp) — nearly the *entire* quality gain arrives in one large, expensive layer,
+which is a far less efficient rate-distortion shape than the single-layer reference's own
+three-step climb across the same quality range (21.52 -> 23.14 -> 26.51 dB via 0.086 ->
+0.168 -> 0.539 bpp). Three concrete, compounding causes, all named (not just predicted in
+the abstract) in `docs/predictions.md`'s own P19.2 reasoning, are now confirmed as the
+actual mechanism, at a magnitude the prediction underestimated:
+1. **Layer 2's flat-DC bits for the 7,097 fractal leaves are pure waste** — real bits
+   (roughly 7 bits x 7097 leaves =~ 0.065 bpp of the layer-2 payload) spent on an
+   approximation immediately and completely superseded by layer 3, with none of it reused.
+2. **`qbeta` is paid for twice with no delta coding between the guess and the real value**
+   — exactly the cut named in advance ("no cross-layer predictive coding"), but the
+   fractal-dominated leaf population makes this bite on 7,097 leaves instead of a handful.
+3. **A cost the prediction did not name explicitly: each layer's `mars_entropy` models
+   start cold.** The single-layer reference's one entropy stream adapts its per-context
+   models over the *whole* interleaved event sequence (split, mode, qalfa, qbeta,
+   isometry, domain — all in one pass); the progressive design's four independent streams
+   each warm up their own context models from nothing, four separate times, on a strictly
+   smaller slice of the total symbol stream each. This is a real, structural inefficiency
+   of the "each layer is its own independent stream" simplification, not merely the two
+   effects predicted in advance.
+
+At a single matched-quality point (26.5 dB), the gap alone is ~24% more bits (0.6684 vs.
+0.5391 bpp) — the full 64.22% BD-rate is larger still because the *shape* of the
+progressive curve across the whole measured quality range is far less efficient than the
+reference's own smooth three-point climb, which the PCHIP-on-log-bpp integral (§M3)
+penalises further, not merely the endpoint gap.
+
+**What this means, stated plainly.** This design's progressive penalty is not "5-15%, or
+somewhat worse" — it is over 4x the brief's own typical band, at this one (image, λ)
+operating point. This is reported as a real, root-caused result, not adjusted to look
+better: no field was moved between layers, no entropy design was changed, and no gate
+assertion was loosened after seeing this number (`gate-19`'s only assertions are the
+bit-exact P19.1 oracle and the "every prefix decodes" structural checks — there was never
+a BD-rate bar in the gate to recalibrate, so there is nothing to quietly widen here).
+`docs/decisions.md`'s D47 records this as the step's own anomaly entry and names the
+concrete next levers (delta-coding `qbeta` between layers 2/3, warm-starting each layer's
+entropy models from a frozen snapshot the way Step 14's `rate` module already does for a
+different purpose, or folding layer 1/2's redundant bits into layer 3 as a true residual
+correction) without attempting any of them this session, per this project's convention of
+reporting a real shortfall rather than iterating under time pressure to erase it.
+
+**Known scope cut, as predicted.** One image (`kodim01`), one progressive operating point
+(λ=200) against a 4-point single-layer reference sweep on the same image — not the full
+24-image corpus, and not a sweep of the progressive curve itself across multiple λ (which
+`docs/predictions.md`'s own design note above found to be non-trivial: layer 1 is
+λ-invariant, so a naive multi-λ progressive curve would contain duplicate points and fail
+`bd_metrics`'s strict-monotonicity precondition — a real constraint discovered while
+building this gate, not anticipated in the P19.2 prediction, and worth recording here
+since it shaped the single-λ comparison design actually used). Whether this leaf-mode-
+population effect (fractal-dominated blocks specifically) generalises across the corpus,
+or whether other images/λ with more flat/affine leaves show a penalty closer to the
+predicted 10-20% band, is an open question this session's budget did not extend to
+measuring.
