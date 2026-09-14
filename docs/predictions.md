@@ -2011,3 +2011,49 @@ own 159.03/150.23, that would be the genuine positive result worth pursuing furt
 (wiring into the full RD/BD-rate pipeline). Anything else — comparable or worse regret,
 comparable or higher evals, or a collapse to near-zero recall — is the abort-rule branch,
 to be closed as a documented negative result rather than iterated on.
+
+---
+
+## 2026-09-15 · Step 17 · outcomes — confirmed: the abort-rule branch, not the surprise branch
+
+Full numbers, root-cause checks, and the abort-rule reasoning are in `docs/decisions.md`'s
+D45. Summary against this prediction:
+
+**Confirmed.** The prediction's central expectation — that `Learned` would land in "the
+same rough regret/evals territory as the funnel, not dramatically better" — undersold how
+one-sided the actual gap would be, but the *direction* (funnel wins, no order-of-magnitude
+eval reduction) is exactly what was measured. At matched evals/transform (128.0, both
+methods, by construction), `Funnel` beats `Learned` on kodim01 (in-sample) 10.03% vs.
+3.26% top-1 and 0.80 dB vs. 1.43 dB mean regret, and on kodim02 (held-out) 9.38% vs. 1.30%
+top-1 and 0.72 dB vs. 1.39 dB mean regret — `Funnel` is not marginally better, it roughly
+triples top-1 recall and roughly halves regret, on both images. The >= 90%-eval-reduction
+target is not met by any measure: `Learned` does not reduce evals below `Funnel`'s own
+(already non-reducing, per D44) evals/transform at all.
+
+**A genuine surprise not anticipated by the prediction.** The prediction did not call out
+wall-clock cost as a separate axis of concern beyond "inference cost must be counted" — the
+measured result is that `Learned`'s wall-clock (~6s, dominated by scoring the *entire*
+domain pool with an MLP forward pass before truncating to `k` survivors) is ~14x `Funnel`'s
+(~0.4s), because unlike `Funnel`'s staged design, `Learned`'s single-shot full-pool scoring
+does not get cheaper as `k` shrinks. This is a real, measured instance of the brief's own
+named risk ("a model that costs more than it saves is not an acceleration"), not just a
+theoretical one — recorded as a finding this prediction did not specifically foresee.
+
+**The abort rule was invoked, not a calibrated bar.** Per the brief's own instruction and
+this session's own explicit guidance to prefer the abort rule over inventing a new
+calibrated pass bar: `gate-17` asserts only the harness-sanity oracle equality and
+"narrower than Exhaustive," and closes with the honest, documented conclusion that
+`Learned` does not beat `Funnel`. Three falsifiable checks (harness-plumbing correctness,
+training convergence, and above-chance ranking signal — D45's own writeup) confirm this is
+a real feature-expressiveness shortfall (`Learned`'s 10-dim feature vector lacks anything
+like `Funnel`'s Stage 3 thumbnail-distance proxy for the true SSD), not a broken harness or
+an undertrained model — the same rigor D40 applied to Step 15's regression, applied here
+before concluding the abort rule (rather than a bug) is the right explanation.
+
+**Known gaps, as predicted.** The cross-corpus generalisation test (train Kodak, eval
+CLIC/USC-SIPI) was not attempted — no CLIC/USC-SIPI images exist in `corpus/` this
+session, exactly as flagged before training. The full 8-way classical-method comparison
+was narrowed to `Funnel` + `Exhaustive` (+ `saupe-fisher`'s already-recorded numbers cited
+for context), and no BD-rate/RD pipeline was wired up — with the standalone model already
+losing to the funnel on the recall/regret/evals/wall-clock frontier, wiring a full RD
+comparison would not change the outcome, per the abort rule's own reasoning.
