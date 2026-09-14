@@ -1,13 +1,33 @@
 //! `encmars` -- compress an image into Mars 2's `.mars` container (Step 10 format), via
-//! the Step 6 exhaustive Rust encoder.
+//! the Step 6 exhaustive Rust encoder. Colour input (Step 18) is encoded as independent
+//! Y/Cb/Cr planes, each via the same single-plane encoder, wrapped in the small colour
+//! container `mars_codec::color` defines -- see that module's doc for the design.
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
-use mars_codec::encode::{encode_image, EncodeParams};
-use mars_codec::mars_format;
+use clap::{Parser, ValueEnum};
+use mars_codec::color::{encode_color_image, ColorEncodeParams, Subsampling};
+use mars_codec::encode::EncodeParams;
 use mars_core::io::read_image;
+
+/// Chroma subsampling mode (Step 18); ignored for grayscale input.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SubsamplingArg {
+    #[value(name = "444")]
+    Yuv444,
+    #[value(name = "420")]
+    Yuv420,
+}
+
+impl From<SubsamplingArg> for Subsampling {
+    fn from(v: SubsamplingArg) -> Self {
+        match v {
+            SubsamplingArg::Yuv444 => Subsampling::Yuv444,
+            SubsamplingArg::Yuv420 => Subsampling::Yuv420,
+        }
+    }
+}
 
 /// Compress an image into a `.mars` bitstream.
 #[derive(Parser)]
@@ -17,11 +37,23 @@ struct Cli {
     /// Output `.mars` bitstream path.
     output: PathBuf,
 
-    /// Split threshold (Mars 1's `-r`): a block splits when its best-fit RMS exceeds
-    /// this. Higher = fewer/larger blocks = more compression, lower quality. This is
-    /// the compression-level knob.
+    /// Split threshold (Mars 1's `-r`) for the luma (or the only, for grayscale) plane: a
+    /// block splits when its best-fit RMS exceeds this. Higher = fewer/larger blocks =
+    /// more compression, lower quality. This is the compression-level knob.
     #[arg(short = 'r', long, default_value_t = 8.0)]
     t_rms: f64,
+
+    /// Split threshold for the Cb/Cr planes of a colour image (Step 18: independent
+    /// per-plane quality control). Defaults to `--t-rms` if not given -- chroma very
+    /// commonly wants a looser (higher) threshold than luma, but the encoder never picks
+    /// that automatically; the caller sets it explicitly.
+    #[arg(long)]
+    chroma_t_rms: Option<f64>,
+
+    /// Chroma subsampling for colour input: `444` (no subsampling) or `420`
+    /// (half-resolution Cb/Cr, box-filtered). Ignored for grayscale input.
+    #[arg(long, value_enum, default_value = "444")]
+    subsampling: SubsamplingArg,
 
     /// Smallest range-block size.
     #[arg(long, default_value_t = 4)]
@@ -63,16 +95,15 @@ fn main() -> Result<()> {
     };
     let image = read_image(&cli.input, raw_dims)
         .with_context(|| format!("reading {}", cli.input.display()))?;
-    if image.planes().len() != 1 {
+    if image.planes().len() != 1 && image.planes().len() != 3 {
         bail!(
-            "{}: colour input has {} planes, but the encoder only fills the luma plane \
-             so far (colour arrives in Step 18) -- pass a grayscale image",
+            "{}: expected 1 (gray) or 3 (RGB) planes, got {}",
             cli.input.display(),
             image.planes().len()
         );
     }
 
-    let params = EncodeParams {
+    let base = EncodeParams {
         min_size: cli.min_size,
         max_size: cli.max_size,
         shift: cli.shift,
@@ -82,21 +113,44 @@ fn main() -> Result<()> {
         t_rms: cli.t_rms,
         zero_threshold: cli.zero_threshold,
     };
+    let chroma = EncodeParams {
+        t_rms: cli.chroma_t_rms.unwrap_or(cli.t_rms),
+        ..base
+    };
+    let params = ColorEncodeParams {
+        y: base,
+        chroma,
+        subsampling: cli.subsampling.into(),
+    };
 
     let (width, height) = (image.width(), image.height());
-    let (hdr, leaves, evals) = encode_image(&image.planes()[0], &params);
-    let bytes = mars_format::write(&hdr, &leaves)
-        .context("serialising the encoded image to the .mars container")?;
+    let (bytes, stats) = encode_color_image(&image, &params);
 
     std::fs::write(&cli.output, &bytes)
         .with_context(|| format!("writing {}", cli.output.display()))?;
 
     let bpp = 8.0 * bytes.len() as f64 / (width * height) as f64;
-    println!(
-        "{width}x{height} -> {} ({} bytes, {bpp:.3} bpp, {} leaves, {evals} evals)",
-        cli.output.display(),
-        bytes.len(),
-        leaves.len(),
-    );
+    if image.planes().len() == 1 {
+        println!(
+            "{width}x{height} gray -> {} ({} bytes, {bpp:.3} bpp, {} evals)",
+            cli.output.display(),
+            bytes.len(),
+            stats.y_evals,
+        );
+    } else {
+        println!(
+            "{width}x{height} rgb ({:?}) -> {} ({} bytes total: Y {} + Cb {} + Cr {}, \
+             {bpp:.3} bpp, evals Y {} / Cb {} / Cr {})",
+            cli.subsampling,
+            cli.output.display(),
+            bytes.len(),
+            stats.y_bytes,
+            stats.cb_bytes,
+            stats.cr_bytes,
+            stats.y_evals,
+            stats.cb_evals,
+            stats.cr_evals,
+        );
+    }
     Ok(())
 }

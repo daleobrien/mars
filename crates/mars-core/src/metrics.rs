@@ -416,6 +416,50 @@ pub fn ycbcr(img: &Image) -> [Plane; 3] {
     }
 }
 
+/// Inverse of [`ycbcr`]: BT.601 full-range YCbCr -> RGB, rounded half-away-from-zero and
+/// clamped 0..255 (Step 18).
+///
+/// This is the decode-side counterpart the codec pipeline needs -- `ycbcr` was built for
+/// Step 1's metrics only and had no inverse until Step 18 needed to reconstruct RGB from
+/// three independently-decoded planes. Kept in this module rather than `image.rs` so the
+/// forward and inverse transforms stay next to each other and cannot silently drift onto
+/// different matrices (documented in `docs/decisions.md`).
+///
+/// Not a lossless round trip in general: encoding to YCbCr and back rounds twice (once per
+/// direction, per sample), so a full 4:4:4 round trip typically differs from the original
+/// by 0-1 LSB per channel, occasionally 2 at extreme chroma; see
+/// `ycbcr_roundtrip_is_nearly_lossless` for the bound this asserts. When R == G == B the
+/// transform is exact (Cb == Cr == 128 exactly and Y == the shared value exactly), which
+/// `ycbcr_roundtrip_is_exact_for_gray_input` checks.
+pub fn rgb_from_ycbcr(y: &Plane, cb: &Plane, cr: &Plane) -> Image {
+    assert_eq!((y.width(), y.height()), (cb.width(), cb.height()));
+    assert_eq!((y.width(), y.height()), (cr.width(), cr.height()));
+    let n = y.as_slice().len();
+    let (mut r, mut g, mut b) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
+    for i in 0..n {
+        let yy = f64::from(y.as_slice()[i]);
+        let cb = f64::from(cb.as_slice()[i]) - 128.0;
+        let cr = f64::from(cr.as_slice()[i]) - 128.0;
+        r.push((yy + 1.402 * cr).round().clamp(0.0, 255.0) as u8);
+        g.push(
+            (yy - 0.344136 * cb - 0.714136 * cr)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+        );
+        b.push((yy + 1.772 * cb).round().clamp(0.0, 255.0) as u8);
+    }
+    let (w, h) = (y.width(), y.height());
+    Image::rgb(
+        Plane::from_vec(w, h, r),
+        Plane::from_vec(w, h, g),
+        Plane::from_vec(w, h, b),
+    )
+}
+
 /// Everything §M2 asks for, for one (original, decoded) pair.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quality {
@@ -498,5 +542,61 @@ pub fn quality(
         psnr_yuv,
         ssim: ssim(&ya, &yb, ssim_cfg).map(|r| r.ssim),
         ms_ssim: ms_ssim(&ya, &yb, ms_cfg),
+    }
+}
+
+#[cfg(test)]
+mod ycbcr_tests {
+    use super::*;
+    use crate::image::Plane;
+
+    #[test]
+    fn ycbcr_roundtrip_is_exact_for_gray_input() {
+        // R == G == B for every pixel: Cb == Cr == 128 exactly (no rounding error, since
+        // -0.168736*v - 0.331264*v + 0.5*v == 0 for the coefficients' exact values only in
+        // the algebraic sense -- what actually matters is that it rounds to 128), and Y
+        // rounds to the shared input value exactly since the luma weights sum to 1.0.
+        let img = Image::rgb(
+            Plane::from_vec(2, 2, vec![0, 1, 128, 255]),
+            Plane::from_vec(2, 2, vec![0, 1, 128, 255]),
+            Plane::from_vec(2, 2, vec![0, 1, 128, 255]),
+        );
+        let [y, cb, cr] = ycbcr(&img);
+        assert_eq!(cb.as_slice(), &[128, 128, 128, 128]);
+        assert_eq!(cr.as_slice(), &[128, 128, 128, 128]);
+        let back = rgb_from_ycbcr(&y, &cb, &cr);
+        assert_eq!(back, img);
+    }
+
+    #[test]
+    fn ycbcr_roundtrip_is_nearly_lossless() {
+        // A synthetic gradient exercising every octant of colour space. The forward and
+        // inverse transforms each round independently, so a full RGB -> YCbCr -> RGB
+        // round trip is not bit-exact in general; the documented bound is <= 2 LSB per
+        // channel, which is what every 8-bit BT.601 implementation in practice achieves.
+        let n = 64usize;
+        let mut r = Vec::with_capacity(n * n);
+        let mut g = Vec::with_capacity(n * n);
+        let mut b = Vec::with_capacity(n * n);
+        for y in 0..n {
+            for x in 0..n {
+                r.push(((x * 4) % 256) as u8);
+                g.push(((y * 4) % 256) as u8);
+                b.push((((x + y) * 3) % 256) as u8);
+            }
+        }
+        let img = Image::rgb(
+            Plane::from_vec(n, n, r),
+            Plane::from_vec(n, n, g),
+            Plane::from_vec(n, n, b),
+        );
+        let [y, cb, cr] = ycbcr(&img);
+        let back = rgb_from_ycbcr(&y, &cb, &cr);
+        for (orig, dec) in img.planes().iter().zip(back.planes()) {
+            for (&o, &d) in orig.as_slice().iter().zip(dec.as_slice()) {
+                let diff = (i32::from(o) - i32::from(d)).abs();
+                assert!(diff <= 2, "round-trip diff {diff} exceeds the 2 LSB bound");
+            }
+        }
     }
 }
