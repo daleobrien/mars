@@ -317,6 +317,48 @@ pub(crate) fn max_pixel_delta(a: &[u8], b: &[u8]) -> u8 {
         .unwrap_or(0)
 }
 
+/// "Fractal zoom" (reference decoder's `zooming()`, `mars_dec.c:168`): scales a leaf list
+/// and its canvas by `factor` so the *same* contractive map is iterated over a larger or
+/// smaller grid, decoding detail at a resolution the encoder never saw rather than
+/// resampling a finished decode. `decode_leaf`'s domain contraction (`dom_row + 2*u`,
+/// `dom_col + 2*v`) is left untouched by this function on purpose — it is the map's own
+/// fixed 2:1 ratio, not a resolution artifact, exactly as the reference only rescales
+/// `rx`/`ry`/`rrx`/`rry`/`dx`/`dy` and never the domain step.
+///
+/// `factor == 1.0` is a no-op copy. Mode 1 (affine) leaves have their gradient rescaled by
+/// `1/factor` so the same total rise over a now-larger block matches the original fit.
+/// Mode 3's residual (a fixed-size inverse-DCT correction) has no defined meaning at a
+/// different block size, so it is dropped when zooming — leaving the plain domain-reference
+/// reconstruction from mode 2's formula, a visually reasonable fallback rather than an
+/// attempt to resample DCT coefficients.
+pub fn zoom_leaves(hdr: &Header, leaves: &[Leaf], factor: f64) -> (Header, Vec<Leaf>) {
+    let scale = |v: u32| -> u32 { (f64::from(v) * factor).round() as u32 };
+    let scaled = leaves
+        .iter()
+        .map(|leaf| Leaf {
+            row: scale(leaf.row),
+            col: scale(leaf.col),
+            size: scale(leaf.size).max(1),
+            dom_row: scale(leaf.dom_row),
+            dom_col: scale(leaf.dom_col),
+            qgx: (f64::from(leaf.qgx) / factor).round() as i32,
+            qgy: (f64::from(leaf.qgy) / factor).round() as i32,
+            residual: if factor == 1.0 {
+                leaf.residual.clone()
+            } else {
+                Vec::new()
+            },
+            ..leaf.clone()
+        })
+        .collect();
+    let zoomed_hdr = Header {
+        width: scale(hdr.width),
+        height: scale(hdr.height),
+        ..*hdr
+    };
+    (zoomed_hdr, scaled)
+}
+
 /// §7 dequantisation and §9/§10.1 reconstruction for one leaf, reading `img` (the
 /// previous iteration) and writing `next` — the double-buffering of §10.1 is what makes
 /// leaves independent of each other and safe to iterate in any order.

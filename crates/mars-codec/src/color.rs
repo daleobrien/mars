@@ -32,7 +32,7 @@ use mars_core::metrics::{rgb_from_ycbcr, ycbcr};
 use mars_core::Plane;
 
 use crate::encode::{encode_image, EncodeParams};
-use crate::ifs::{decode_iterative, decode_step, decode_until_stable, max_pixel_delta};
+use crate::ifs::{decode_iterative, decode_step, decode_until_stable, max_pixel_delta, zoom_leaves};
 use crate::mars_format::{self, MarsFormatError};
 
 // ---------------------------------------------------------------------------
@@ -230,20 +230,68 @@ pub fn decode_color_image(data: &[u8], iterations: u32) -> Result<Image, ColorFo
     }
 }
 
+/// Mirror of [`decode_color_image`] that decodes at `zoom`x the encoded resolution instead
+/// of the bitstream's native size — see [`crate::ifs::zoom_leaves`] for what "zoom" means
+/// for a fractal decode (enlarging or shrinking the canvas the same contractive map runs
+/// over, not resampling a finished image). `zoom == 1.0` behaves exactly like
+/// `decode_color_image`. Each plane is scaled independently by its own header, so this
+/// works the same for 4:2:0 chroma as for 4:4:4.
+pub fn decode_color_image_zoomed(
+    data: &[u8],
+    iterations: u32,
+    zoom: f64,
+) -> Result<Image, ColorFormatError> {
+    let (mode, streams) = read_container(data)?;
+    match mode {
+        MODE_GRAY => {
+            let (hdr, leaves) = mars_format::read(&streams[0])?;
+            let (hdr, leaves) = zoom_leaves(&hdr, &leaves, zoom);
+            let plane = decode_iterative(&hdr, &leaves, iterations);
+            Ok(Image::gray(plane))
+        }
+        MODE_RGB_444 | MODE_RGB_420 => {
+            let (y_hdr, y_leaves) = mars_format::read(&streams[0])?;
+            let (cb_hdr, cb_leaves) = mars_format::read(&streams[1])?;
+            let (cr_hdr, cr_leaves) = mars_format::read(&streams[2])?;
+            let (y_hdr, y_leaves) = zoom_leaves(&y_hdr, &y_leaves, zoom);
+            let (cb_hdr, cb_leaves) = zoom_leaves(&cb_hdr, &cb_leaves, zoom);
+            let (cr_hdr, cr_leaves) = zoom_leaves(&cr_hdr, &cr_leaves, zoom);
+
+            let y = decode_iterative(&y_hdr, &y_leaves, iterations);
+            let cb_small = decode_iterative(&cb_hdr, &cb_leaves, iterations);
+            let cr_small = decode_iterative(&cr_hdr, &cr_leaves, iterations);
+
+            let (w, h) = (y.width(), y.height());
+            let (cb, cr) = if mode == MODE_RGB_420 {
+                (
+                    upsample_nearest(&cb_small, w, h),
+                    upsample_nearest(&cr_small, w, h),
+                )
+            } else {
+                (cb_small, cr_small)
+            };
+            Ok(rgb_from_ycbcr(&y, &cb, &cr))
+        }
+        other => Err(ColorFormatError::UnknownMode(other)),
+    }
+}
+
 /// Mirror of [`decode_color_image`] using [`decode_until_stable`] instead of a fixed
 /// iteration count for each plane. Each plane converges independently (luma and chroma
 /// stabilise at different rates), so the return value reports the worst-case (maximum)
 /// iteration count across planes — the number a caller would need to reproduce this
-/// decode with the fixed-count API.
+/// decode with the fixed-count API. `zoom` behaves as in [`decode_color_image_zoomed`].
 pub fn decode_color_image_auto(
     data: &[u8],
     threshold: u8,
     max_iterations: u32,
+    zoom: f64,
 ) -> Result<(Image, u32), ColorFormatError> {
     let (mode, streams) = read_container(data)?;
     match mode {
         MODE_GRAY => {
             let (hdr, leaves) = mars_format::read(&streams[0])?;
+            let (hdr, leaves) = zoom_leaves(&hdr, &leaves, zoom);
             let (plane, used) = decode_until_stable(&hdr, &leaves, threshold, max_iterations);
             Ok((Image::gray(plane), used))
         }
@@ -251,6 +299,9 @@ pub fn decode_color_image_auto(
             let (y_hdr, y_leaves) = mars_format::read(&streams[0])?;
             let (cb_hdr, cb_leaves) = mars_format::read(&streams[1])?;
             let (cr_hdr, cr_leaves) = mars_format::read(&streams[2])?;
+            let (y_hdr, y_leaves) = zoom_leaves(&y_hdr, &y_leaves, zoom);
+            let (cb_hdr, cb_leaves) = zoom_leaves(&cb_hdr, &cb_leaves, zoom);
+            let (cr_hdr, cr_leaves) = zoom_leaves(&cr_hdr, &cr_leaves, zoom);
 
             let (y, y_used) = decode_until_stable(&y_hdr, &y_leaves, threshold, max_iterations);
             let (cb_small, cb_used) =
@@ -283,18 +334,21 @@ pub fn decode_color_image_auto(
 ///
 /// Stops after `max_iterations`, or earlier once `stable_threshold` is given and every
 /// plane's worst-case pixel movement drops to that value or below — mirroring
-/// [`decode_until_stable`]'s convergence test, applied across all planes at once. Returns
-/// the final image and the iteration count actually run.
+/// [`decode_until_stable`]'s convergence test, applied across all planes at once. `zoom`
+/// behaves as in [`decode_color_image_zoomed`] — each frame emitted is at the zoomed
+/// resolution. Returns the final image and the iteration count actually run.
 pub fn decode_color_image_progression(
     data: &[u8],
     max_iterations: u32,
     stable_threshold: Option<u8>,
+    zoom: f64,
     mut on_iteration: impl FnMut(u32, &Image),
 ) -> Result<(Image, u32), ColorFormatError> {
     let (mode, streams) = read_container(data)?;
     match mode {
         MODE_GRAY => {
             let (hdr, leaves) = mars_format::read(&streams[0])?;
+            let (hdr, leaves) = zoom_leaves(&hdr, &leaves, zoom);
             let (w, h) = (hdr.width as usize, hdr.height as usize);
             let mut img = vec![128u8; w * h];
             let mut used = 0;
@@ -316,6 +370,9 @@ pub fn decode_color_image_progression(
             let (y_hdr, y_leaves) = mars_format::read(&streams[0])?;
             let (cb_hdr, cb_leaves) = mars_format::read(&streams[1])?;
             let (cr_hdr, cr_leaves) = mars_format::read(&streams[2])?;
+            let (y_hdr, y_leaves) = zoom_leaves(&y_hdr, &y_leaves, zoom);
+            let (cb_hdr, cb_leaves) = zoom_leaves(&cb_hdr, &cb_leaves, zoom);
+            let (cr_hdr, cr_leaves) = zoom_leaves(&cr_hdr, &cr_leaves, zoom);
 
             let (yw, yh) = (y_hdr.width as usize, y_hdr.height as usize);
             let (cw, ch) = (cb_hdr.width as usize, cb_hdr.height as usize);

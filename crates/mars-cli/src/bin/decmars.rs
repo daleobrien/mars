@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use mars_codec::color::{decode_color_image, decode_color_image_auto, decode_color_image_progression};
+use mars_codec::color::{
+    decode_color_image_auto, decode_color_image_progression, decode_color_image_zoomed,
+};
 use mars_core::image::Image;
 use mars_core::io::{write_png, write_pnm, ImageError};
 
@@ -41,6 +43,14 @@ struct Cli {
     /// progression (and the final `output`) as soon as the image stabilises.
     #[arg(long)]
     progression: Option<PathBuf>,
+
+    /// Decode at this multiple of the bitstream's encoded resolution instead of its native
+    /// size (e.g. `2.0` decodes at double width/height). Fractal "zoom": the same
+    /// contractive map is iterated over a larger or smaller canvas, synthesizing detail at
+    /// a resolution the encoder never saw, rather than resampling a finished decode. `1.0`
+    /// (the default) is the bitstream's native resolution.
+    #[arg(short = 'z', long, default_value_t = 1.0)]
+    zoom: f64,
 }
 
 fn image_writer(ext: &str) -> Result<fn(&Path, &Image) -> Result<(), ImageError>> {
@@ -69,18 +79,24 @@ fn main() -> Result<()> {
             .with_context(|| format!("creating {}", dir.display()))?;
         let width = cli.iterations.max(1).to_string().len();
         let stable_threshold = cli.auto.then_some(cli.threshold);
-        decode_color_image_progression(&bytes, cli.iterations, stable_threshold, |n, frame| {
-            let frame_path = dir.join(format!("iter-{n:0width$}.{ext}"));
-            if let Err(e) = write(&frame_path, frame) {
-                eprintln!("warning: failed to write {}: {e:#}", frame_path.display());
-            }
-        })
+        decode_color_image_progression(
+            &bytes,
+            cli.iterations,
+            stable_threshold,
+            cli.zoom,
+            |n, frame| {
+                let frame_path = dir.join(format!("iter-{n:0width$}.{ext}"));
+                if let Err(e) = write(&frame_path, frame) {
+                    eprintln!("warning: failed to write {}: {e:#}", frame_path.display());
+                }
+            },
+        )
         .with_context(|| format!("parsing {} as a .mars container", cli.input.display()))?
     } else if cli.auto {
-        decode_color_image_auto(&bytes, cli.threshold, cli.iterations)
+        decode_color_image_auto(&bytes, cli.threshold, cli.iterations, cli.zoom)
             .with_context(|| format!("parsing {} as a .mars container", cli.input.display()))?
     } else {
-        let image = decode_color_image(&bytes, cli.iterations)
+        let image = decode_color_image_zoomed(&bytes, cli.iterations, cli.zoom)
             .with_context(|| format!("parsing {} as a .mars container", cli.input.display()))?;
         (image, cli.iterations)
     };
@@ -89,11 +105,16 @@ fn main() -> Result<()> {
     write(&cli.output, &image).with_context(|| format!("writing {}", cli.output.display()))?;
 
     println!(
-        "{} -> {width}x{height} {} ({} iterations{}, {} plane(s)){}",
+        "{} -> {width}x{height} {} ({} iterations{}{}, {} plane(s)){}",
         cli.input.display(),
         cli.output.display(),
         iterations_used,
         if cli.auto { ", auto" } else { "" },
+        if cli.zoom != 1.0 {
+            format!(", {}x zoom", cli.zoom)
+        } else {
+            String::new()
+        },
         image.planes().len(),
         cli.progression
             .as_ref()
