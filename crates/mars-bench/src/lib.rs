@@ -8,6 +8,7 @@
 pub mod anchors;
 pub mod anchors_report;
 pub mod bdrate;
+pub mod density_gate;
 pub mod gate_c;
 pub mod gpu_search;
 pub mod ifs_check;
@@ -21,9 +22,9 @@ pub mod oracle;
 pub mod parallel_bench;
 pub mod pchip;
 pub mod provenance;
+pub mod rd_opt;
 pub mod recall;
 pub mod report;
-pub mod rd_opt;
 pub mod rust_encoder;
 pub mod simd_bench;
 pub mod store;

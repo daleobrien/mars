@@ -392,6 +392,50 @@ gate-15:
     MARS_RUN_RESIDUAL_GATE=1 cargo test -p mars-bench --release --test residual_gate -- --nocapture
     @echo "gate-15: PASS (scoped to kodim01/kodim02; measured BD-rate is a +2.05% mean REGRESSION vs. the Step-14-equivalent mode mask, not an improvement -- a real, fully root-caused anomaly (D40); a candidate fix (a two-pass rate-estimation warm-up, D41) was implemented, verified correct, and empirically made it worse (+3.90%), then reverted per a time-budget decision rather than investigated further (D42); mode-usage histogram -- fractal dominant at 85% corpus-wide -- is the header finding; see docs/decisions.md's D40/D41/D42 and docs/predictions.md's Step 15 entries)"
 
+# Step 16 -- adaptive partitioning (`mars_codec::encode`'s content-adaptive domain-pool
+# density: `walk_rd` computes a per-block domain-search stride from the block's own
+# pixel-domain RMS instead of always using the run's fixed `params.shift`, denser where
+# local complexity is high, sparser where the block is near flat).
+#
+# **Scope decision, recorded in docs/predictions.md before any code ran.** Of the brief's
+# two geometry axes (non-uniform block sizes -- already substantially delivered by Step
+# 14's bottom-up `J`-driven quad-split pruning, per the brief's own "Step 14 already
+# supplies the mechanism" framing -- and content-adaptive domain-pool density, genuinely
+# new this step), HV/binary splits (the brief's own "optionally") were cut: they would
+# need a new bitstream split-type field (`FIELD_SPLIT` is a 2-way leaf/quad-split bit
+# today) with matching decoder support, materially larger than an M-sized step's budget
+# after Step 15's own session, and the brief itself marks them optional.
+#
+# Checks, in order:
+#  1. `mars-codec`'s own unit tests, including three new Step 16 ones: `adaptive_shift`'s
+#     high/low/mid RMS routing (exact-equality), `block_rms` actually distinguishing a
+#     flat block from a noisy one, `adaptive_density: false` reproducing the pre-Step-16
+#     path byte-for-byte (the additive-superset guarantee), a harness-sanity check that
+#     `adaptive_density: true` changes the partition on a mixed-complexity image (the
+#     knob is not inert), and a cross-thread-count bit-identity test for the new density
+#     path (`adaptive_density_rd_walk_is_bit_identical_across_thread_counts`), mirroring
+#     Step 14's own `rd_walk_is_bit_identical_across_thread_counts` exactly.
+#  2. `gate_16`'s BD-rate/cost-accounting/partition-statistics check
+#     (`crates/mars-bench/tests/density_gate.rs`): the adaptive-density curve vs. the
+#     fixed-density curve (Step 15's own behaviour, unchanged -- a same-codebase A/B, per
+#     `mars_bench::density_gate`'s doc), on kodim01/kodim02 at the same 4-point lambda
+#     grid every prior RD gate uses, plus the convexity/monotonicity diagnostic, plus
+#     **summed wall-clock encode-time cost accounting** (adaptive vs. fixed, same
+#     process/run/thread-count) printed and gated alongside the BD-rate number -- the
+#     brief's own explicit "report the cost alongside the gain" instruction -- plus
+#     **partition statistics** (leaves per size/depth, mean local RMS per size bucket)
+#     printed for both arms. See `docs/decisions.md`'s D43 for the measured numbers and
+#     `docs/predictions.md`'s Step 16 entry for what was predicted beforehand.
+# Scoped to kodim01/kodim02, not the full 24-image `standard/` corpus (mirrors gate-14/
+# gate-15's own scope cut exactly for the same session-time reasons -- this gate runs
+# *two* full RD sweeps per image, fixed and adaptive, where gate-15 ran two mode-mask
+# sweeps of the same cost class).
+gate-16:
+    cargo build --release -p mars-cli
+    cargo test -p mars-codec --release
+    MARS_RUN_DENSITY_GATE=1 cargo test -p mars-bench --release --test density_gate -- --nocapture
+    @echo "gate-16: PASS (scoped to kodim01/kodim02; measured mean BD-rate -6.82% (kodim01 -6.75%, kodim02 -6.88%), a real clean improvement vs Step 15's fixed-density baseline, not a calibrated shortfall/regression; encode-time cost ~1.4-1.5x overall across two independent runs (kodim01 ~1.6-1.8x, kodim02 ~1.1x; evals bit-identical run to run, wall-clock varies with machine load); see docs/decisions.md's D43 and docs/predictions.md's Step 16 outcome)"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval

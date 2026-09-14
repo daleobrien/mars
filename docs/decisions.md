@@ -2462,3 +2462,148 @@ mode-usage histogram (fractal prediction dominant at 85% corpus-wide, the wide-m
 opposite of P15.1's prediction) delivered as the step's actual scientific finding, per the
 brief's own framing of that histogram as more interesting than the BD-rate number. This is
 recorded as a complete, honest step closure, not a deferred or partially-resolved one.
+
+---
+
+## D43 · 2026-09-15 · Step 16's content-adaptive domain-pool density: a genuine, clean BD-rate improvement (-6.82% mean), breaking rather than extending the three-consecutive-calibrated-gate pattern D40 flagged
+
+**Context.** Step 16 (R&D plan §5) replaces fixed quadtree geometry with content-adaptive
+structure. Per `docs/predictions.md`'s Step 16 prediction (written before any code ran),
+the brief's two geometry axes were scoped down to one: content-adaptive domain-pool
+density (new this step), not HV/binary splits (the brief's own "optionally", and a
+materially larger change — a new bitstream split-type field with matching decoder support
+— than this M-sized step's remaining budget allows). Non-uniform block sizes are not a new
+capability this step adds from scratch: Step 14's bottom-up `J = D + λR` pruning
+(`walk_rd`) already produces genuinely non-uniform leaf sizes, exactly as the brief's own
+framing ("Step 14 already supplies the mechanism; this step supplies the geometry")
+anticipates.
+
+**What was built.** `mars_codec::encode::search` was refactored into `search_with_shift`
+(taking the domain-search stride explicitly) plus a thin `search` wrapper that passes
+`params.shift` unchanged, so every pre-Step-16 caller is byte-for-byte unaffected. A new
+`block_rms` computes each candidate block's own pixel-domain RMS (population standard
+deviation, a cheap O(size²) pre-pass) *before* the domain search runs; `adaptive_shift`
+maps that RMS to a denser stride (half `params.shift`, floor 1) above `DENSITY_HIGH_RMS =
+16.0`, a sparser stride (double) below `DENSITY_LOW_RMS = 4.0`, and the unchanged base
+stride in between. `Ctx` gained a new `adaptive_density: bool` field (`false` everywhere
+except the new `encode_image_rd_with_modes_and_density` entry point's own `true` arm,
+mirroring `allowed_modes`'s Step 15 precedent exactly), consulted only inside `walk_rd`
+(the legacy top-down `walk`, and `build_rate_snapshot`'s own warm-up walk, both stay fixed-
+density — the warm-up is deliberately **not** made adaptive this step, so its own
+domain-position histogram is a plausible, representative distribution rather than one that
+would need the RD search's own not-yet-known λ to compute).
+
+**Why this is lower-risk than Step 15's new modes, stated before measuring (P16.2).** This
+change reuses the *existing* `FIELD_DOM_ROW`/`FIELD_DOM_COL` bitstream fields — only their
+coded *values* change, not the field vocabulary — so there is no new field type for the
+frozen `RateModels` snapshot (`crate::rate`'s module doc; D39/D40) to have zero
+observations of, unlike Step 15's modes 1/3, which introduced entirely new fields
+(`FIELD_GX`/`FIELD_GY`/the residual fields) the legacy warm-up walk structurally cannot
+ever produce.
+
+**Measured result: a real, clean BD-rate improvement, not a shortfall or a regression.**
+`crates/mars-bench/tests/density_gate.rs` (`gate-16`), kodim01/kodim02, the same 4-point λ
+grid every prior RD gate uses (`[50, 200, 800, 3200]`), adaptive-density curve vs.
+fixed-density curve (Step 15's own behaviour, unchanged — a same-codebase A/B, per D40's
+precedent), both at `.mars` v0 bpp:
+
+| image | BD-rate (adaptive vs. fixed density) | BD-PSNR |
+|---|---|---|
+| kodim01 | **-6.75%** | +0.211 dB |
+| kodim02 | **-6.88%** | +0.169 dB |
+| mean | **-6.82%** | — |
+
+A negative BD-rate means the adaptive-density arm needs *fewer* bits than the fixed-density
+arm for the same quality — a genuine improvement, and a larger one than P16.1 predicted
+(1-5%): the measured -6.82% mean is outside the predicted band, on the favourable side, a
+surprise recorded per A7 rather than quietly folded into "prediction roughly confirmed".
+The convexity/monotonicity check passed cleanly on both images. Every prior gate this
+session/plan has passed only after a bar was calibrated to accept a shortfall (`gate-13`/
+D36, `gate-14`/D39) or a regression (`gate-15`/D40) — three in a row, which D40 flagged as
+a kill-criteria audit trigger. **This result does not extend that pattern to four**: no
+tolerance was calibrated to accept a shortfall or a regression here. `gate-16`'s
+`BD_RATE_CEILING_PCT = -3.0` is an improvement *floor* set with real margin (~3.75 points)
+below the measured -6.75% worst case, the same "calibrate a brand-new gate's bar to reality
+with margin" move D39/D40 made, but around a genuine win rather than a shortfall or a
+regression — the qualitatively different situation the brief's kill-criteria check-in
+clause exists to distinguish. Per the brief's own instruction ("If the result is a genuine,
+clean improvement ... proceed to close the step normally without needing to check in"),
+this step closes without a parent-session check-in.
+
+**Cost accounting, the brief's own explicit second exit criterion, measured alongside the
+BD-rate gain rather than quoted separately.**
+
+| image | encode time, fixed | encode time, adaptive | ratio |
+|---|---|---|---|
+| kodim01 | 236.36s | 386.40s | **1.63x** |
+| kodim02 | 149.61s | 162.44s | **1.09x** |
+| overall (summed) | 385.97s | 548.84s | **1.42x** |
+
+`just gate-16` was then run a second time, standalone, watched to completion (exit code 0):
+`evals` counts reproduced *exactly* (kodim01 6,205,403,136 fixed / 14,115,895,448 adaptive;
+kodim02 6,205,403,136 fixed / 5,491,357,328 adaptive — bit-identical to the numbers above,
+confirming determinism), while the wall-clock ratio came out slightly different (kodim01
+1.83x, kodim02 1.06x, overall 1.50x) — ordinary machine-load noise between runs on a shared
+box, not a correctness issue, and exactly the reason this cost accounting is explicitly
+scoped as a same-run wall-clock reading rather than a `benchmark-protocol`-grade throughput
+claim (this module's own doc). Both runs land comfortably inside P16.3's predicted 1.3-2.5x
+band and under `gate-16`'s own 3.0x ceiling.
+
+Inside P16.3's predicted 1.3-2.5x band, and well under the brief's own "wins 3% BD-rate for
+4x encode time is a different proposition" cautionary framing — here the encode-time cost
+(~1.4-1.5x) is proportionally *much smaller* than the BD-rate gain (-6.82%) it buys, the
+opposite of the brief's cautionary example. The two images' ratios differ substantially
+(~1.6-1.8x vs. ~1.1x) for an interesting, honestly-reported reason: kodim01's adaptive-arm
+`evals` more than *doubled* relative to fixed (14.12B vs. 6.21B, ratio ~2.27x) — kodim01 has
+enough high-RMS content to route a large fraction of blocks to the denser search stride —
+while kodim02's adaptive-arm `evals` **decreased** below fixed (5.49B vs. 6.21B, ratio
+~0.88x) — kodim02 is comparatively flatter overall, so more blocks route to the *sparser*
+stride than to the denser one, netting fewer total evals despite the occasional dense
+block. This is exactly the content-adaptivity the brief's "domain pool density varying with
+local complexity" deliverable asks for, made visible in the cost number itself rather than
+only asserted.
+
+**Partition statistics, the brief's own third exit criterion.** At the sweep's highest λ
+(3200, the coarsest partition, where the size-distribution effect is most visible): both
+arms land at essentially the same leaf-size distribution on both images (kodim01: 1548
+fixed vs. 1545 adaptive leaves, both ~99% at 16px with a handful of 8px leaves; kodim02:
+1542 fixed vs. 1536 adaptive, both ~100% at 16px). Mean local RMS per size bucket is also
+close between arms (kodim01 16px bucket: rms=25.69 fixed vs. 25.71 adaptive; kodim02 16px
+bucket: rms=9.75 fixed vs. 9.85 adaptive). **This confirms the intended separation of
+concerns stated in the design**: `walk_rd`'s leaf-vs-split (block-size) decision is
+governed by Step 14's unchanged `J` comparison and is not what this step's density knob
+acts on — the density knob changes *which domain gets matched* within an already-decided
+block, not the block-size geometry itself. The brief's "non-uniform block sizes" deliverable
+therefore remains attributed to Step 14 (as the brief's own framing anticipates), and
+Step 16's own, distinct contribution is the domain-density adaptivity measured above.
+
+**Mode-usage histogram** (all four Step 15 modes still competing, `[true; 4]`, unaffected
+by this step's own change): fixed and adaptive arms are close on both images (e.g. kodim01
+fractal (modes 2+3): 91.9% fixed vs. 92.3% adaptive; kodim02: 69.3% fixed vs. 69.3%
+adaptive) — density adaptivity does not meaningfully shift which *mode* wins, only how well
+mode 2/3's domain search performs within its own competition, consistent with the BD-rate
+gain being attributable to better domain matches rather than a change in mode selection.
+
+**Determinism.** `encode::tests::adaptive_density_rd_walk_is_bit_identical_across_thread_counts`
+(mirroring `rd_walk_is_bit_identical_across_thread_counts`'s Step 14 precedent exactly)
+checks the new density path at 1/2/4/8 threads — `block_rms`/`adaptive_shift` are pure
+functions of already-read pixel data with no shared mutable state, so the same determinism
+argument `crate::rate`'s module doc makes for the frozen `RateModels` snapshot applies here
+too. Passed. `encode::tests::adaptive_density_false_is_byte_identical_to_the_pre_step16_path`
+additionally checks the `false` arm reproduces `encode_image_rd_with_modes`'s output
+exactly, confirming the additive-superset guarantee (not merely asserted in a doc comment).
+
+**Scope cut, stated plainly (mirrors D28/D36/D39/D40's precedent).** `kodim01`/`kodim02`
+only, the same 4-point λ grid, not the full 24-image `standard/` corpus, for the same
+session-time reasons — this gate ran *two* full RD sweeps per image (fixed and adaptive),
+each at the same 4-mode-competition cost class `gate-15` already documented as expensive
+(~935 seconds total wall time for this gate's own sweep). HV/binary splits remain out of
+scope, recorded above and in `docs/predictions.md`'s Step 16 prediction as a deliberate cut
+rather than an oversight — a real format/decoder change, not attempted this session.
+
+**Tolerance impact.** `gate-16`'s `BD_RATE_CEILING_PCT = -3.0` and `MAX_ENCODE_TIME_RATIO =
+3.0` are both brand-new gate bars being set for the first time (no prior passing assertion
+was widened — A7 does not literally apply), calibrated with real margin below/above what
+was actually measured, around a genuine improvement rather than a shortfall or regression.
+This is explicitly *not* a fourth instance of the D36/D39/D40 pattern, and is recorded here
+as such rather than left for a reader to infer from the number alone.
