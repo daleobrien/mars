@@ -572,7 +572,7 @@ pub fn encode_image_rd_with_modes(
     let contracted = Contracted::build(image);
 
     if let Some(lambda) = params.lambda {
-        let rate = build_rate_snapshot(image, &hdr, &contracted, params, lambda, allowed_modes);
+        let rate = build_rate_snapshot(image, &hdr, &contracted, params);
         let ctx = Ctx {
             image,
             contracted: &contracted,
@@ -599,59 +599,27 @@ pub fn encode_image_rd_with_modes(
 
 /// Step 14's fixed warm-up threshold, deliberately independent of the run's own `lambda`
 /// (`crate::rate`'s module doc explains why a mutable, decision-order-updated model was
-/// rejected in favour of a frozen snapshot). Used only for [`build_rate_snapshot`]'s
-/// *first* pass now (§ that function's doc) -- a plausible, moderate starting partition
-/// for the second, self-consistent pass to refine, not the final snapshot itself anymore.
+/// rejected in favour of a frozen snapshot). Kept at the 1998 default so the snapshot's
+/// leaf-size mix is a plausible, moderate partition regardless of which `lambda` is being
+/// evaluated -- not this `lambda`'s own eventual partition, which is the documented
+/// fidelity gap (`docs/decisions.md`): no fixed-point iteration is attempted this step.
 const RD_WARMUP_T_RMS: f64 = 8.0;
 
-/// Step 15's self-consistent, two-pass rate-estimation warm-up
-/// (`docs/decisions.md`'s D41: the fix D39/D40 both named as the natural next step,
-/// implemented here). **Pass 0** is exactly Step 14's original warm-up unchanged: the
-/// legacy top-down `walk` at [`RD_WARMUP_T_RMS`], replayed through
-/// [`mars_entropy::build_models`] into a first, generic snapshot -- this pass's own
-/// leaves can never include mode 1/3 (`walk` has no mode-competition logic at all), so
-/// `FIELD_MODE`/`FIELD_GX`/`FIELD_GY`/the residual fields go into pass 0 completely
-/// unobserved, exactly the gap D40 root-caused.
-///
-/// **Pass 1** is new: a real [`walk_rd`] run, at *this call's own* `lambda` and
-/// `allowed_modes` (not a fixed, unrelated threshold), priced against pass 0's snapshot.
-/// Because `walk_rd` -- unlike the legacy `walk` -- actually runs the full mode
-/// competition, its leaves genuinely include mode 1/3 whenever they win under fair `J`
-/// competition at this exact operating point. Replaying *those* leaves' real events into
-/// a second `RateModels` snapshot is what finally gives `FIELD_MODE`/`FIELD_GX`/
-/// `FIELD_GY`/the residual fields at least one real, data-derived observation before the
-/// real (returned) `walk_rd` pass prices any candidate against them -- closing the exact
-/// "unseen context falls back to a generic Laplace-uniform prior" gap D40's diagnostic
-/// test traced the regression to.
-///
-/// **Still not a full fixed-point iteration** (pass 1's snapshot is not itself re-used to
-/// run a pass 2, and so on until convergence) -- one extra pass is the bounded, concretely
-/// scoped fix D39/D40 named, not an open-ended iteration; `docs/decisions.md`'s D41 records
-/// whether one pass was enough. Cost: this roughly doubles every RD-path encode's cost
-/// (`walk_rd` now runs twice instead of once), accepted per the parent session's explicit
-/// instruction, scoped to the same kodim01/kodim02 gate sweep Step 14/15 already use.
-///
-/// Determinism: pass 1 is a plain [`walk_rd`] call, sharing its exact `rayon::join`
-/// structure and fixed TL/BL/TR/BR merge order -- bit-identical across thread counts by
-/// the same argument `rd_walk_is_bit_identical_across_thread_counts` already covers for
-/// the top-level call, extended by `two_pass_warmup_is_bit_identical_across_thread_counts`
-/// below to cover this function's own two-pass sequence explicitly, including a case that
-/// actually exercises mode 1/3 leaves during pass 1's own warm-up walk.
+/// Run the legacy top-down encoder once, at [`RD_WARMUP_T_RMS`], and replay its leaves'
+/// real event stream through [`mars_entropy::build_models`] to obtain the frozen,
+/// read-only per-context snapshot [`walk_rd`]'s rate estimates are priced against.
 fn build_rate_snapshot(
     image: &Plane,
     hdr: &Header,
     contracted: &Contracted,
     params: &EncodeParams,
-    lambda: f64,
-    allowed_modes: [bool; 4],
 ) -> RateModels {
-    // Pass 0 -- unchanged from Step 14.
     let warmup_params = EncodeParams {
         t_rms: RD_WARMUP_T_RMS,
         lambda: None,
         ..*params
     };
-    let pass0_ctx = Ctx {
+    let warmup_ctx = Ctx {
         image,
         contracted,
         hdr,
@@ -659,25 +627,9 @@ fn build_rate_snapshot(
         rate: None,
         allowed_modes: [true; 4],
     };
-    let (pass0_leaves, _evals) = walk(&pass0_ctx, 0, 0, hdr.virtual_size());
-    let pass0_snapshot = RateModels::from_leaves(hdr, &pass0_leaves)
-        .expect("a warm-up partition from `walk` always writes as a valid `.mars` tree");
-
-    // Pass 1 -- new: a real walk_rd run, at this call's own lambda/allowed_modes, priced
-    // against pass 0's snapshot, so its leaves are a genuine, representative sample of
-    // *this operating point's* actual mode mix (including mode 1/3 when they win).
-    let pass1_ctx = Ctx {
-        image,
-        contracted,
-        hdr,
-        params,
-        rate: Some(&pass0_snapshot),
-        allowed_modes,
-    };
-    let pass1 = walk_rd(&pass1_ctx, 0, 0, hdr.virtual_size(), lambda);
-
-    RateModels::from_leaves(hdr, &pass1.leaves)
-        .expect("a walk_rd partition always writes as a valid `.mars` tree")
+    let (leaves, _evals) = walk(&warmup_ctx, 0, 0, hdr.virtual_size());
+    RateModels::from_leaves(hdr, &leaves)
+        .expect("a warm-up partition from `walk` always writes as a valid `.mars` tree")
 }
 
 /// The read-only context one `walk` recursion shares — bundled so the recursive calls
@@ -1629,50 +1581,6 @@ mod tests {
         }
     }
 
-    /// D41's two-pass warm-up (`build_rate_snapshot`) adds a second `walk_rd` call inside
-    /// snapshot construction itself, before the "real" `walk_rd` pass this test's sibling
-    /// above already covers -- this test extends the same determinism discipline to that
-    /// inner pass explicitly, on an image/lambda combination chosen to actually exercise
-    /// mode 1/3 leaves during pass 1 (not just pass 0's mode-0/2-only legacy warm-up), so
-    /// a thread-count dependence introduced specifically by pricing those modes during
-    /// warm-up would be caught here rather than slipping through on an image that never
-    /// reaches them.
-    #[test]
-    fn two_pass_warmup_is_bit_identical_across_thread_counts() {
-        let image = half_flat_half_noisy_image(96, 96);
-        let params = rd_params(60.0);
-        let mut reference: Option<(Header, Vec<Leaf>)> = None;
-        let mut saw_non_legacy_mode = false;
-        for threads in [1, 2, 4, 8] {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap();
-            let (hdr, mut leaves, _evals) = pool.install(|| encode_image(&image, &params));
-            if leaves.iter().any(|l| l.mode == 1 || l.mode == 3) {
-                saw_non_legacy_mode = true;
-            }
-            leaves.sort_by_key(|l| (l.row, l.col, l.size));
-            match &reference {
-                None => reference = Some((hdr, leaves)),
-                Some((ref_hdr, ref_leaves)) => {
-                    assert_eq!(&hdr, ref_hdr, "header differs at {threads} threads");
-                    assert_eq!(
-                        &leaves, ref_leaves,
-                        "leaf set differs at {threads} threads (two-pass warm-up is not \
-                         thread-count-deterministic)"
-                    );
-                }
-            }
-        }
-        assert!(
-            saw_non_legacy_mode,
-            "this test's whole point is to exercise mode 1/3 during the warm-up's own \
-             pass 1 -- if neither ever appears, the determinism check above isn't actually \
-             covering the new code path and the image/lambda choice needs revisiting"
-        );
-    }
-
     // ------------------------------------------------------------------------ Step 15
 
     /// [`ModeStats`]'s own internal-consistency oracle: the number of leaves reported by
@@ -1833,12 +1741,11 @@ mod tests {
             int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
         };
         let contracted = Contracted::build(&image);
+        // The exact same snapshot-construction call both mode-mask arms use internally
+        // (`encode_image_rd_with_modes`) -- built once, shared explicitly here so there is
+        // no possibility of the two arms below seeing different snapshots.
+        let rate = build_rate_snapshot(&image, &hdr, &contracted, &params);
         let lambda = params.lambda.unwrap();
-        // One shared snapshot, built once and reused for *both* mode-mask arms below --
-        // the test's claim is about minimising under an identical cost function, so what
-        // matters is that both `run` calls price against the same `rate`, not which mask
-        // (if any) built it. `[true; 4]` here is arbitrary but fixed.
-        let rate = build_rate_snapshot(&image, &hdr, &contracted, &params, lambda, [true; 4]);
 
         let run = |allowed_modes: [bool; 4]| -> RdResult {
             let ctx = Ctx {
