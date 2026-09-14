@@ -5,6 +5,7 @@
 //! (`ifs::write`), both cross-checked against `decmars`. Nothing here implements Mars 2's
 //! own format yet; that arrives at Step 10.
 
+pub mod color;
 pub mod encode;
 pub mod ifs;
 pub mod isometry;

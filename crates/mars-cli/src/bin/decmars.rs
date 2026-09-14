@@ -1,13 +1,12 @@
 //! `decmars` -- decompress a `.mars` bitstream back to an image, via the Step 5/6 fixed-
-//! point iterative decoder, for visual before/after inspection.
+//! point iterative decoder, for visual before/after inspection. Handles both grayscale
+//! and colour (Step 18) containers written by `encmars` -- see `mars_codec::color`.
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use mars_codec::ifs::decode_iterative;
-use mars_codec::mars_format;
-use mars_core::image::Image;
+use mars_codec::color::decode_color_image;
 use mars_core::io::{write_png, write_pnm};
 
 /// Decompress a `.mars` bitstream to an image.
@@ -15,8 +14,8 @@ use mars_core::io::{write_png, write_pnm};
 struct Cli {
     /// Input `.mars` bitstream.
     input: PathBuf,
-    /// Output image path. `.png` writes a viewable PNG; `.pgm` writes a raw PNM (Mars 2
-    /// is grayscale-only so far, so both come out single-plane).
+    /// Output image path. `.png` writes a viewable PNG; `.pgm`/`.ppm` writes a raw PNM
+    /// (single-plane for grayscale input, P6 colour for RGB input).
     output: PathBuf,
 
     /// Fixed-point iterations to run from the flat grey (128) seed.
@@ -27,14 +26,11 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let bytes = std::fs::read(&cli.input)
-        .with_context(|| format!("reading {}", cli.input.display()))?;
-    let (hdr, leaves) = mars_format::read(&bytes)
+    let bytes =
+        std::fs::read(&cli.input).with_context(|| format!("reading {}", cli.input.display()))?;
+    let image = decode_color_image(&bytes, cli.iterations)
         .with_context(|| format!("parsing {} as a .mars container", cli.input.display()))?;
-
-    let plane = decode_iterative(&hdr, &leaves, cli.iterations);
-    let (width, height) = (plane.width(), plane.height());
-    let image = Image::gray(plane);
+    let (width, height) = (image.width(), image.height());
 
     let ext = cli
         .output
@@ -46,17 +42,18 @@ fn main() -> Result<()> {
         "png" => write_png(&cli.output, &image),
         "pgm" | "ppm" => write_pnm(&cli.output, &image),
         _ => bail!(
-            "{}: unsupported output extension; use .png or .pgm",
+            "{}: unsupported output extension; use .png, .pgm or .ppm",
             cli.output.display()
         ),
     }
     .with_context(|| format!("writing {}", cli.output.display()))?;
 
     println!(
-        "{} -> {width}x{height} {} ({} iterations)",
+        "{} -> {width}x{height} {} ({} iterations, {} plane(s))",
         cli.input.display(),
         cli.output.display(),
         cli.iterations,
+        image.planes().len(),
     );
     Ok(())
 }

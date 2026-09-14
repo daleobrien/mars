@@ -1339,3 +1339,162 @@ The full survival/recall tradeoff curve (sweeping `FunnelConfig`'s survivor coun
 the Pareto frontier across the full 24-image corpus remain open, exactly as this
 prediction's "known gap" section said before any code ran — `docs/decisions.md` records
 this alongside D28's identical Step 9 scope cut.
+
+---
+
+## 2026-09-14 (not yet run) · Step 18 · colour
+
+**Process note, recorded honestly rather than smoothed over (A7):** this prediction was
+written after a short exploratory pass (building `mars_codec::color`, its unit tests, and
+one manual `encmars`/`decmars` round trip at a single rate point on `kodim01` to sanity-
+check the pipeline actually worked end to end) rather than strictly before any measurement
+at all, which is a real deviation from A4's letter. The RD-curve sweep and BD-rate numbers
+below were **not** looked at before this prediction was written — only the single-point
+sanity check (bytes non-zero, PSNR-Y > 20 dB) was. `docs/decisions.md` D37 records this
+deviation and why it does not (in this author's judgement) invalidate the predictions
+below, since the sanity check carried no information about relative rate or the BD-rate
+sign.
+
+**Entry-condition conflict.** Step 18's brief text says "Entry condition: Gate D passed",
+but §5's dependency graph and its "what may run concurrently" table both place Step 18
+right after Gate B, concurrent with Steps 10/11/13/14. Built now, at the user's explicit
+instruction, under the concurrent-with-14 reading; `docs/decisions.md` D37 records the
+conflict itself. Because Gate D (residual mode, adaptive partitioning) has not passed, any
+BD-rate numbers here are against **today's pre-Gate-D exhaustive encoder**, not the codec
+the brief's own exit criterion implicitly assumes — provisional, to be re-measured once
+Gate D passes.
+
+**What was built:** `mars_core::metrics::rgb_from_ycbcr` (BT.601 inverse of the existing
+`ycbcr`), `mars_codec::color` (independent per-plane `EncodeParams` for Y vs. chroma, box-
+filter 4:2:0 downsampling, nearest-neighbour upsampling, a small `MARC` colour container
+wrapping three independent `.mars` v0 streams), and `encmars`/`decmars` CLI support for
+colour PNG round trips.
+
+### P18.1 — 4:2:0 costs some chroma quality but saves more bits than it costs, at matched luma quality
+
+Both subsampling modes share an identical Y stream at a given `t_rms` (chroma
+subsampling never touches luma), so PSNR-Y should be **identical** between 4:4:4 and
+4:2:0 at matched `t_rms`, while total bytes should be lower for 4:2:0 (fewer chroma
+samples to encode) and PSNR-Cb/PSNR-Cr should be lower for 4:2:0 (upsampled from half
+resolution). Whether this nets out to a *better* BD-rate for 4:2:0 depends on which
+metric is used: expect PSNR-Y-matched comparisons to favour 4:2:0 (it is "free" bits
+saved with no luma cost), but expect the brief's own PSNR-YUV metric — which weights
+chroma at `1/8` each and would need chroma quality preserved to fully credit the bit
+savings — to show a **smaller** 4:2:0 advantage than a naive "chroma is a quarter the
+pixels, so a quarter chroma bits, for free" story would suggest, and possibly even a
+*net loss* in BD-rate terms if chroma PSNR degrades faster than the weighted quality
+metric can absorb given how few bits chroma already occupies relative to luma. This is
+the standard subsampling tradeoff every 4:2:0-capable format ships with; the open
+question this prediction flags is only which side of break-even PSNR-YUV lands on for
+this codec's specific chroma bit allocation.
+
+### P18.2 — Mars 2 (pre-Gate-D) remains behind the strongest anchors on colour Kodak
+
+Per the brief's own pointer to R&D plan §M10 ("expect to remain behind AVIF/JXL"):
+expect Mars 2's pre-Gate-D exhaustive encoder, now colour-capable, to sit clearly behind
+AVIF and JPEG XL in BD-rate on any Kodak images measured, since neither residual coding
+nor adaptive partitioning exist yet — this is fundamentally the same exhaustive quadtree
+fractal encoder Step 6 built, just applied three times. Against plain JPEG the outcome
+is less obvious a priori: JPEG's block-DCT has its own well-known weaknesses at low bpp
+(blocking artefacts) that a fractal encoder's self-similarity search does not share, so
+this prediction does **not** confidently call the JPEG comparison's direction — it is
+recorded as an open question the measurement below will answer, not smoothed into "we
+expect to lose to everything."
+
+### Known gap this session will likely leave open
+
+A full 24-image Kodak sweep against all five anchors (JPEG, JPEG 2000, WebP, AVIF, JPEG
+XL), with a proper BD-rate table, is far more encode time than this session's budget
+allows — the exhaustive Rust encoder takes 10-35 seconds per colour image per rate point
+per subsampling mode at this machine's core count, and a full sweep needs on the order
+of `24 images x 2 subsampling modes x 4+ rate points` = 190+ colour encodes. Expect this
+session to measure a single image (`kodim01`) at 4 rate points in both subsampling
+modes, against one anchor (JPEG, reusing already-recorded `results/anchors.jsonl` rows
+rather than re-running the anchor sweep), mirroring the D28/Step-13 precedent for scoping
+down a step's exit criteria to what a session can actually run, and to record the rest —
+full corpus, all five anchors, MS-SSIM-based BD-rate — as the open gap.
+
+---
+
+## 2026-09-14 · Step 18 · outcomes
+
+Measured on `kodim01` (768x512), `t_rms` in `{4, 8, 16, 32}`, both subsampling modes,
+chroma `t_rms` defaulted to the same value as luma (no independent chroma quality tuning
+attempted this session beyond the mechanism existing). PSNR-YUV per §M2's `(6Y+Cb+Cr)/8`
+definition, via `marsbench metrics`. BD-rate via `marsbench bdrate` (PCHIP-on-log-bpp,
+§M3), `points_reference`/`points_test` = 4 in every curve (the §M3 minimum, not more).
+
+| t_rms | 444 bpp | 444 PSNR-YUV | 420 bpp | 420 PSNR-YUV |
+|---|---|---|---|---|
+| 4  | 1.8035 | 34.349 | 1.6367 | 33.418 |
+| 8  | 1.5259 | 33.853 | 1.3663 | 32.826 |
+| 16 | 0.8457 | 31.044 | 0.6861 | 30.016 |
+| 32 | 0.3464 | 27.783 | 0.1868 | 26.754 |
+
+(PSNR-Y alone was *nearly* identical between 444 and 420 at every matched `t_rms`, as
+predicted — 30.21274 dB vs. 30.21188 dB at `t_rms=8`, a difference under 0.001 dB — since
+the coded Y stream is byte-identical between subsampling modes; chroma subsampling never
+touches it. **Correction, caught while writing `gate-18`'s own test, not smoothed over:**
+"nearly identical" is the accurate claim, not "identical" — `quality()`'s PSNR-Y is
+measured on the *reconstructed RGB*, re-converted back to YCbCr, so noisier 4:2:0 chroma
+does perturb the recomputed Y by a small amount through the inverse transform's per-
+channel clamping, even though the decoded Y *plane* itself is bit-identical between modes.
+On a synthetic high-contrast test image used in `gate-18`'s own test this gap was larger
+(34.31 vs. 33.87 dB, ~0.44 dB) than on `kodim01`'s natural-image gradients — large enough
+that the gate asserts a 1 dB tolerance rather than exact equality. See `docs/decisions.md`
+D38 for this correction recorded as its own note.)
+
+### P18.1 — **partially confirmed, with the surprising half flagged rather than smoothed over**
+
+The PSNR-Y-nearly-identical part is confirmed (see the correction above). But on
+PSNR-YUV, BD-rate of
+4:2:0 relative to a 4:4:4 reference on this single image is **+3.86%** (4:2:0 needs *more*
+bits at matched PSNR-YUV, not fewer) — the opposite sign from the naive "subsampling is
+free bits" framing, though consistent with the more careful version of P18.1's own
+reasoning: PSNR-YUV weights chroma at only `1/8` each, and 4:2:0's chroma bit savings on
+this image are already small in absolute terms next to luma's cost (e.g. at `t_rms=8`,
+chroma is 10,350 of 75,002 total bytes for 4:4:4 vs. 2,506 of 67,158 for 4:2:0 — a real
+~10% total-byte saving, but paid for with a chroma PSNR drop of 3.5-5 dB that the `1/8`-
+weighted metric still penalises enough to tip the BD-rate sign). **This is recorded as a
+genuine, measured result on one image, not explained away**: it does not mean 4:2:0 is a
+bad idea in general (a full corpus average, or a PSNR-Y-matched or MS-SSIM-based
+comparison, could easily flip the sign — MS-SSIM was not checked this session, see the gap
+below), only that on `kodim01` specifically, at these four rate points, PSNR-YUV's
+particular chroma weighting does not reward 4:2:0's bit savings.
+
+### P18.2 — **confirmed against JPEG in the unexpected direction relative to plain "remains behind"; AVIF/JXL not measured**
+
+Against JPEG's own already-recorded curve for `kodim01` (`results/anchors.jsonl`, 11
+points), BD-rate (PSNR-YUV, JPEG as reference):
+- **mars2-444 vs. JPEG: +0.80%** — essentially matched, marginally worse.
+- **mars2-420 vs. JPEG: -4.42%** — mars2-420 needs *fewer* bits than JPEG at matched
+  PSNR-YUV on this one image.
+
+This is **not** the brief's own §M10 expectation ("expect to remain behind AVIF/JXL") —
+but note the brief names AVIF/JXL specifically, not JPEG, and JPEG is the weakest of the
+five anchors. AVIF and JPEG XL were not measured this session (scope cut, see below); the
+brief's actual prediction remains untested. The JPEG comparison is a genuinely
+interesting, single-image, pre-Gate-D data point — recorded as such, not generalised into
+"Mars 2 beats the anchors."
+
+### What this means for Step 18
+
+The colour pipeline works end to end (round trip, independent per-plane quality control,
+both subsampling modes, container format) and produces real, if narrow, RD/BD-rate
+numbers. Both surprises (P18.1's sign flip, P18.2's JPEG result) are recorded plainly
+rather than reinterpreted to match the prior — per the verification-discipline skill,
+"assume the harness before the result," and the harness here (the same `bdrate`/`metrics`
+machinery already cross-validated in Steps 1 and 4) is not new or suspect, so these are
+treated as real, if narrow-scope, results rather than harness bugs.
+
+### Known gap, as predicted
+
+Exactly the gap named above: no full 24-image sweep, no AVIF/JPEG 2000/WebP/JPEG XL
+comparison, no MS-SSIM-based BD-rate (only PSNR-YUV was computed for the curves; MS-SSIM
+values were recorded per-point by `marsbench metrics` but not turned into a second set of
+BD-rate numbers this session). All of this is measurement-infrastructure work that
+reuses tools already built (`mars-bench::bdrate`, `anchors.rs`'s existing anchor curves)
+rather than needing new code — the remaining cost is purely encode wall-time. And, as
+stated up front: everything measured here is against the pre-Gate-D encoder, so none of
+these BD-rate numbers are the step's real exit-criterion numbers — they are a feasibility
+demonstration that the measurement path works, to be re-run once Gate D passes.

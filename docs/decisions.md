@@ -1925,3 +1925,124 @@ tradeoff curve offline without re-running the funnel once it happens.
 the harness-sanity check uses the same ~100%/~0dB bar P9.4 established, and the scaled-
 config recall floor was set once, using Step 9's already-recorded numbers as the
 calibration source, before being asserted (not adjusted after a first failing run).
+
+---
+
+## D37 · 2026-09-14 · Step 18's entry-condition conflict, and an A4 process deviation, both recorded rather than resolved silently
+
+**The entry-condition conflict.** Step 18's own brief text says "Entry condition: Gate D
+passed" — Gate D being Steps 9-16 cumulative, not yet reached (Step 14 was being built
+concurrently in a separate worktree while this step ran; Steps 15/16 have not started).
+But `implementation-plan.md` §5's dependency graph diagram and its "what may run
+concurrently" table both place Step 18 immediately after Gate B, explicitly concurrent
+with Steps 10/11/13/14 — the diagram's own annotation reads "(Step 18 colour, after 10)"
+and the concurrency table has the row `14 | 10, 13 | 18`. These two parts of the same
+document disagree about when Step 18 may start. Per A7, this is recorded rather than
+silently resolved either way. This session built Step 18 now, under the diagram/table's
+concurrent-with-14 reading, at the user's explicit instruction — but did **not** claim the
+brief's own exit criterion (a BD-rate comparison against the anchors that the brief calls
+"the first point at which the anchor comparison is apples-to-apples") is met, since that
+exit criterion's own wording implicitly assumes the Gate-D-complete codec (residual mode,
+Step 15; adaptive partitioning, Step 16) is what is being measured, not today's pre-Gate-D
+exhaustive encoder. Any BD-rate numbers this session produced (`docs/predictions.md`'s
+Step 18 outcome) are explicitly labelled provisional and will need re-measurement once
+Gate D actually passes.
+
+**The A4 process deviation.** A4 requires predictions to be written *before* any sweep or
+measurement. This session did not fully honour that: `mars_codec::color` was built and
+unit-tested, then one manual `encmars`/`decmars` round trip at a single rate point on
+`kodim01` was run as a pipeline sanity check (does it produce non-zero output, is PSNR-Y
+above a trivial floor) *before* `docs/predictions.md`'s Step 18 prediction section was
+written. The full rate-sweep/BD-rate measurement was not run until after the prediction
+was recorded. Judgement call, recorded rather than hidden: the single sanity-check point
+carried no information about the comparisons the predictions actually make (4:2:0 vs.
+4:4:4 BD-rate sign, Mars 2 vs. JPEG BD-rate sign), so it should not have biased those
+predictions — but the letter of A4 was not followed, and a future session auditing this
+step should treat the Step 18 prediction as slightly less clean evidence of "an agent that
+could not have rationalised the result" than e.g. Step 13's prediction, which was written
+with zero code run.
+
+---
+
+## D38 · 2026-09-14 · Step 18's YCbCr, subsampling filter, and container format decisions
+
+**Colour space and rounding.** BT.601 full-range YCbCr, matching `Image::luma()`'s
+existing choice (`0.299R + 0.587G + 0.114B` for Y; standard Cb/Cr coefficients), rounded
+half-away-from-zero and clamped 0..255 on both the forward transform (already existed in
+`mars_core::metrics::ycbcr`, Step 1) and the new inverse (`rgb_from_ycbcr`, this step).
+BT.709 was considered and rejected: nothing in this project's corpus or anchor set uses
+BT.709, and introducing a second matrix would create exactly the kind of "two otherwise-
+equivalent implementations disagree" hazard the measurement contract's M2/A7 discipline
+exists to prevent. The round trip is not bit-exact (rounding happens on both the forward
+and inverse transform, independently, per §M2-adjacent reasoning already established for
+other pinned metric choices) — bounded at <= 2 LSB per channel on a synthetic gradient
+test, and exact when R == G == B (the common all-gray case, mirroring `luma()`'s own
+"grayscale input is never touched" precedent).
+
+**Subsampling filter.** Downsample: 2x2 box filter (simple averaging, rounded
+half-away-from-zero), the standard, least-surprising choice and explicitly not left
+implicit — `mars_codec::color::downsample_box`'s doc comment names it. Odd dimensions
+replicate the last row/column (matching libjpeg's own convention) so every output pixel
+still averages a full 2x2 neighbourhood. Upsample: nearest-neighbour pixel replication —
+the literal inverse of the box filter's 2x2 grouping, chosen over bilinear because it is
+deterministic and trivially reasoned about (no interpolation weights to get wrong,
+directly testable dimension-wise), at the cost of blockier reconstructed chroma than
+bilinear would give. This is a real, documented tradeoff, not an oversight: bilinear
+upsampling is the more common production choice and would very likely measure slightly
+better; revisiting it is flagged as a natural follow-up, not attempted this session.
+
+**Container format: three independent back-to-back streams, not a multiplexed one.** A
+new small container (`MARC`, magic + version + mode byte + section count + length-
+prefixed sections) wraps zero, one, or three complete, independently-valid `.mars` v0
+streams (each produced by the existing single-plane `mars_format::write`/`read`,
+untouched). Rejected alternative: extending `mars_format`'s own `Header`/section table to
+carry multiple planes' geometry and multiple `TREE` sections in one v0 stream. The
+three-streams design was chosen because it needed **zero changes** to `mars_format.rs` —
+the single-plane format Step 10 already built, tested, and fuzzed continues to be exactly
+what it was, and colour is purely an additive wrapper. The cost is a small amount of
+duplicated per-stream header overhead (each Y/Cb/Cr stream pays its own 20-byte
+`mars_format` header rather than sharing one), judged acceptable at this step's stated
+scope ("pick the simplest correct design, don't over-engineer for the optimiser-allocated-
+λ future goal the brief itself defers as 'eventually'"). `mars_format.rs`'s header already
+reserved unused `channels`/`colour_space` byte fields (Step 10's own doc comment: "the
+encoder does not populate yet, so the format never has to grow a colour section later") —
+those fields are still unused by the new colour container, which lives entirely alongside
+`mars_format` rather than inside it; a future step could fold the two together, but this
+step did not need to.
+
+**Independent per-plane quality control: one `EncodeParams` for Y, one shared by Cb and
+Cr** (`ColorEncodeParams { y, chroma, subsampling }`), not three fully independent
+parameter sets. This covers the brief's actual ask (chroma commonly coded at lower
+quality than luma) without inventing a Cb-vs-Cr quality distinction nothing in the brief,
+the R&D plan, or any anchor codec's own design calls for — JPEG/AVIF/JXL all treat Cb and
+Cr symmetrically. No optimiser-driven λ allocation across planes was built (the brief's
+own "eventually" — explicitly out of scope for this step).
+
+**Scope cut on measurement.** Only `kodim01`, at 4 rate points (`t_rms` in
+`{4, 8, 16, 32}`), in both subsampling modes, against one anchor (JPEG, reusing already-
+recorded `results/anchors.jsonl` rows), was measured — not the full 24-image Kodak corpus,
+not all five anchors, not MS-SSIM-based BD-rate. Mirrors the D28 (Step 9) / D36 (Step 13)
+precedent of scoping a step's exit criteria down to what a session's time budget can
+actually run, with the gap named explicitly rather than implied. See
+`docs/predictions.md`'s Step 18 outcome for the numbers and the two flagged surprises
+(4:2:0's BD-rate sign vs. 4:4:4, and mars2-420's BD-rate sign vs. JPEG).
+
+**Correction caught while writing `gate-18`'s own test (not a tolerance widening — a
+wrong claim caught before it shipped).** `docs/predictions.md`'s first Step 18 outcome
+draft said PSNR-Y is "identical" between 4:4:4 and 4:2:0 at matched `t_rms`. Writing
+`crates/mars-codec/tests/color_gate.rs`'s
+`synthetic_colour_image_round_trips_in_both_subsampling_modes` test with a strict `< 0.01`
+equality check falsified this immediately (measured gap 0.44 dB on a synthetic
+high-contrast image). Root cause: `mars_core::metrics::quality`'s PSNR-Y is computed by
+re-deriving YCbCr from the *reconstructed RGB* image, not by comparing the decoded Y
+*plane* directly — so 4:2:0's noisier chroma leaks a small amount of error into the
+recomputed Y via the inverse transform's per-channel rounding/clamping, even though the
+underlying coded Y stream is byte-identical between subsampling modes. This is a property
+of how PSNR-Y is defined for RGB input (§M2, Step 1), not a bug in the colour codec path,
+and is not a case for widening a *codec-correctness* tolerance — the gate's assertion was
+set once, at 1 dB (a real bound, informed by the measured 0.44 dB gap, not backed into
+after a failure), and `docs/predictions.md`'s prose was corrected to say "nearly
+identical" with the actual numbers rather than silently fixed. Recorded per A7: the
+anomaly was caught by the test that was about to become part of the gate, exactly the
+scenario the plan-step/verification-discipline skills describe A4's prediction-then-test
+discipline as existing to catch.

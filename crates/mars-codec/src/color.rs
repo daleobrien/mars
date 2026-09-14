@@ -1,0 +1,432 @@
+//! Colour encode/decode plumbing — Step 18.
+//!
+//! **Entry-condition note (see `docs/decisions.md`).** Step 18's own brief text says
+//! "Entry condition: Gate D passed", but §5's dependency graph and "what may run
+//! concurrently" table both place Step 18 right after Gate B, concurrent with Steps
+//! 10/11/13/14. This module was built under the latter reading, at the user's explicit
+//! request, alongside a concurrently-developed Step 14. Everything here that does not
+//! depend on Gate D's residual/adaptive-partitioning machinery is built and validated
+//! now; the brief's own exit criterion (an apples-to-apples BD-rate against the anchors)
+//! implicitly assumes the Gate-D-complete codec, so any BD-rate numbers produced against
+//! *today's* pre-Gate-D encoder are provisional and will need re-measurement once Gate D
+//! actually passes.
+//!
+//! **Design.** Rather than teach the shared search/partition core
+//! ([`crate::encode::encode_image`]) about multiple planes, colour is layered on top: a
+//! colour image is converted to BT.601 YCbCr ([`mars_core::metrics::ycbcr`]), chroma is
+//! optionally subsampled, and each of Y/Cb/Cr is encoded independently by calling
+//! `encode_image` three times with three independent [`EncodeParams`] — chroma very
+//! commonly wants a looser quality setting than luma, hence "independent quality control
+//! per plane" being a caller-supplied pair of params, never something the encoder infers.
+//! Decode does the mirror image: three independent [`crate::ifs::decode_iterative`] calls,
+//! chroma upsampled back to luma resolution, then the inverse YCbCr transform
+//! ([`mars_core::metrics::rgb_from_ycbcr`]).
+//!
+//! **What this deliberately does not do.** No shared/optimiser-decided λ allocation
+//! across planes — the brief calls that "eventually", i.e. explicitly out of scope for
+//! this step. No residual layer, no adaptive partitioning (both Gate-D machinery, not
+//! built yet). No progressive/prefix decoding (Step 19).
+
+use mars_core::image::{ColorSpace, Image};
+use mars_core::metrics::{rgb_from_ycbcr, ycbcr};
+use mars_core::Plane;
+
+use crate::encode::{encode_image, EncodeParams};
+use crate::ifs::decode_iterative;
+use crate::mars_format::{self, MarsFormatError};
+
+// ---------------------------------------------------------------------------
+// Chroma subsampling
+// ---------------------------------------------------------------------------
+
+/// 4:4:4 (no subsampling) or 4:2:0 (half-resolution Cb/Cr) — Step 18 brief's minimum
+/// pair. JPEG/video's usual third option, 4:2:2, is not implemented: nothing in the
+/// brief requires it and adding it now would be scope the step does not ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subsampling {
+    Yuv444,
+    Yuv420,
+}
+
+/// Downsample one chroma plane 2x in both axes with a box filter (simple 2x2 pixel
+/// averaging, rounded half-away-from-zero) — the standard, simplest-correct choice
+/// (documented in `docs/decisions.md`, not left implicit). Odd dimensions replicate the
+/// last row/column so every output pixel still averages a full 2x2 neighbourhood; this is
+/// the same edge convention libjpeg's own chroma subsampler uses.
+pub fn downsample_box(plane: &Plane) -> Plane {
+    let (w, h) = (plane.width(), plane.height());
+    let (ow, oh) = (w.div_ceil(2), h.div_ceil(2));
+    let mut out = vec![0u8; ow * oh];
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let x0 = 2 * ox;
+            let y0 = 2 * oy;
+            let x1 = (x0 + 1).min(w - 1);
+            let y1 = (y0 + 1).min(h - 1);
+            let sum = u32::from(plane.get(x0, y0))
+                + u32::from(plane.get(x1, y0))
+                + u32::from(plane.get(x0, y1))
+                + u32::from(plane.get(x1, y1));
+            out[oy * ow + ox] = ((sum + 2) / 4) as u8;
+        }
+    }
+    Plane::from_vec(ow, oh, out)
+}
+
+/// Upsample one chroma plane back to `(width, height)` by nearest-neighbour pixel
+/// replication — the exact inverse operation of [`downsample_box`]'s 2x2 grouping (each
+/// output pixel takes its enclosing downsampled sample), and deterministic/branch-free
+/// unlike bilinear, which is why it was chosen over a smoother filter (see
+/// `docs/decisions.md`).
+pub fn upsample_nearest(plane: &Plane, width: usize, height: usize) -> Plane {
+    let mut out = vec![0u8; width * height];
+    for y in 0..height {
+        let sy = (y / 2).min(plane.height() - 1);
+        for x in 0..width {
+            let sx = (x / 2).min(plane.width() - 1);
+            out[y * width + x] = plane.get(sx, sy);
+        }
+    }
+    Plane::from_vec(width, height, out)
+}
+
+// ---------------------------------------------------------------------------
+// Independent per-plane quality control
+// ---------------------------------------------------------------------------
+
+/// Encode parameters for a colour image: one [`EncodeParams`] for Y, one shared by both
+/// Cb and Cr (chroma is very commonly coded at a single, looser quality than luma; this
+/// project has no per-Cb/per-Cr use case yet, so one set of params for "chroma" rather
+/// than two independent ones is the least-invasive choice covering the brief's actual
+/// ask — see `docs/decisions.md`).
+#[derive(Debug, Clone)]
+pub struct ColorEncodeParams {
+    pub y: EncodeParams,
+    pub chroma: EncodeParams,
+    pub subsampling: Subsampling,
+}
+
+/// Per-plane stats from a colour encode, for measurement (bpp attribution, evals).
+#[derive(Debug, Clone, Copy)]
+pub struct ColorEncodeStats {
+    pub y_bytes: usize,
+    pub cb_bytes: usize,
+    pub cr_bytes: usize,
+    pub y_evals: u64,
+    pub cb_evals: u64,
+    pub cr_evals: u64,
+}
+
+impl ColorEncodeStats {
+    pub fn total_bytes(&self) -> usize {
+        self.y_bytes + self.cb_bytes + self.cr_bytes
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ColorFormatError {
+    #[error("not a .mars colour container: bad magic")]
+    BadMagic,
+    #[error("unsupported colour container version {0}")]
+    UnsupportedVersion(u8),
+    #[error("container truncated")]
+    Truncated,
+    #[error("unknown colour mode {0}")]
+    UnknownMode(u8),
+    #[error("section table claims {claimed} bytes but only {available} remain")]
+    SectionOutOfBounds { claimed: usize, available: usize },
+    #[error("plane stream error: {0}")]
+    Plane(#[from] MarsFormatError),
+}
+
+const COLOR_MAGIC: [u8; 4] = *b"MARC";
+const COLOR_VERSION: u8 = 0;
+const MODE_GRAY: u8 = 0;
+const MODE_RGB_444: u8 = 1;
+const MODE_RGB_420: u8 = 2;
+
+/// Encode an [`Image`] (gray or RGB) to a colour `.mars` container.
+///
+/// For `Gray` input, `params.y` is used and `params.chroma`/`params.subsampling` are
+/// ignored (there is no chroma to encode) — this keeps a single call site working for
+/// both colour spaces rather than forcing every caller to branch.
+pub fn encode_color_image(img: &Image, params: &ColorEncodeParams) -> (Vec<u8>, ColorEncodeStats) {
+    match img.color() {
+        ColorSpace::Gray => {
+            let (hdr, leaves, evals) = encode_image(&img.planes()[0], &params.y);
+            let bytes = mars_format::write(&hdr, &leaves)
+                .expect("encode_image always produces a header valid for mars_format::write");
+            let y_bytes = bytes.len();
+            let container = write_container(MODE_GRAY, &[bytes]);
+            let stats = ColorEncodeStats {
+                y_bytes,
+                cb_bytes: 0,
+                cr_bytes: 0,
+                y_evals: evals,
+                cb_evals: 0,
+                cr_evals: 0,
+            };
+            (container, stats)
+        }
+        ColorSpace::Rgb => {
+            let [y, cb, cr] = ycbcr(img);
+            let (mode, cb_enc, cr_enc) = match params.subsampling {
+                Subsampling::Yuv444 => (MODE_RGB_444, cb, cr),
+                Subsampling::Yuv420 => (MODE_RGB_420, downsample_box(&cb), downsample_box(&cr)),
+            };
+
+            let (y_hdr, y_leaves, y_evals) = encode_image(&y, &params.y);
+            let (cb_hdr, cb_leaves, cb_evals) = encode_image(&cb_enc, &params.chroma);
+            let (cr_hdr, cr_leaves, cr_evals) = encode_image(&cr_enc, &params.chroma);
+
+            let y_bytes = mars_format::write(&y_hdr, &y_leaves).expect("valid header");
+            let cb_bytes = mars_format::write(&cb_hdr, &cb_leaves).expect("valid header");
+            let cr_bytes = mars_format::write(&cr_hdr, &cr_leaves).expect("valid header");
+
+            let stats = ColorEncodeStats {
+                y_bytes: y_bytes.len(),
+                cb_bytes: cb_bytes.len(),
+                cr_bytes: cr_bytes.len(),
+                y_evals,
+                cb_evals,
+                cr_evals,
+            };
+            let container = write_container(mode, &[y_bytes, cb_bytes, cr_bytes]);
+            (container, stats)
+        }
+    }
+}
+
+/// Decode a colour `.mars` container back to an [`Image`].
+pub fn decode_color_image(data: &[u8], iterations: u32) -> Result<Image, ColorFormatError> {
+    let (mode, streams) = read_container(data)?;
+    match mode {
+        MODE_GRAY => {
+            let (hdr, leaves) = mars_format::read(&streams[0])?;
+            let plane = decode_iterative(&hdr, &leaves, iterations);
+            Ok(Image::gray(plane))
+        }
+        MODE_RGB_444 | MODE_RGB_420 => {
+            let (y_hdr, y_leaves) = mars_format::read(&streams[0])?;
+            let (cb_hdr, cb_leaves) = mars_format::read(&streams[1])?;
+            let (cr_hdr, cr_leaves) = mars_format::read(&streams[2])?;
+
+            let y = decode_iterative(&y_hdr, &y_leaves, iterations);
+            let cb_small = decode_iterative(&cb_hdr, &cb_leaves, iterations);
+            let cr_small = decode_iterative(&cr_hdr, &cr_leaves, iterations);
+
+            let (w, h) = (y.width(), y.height());
+            let (cb, cr) = if mode == MODE_RGB_420 {
+                (
+                    upsample_nearest(&cb_small, w, h),
+                    upsample_nearest(&cr_small, w, h),
+                )
+            } else {
+                (cb_small, cr_small)
+            };
+            Ok(rgb_from_ycbcr(&y, &cb, &cr))
+        }
+        other => Err(ColorFormatError::UnknownMode(other)),
+    }
+}
+
+const COLOR_HEADER_LEN: usize = 4 /* magic */ + 1 /* version */ + 1 /* mode */ + 1 /* section_count */;
+
+fn write_container(mode: u8, streams: &[Vec<u8>]) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(COLOR_HEADER_LEN + streams.iter().map(|s| 4 + s.len()).sum::<usize>());
+    out.extend_from_slice(&COLOR_MAGIC);
+    out.push(COLOR_VERSION);
+    out.push(mode);
+    out.push(streams.len() as u8);
+    for s in streams {
+        out.extend_from_slice(&(u32::try_from(s.len()).expect("stream fits in u32")).to_le_bytes());
+        out.extend_from_slice(s);
+    }
+    out
+}
+
+fn read_container(data: &[u8]) -> Result<(u8, Vec<Vec<u8>>), ColorFormatError> {
+    if data.len() < COLOR_HEADER_LEN {
+        return Err(ColorFormatError::Truncated);
+    }
+    if data[0..4] != COLOR_MAGIC {
+        return Err(ColorFormatError::BadMagic);
+    }
+    let version = data[4];
+    if version != COLOR_VERSION {
+        return Err(ColorFormatError::UnsupportedVersion(version));
+    }
+    let mode = data[5];
+    let section_count = data[6] as usize;
+    let mut offset = COLOR_HEADER_LEN;
+    let mut out = Vec::with_capacity(section_count);
+    for _ in 0..section_count {
+        if offset + 4 > data.len() {
+            return Err(ColorFormatError::Truncated);
+        }
+        let len = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if offset + len > data.len() {
+            return Err(ColorFormatError::SectionOutOfBounds {
+                claimed: len,
+                available: data.len() - offset,
+            });
+        }
+        out.push(data[offset..offset + len].to_vec());
+        offset += len;
+    }
+    Ok((mode, out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mars_core::image::Plane as CorePlane;
+
+    fn gradient_image(w: usize, h: usize) -> Image {
+        let mut r = Vec::with_capacity(w * h);
+        let mut g = Vec::with_capacity(w * h);
+        let mut b = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                r.push(((x * 5) % 256) as u8);
+                g.push(((y * 5) % 256) as u8);
+                b.push((((x + y) * 3) % 256) as u8);
+            }
+        }
+        Image::rgb(
+            CorePlane::from_vec(w, h, r),
+            CorePlane::from_vec(w, h, g),
+            CorePlane::from_vec(w, h, b),
+        )
+    }
+
+    fn params(t_rms: f64) -> EncodeParams {
+        EncodeParams {
+            min_size: 4,
+            max_size: 16,
+            shift: 4,
+            bits_alfa: 4,
+            bits_beta: 7,
+            max_alfa: 1.0,
+            t_rms,
+            zero_threshold: 0,
+        }
+    }
+
+    #[test]
+    fn downsample_upsample_round_trip_dimensions() {
+        let p = CorePlane::from_vec(5, 3, (0..15).map(|v| v as u8).collect());
+        let down = downsample_box(&p);
+        assert_eq!((down.width(), down.height()), (3, 2));
+        let up = upsample_nearest(&down, 5, 3);
+        assert_eq!((up.width(), up.height()), (5, 3));
+    }
+
+    #[test]
+    fn downsample_box_averages_a_flat_block_exactly() {
+        let p = CorePlane::filled(4, 4, 100);
+        let down = downsample_box(&p);
+        assert!(down.as_slice().iter().all(|&v| v == 100));
+    }
+
+    #[test]
+    fn gray_round_trips_through_the_color_container() {
+        let img = Image::gray(CorePlane::from_vec(
+            16,
+            16,
+            (0..256).map(|v| v as u8).collect(),
+        ));
+        let cfg = ColorEncodeParams {
+            y: params(1.0),
+            chroma: params(1.0),
+            subsampling: Subsampling::Yuv444,
+        };
+        let (bytes, _stats) = encode_color_image(&img, &cfg);
+        let decoded = decode_color_image(&bytes, 10).unwrap();
+        assert_eq!(decoded.color(), ColorSpace::Gray);
+        assert_eq!(decoded.width(), 16);
+        assert_eq!(decoded.height(), 16);
+    }
+
+    #[test]
+    fn rgb_444_round_trips_with_reasonable_quality() {
+        let img = gradient_image(64, 64);
+        let cfg = ColorEncodeParams {
+            y: params(4.0),
+            chroma: params(4.0),
+            subsampling: Subsampling::Yuv444,
+        };
+        let (bytes, stats) = encode_color_image(&img, &cfg);
+        let decoded = decode_color_image(&bytes, 10).unwrap();
+        assert_eq!(decoded.color(), ColorSpace::Rgb);
+        assert_eq!((decoded.width(), decoded.height()), (64, 64));
+        assert!(stats.total_bytes() > 0);
+
+        let quality = mars_core::metrics::quality(
+            &img,
+            &decoded,
+            None,
+            &mars_core::metrics::SsimConfig::default(),
+            &mars_core::metrics::MsSsimConfig::default(),
+        );
+        let psnr_y = quality
+            .psnr_y
+            .expect("non-identical images give a finite PSNR");
+        assert!(
+            psnr_y > 20.0,
+            "PSNR-Y {psnr_y} looks too low for a round trip"
+        );
+    }
+
+    #[test]
+    fn rgb_420_round_trips_and_produces_smaller_chroma_streams_than_444() {
+        let img = gradient_image(64, 64);
+        let cfg_444 = ColorEncodeParams {
+            y: params(4.0),
+            chroma: params(4.0),
+            subsampling: Subsampling::Yuv444,
+        };
+        let cfg_420 = ColorEncodeParams {
+            y: params(4.0),
+            chroma: params(4.0),
+            subsampling: Subsampling::Yuv420,
+        };
+        let (bytes_444, stats_444) = encode_color_image(&img, &cfg_444);
+        let (bytes_420, stats_420) = encode_color_image(&img, &cfg_420);
+
+        let decoded_420 = decode_color_image(&bytes_420, 10).unwrap();
+        assert_eq!((decoded_420.width(), decoded_420.height()), (64, 64));
+
+        // 4:2:0's chroma planes are a quarter the pixel count, so at matched t_rms they
+        // should not cost more bits than 4:4:4's chroma -- a very weak sanity check, not
+        // the BD-rate comparison itself (see docs/predictions.md P18.1 for that).
+        assert!(
+            stats_420.cb_bytes + stats_420.cr_bytes <= stats_444.cb_bytes + stats_444.cr_bytes,
+            "420 chroma ({}) should not exceed 444 chroma ({}) at matched t_rms",
+            stats_420.cb_bytes + stats_420.cr_bytes,
+            stats_444.cb_bytes + stats_444.cr_bytes
+        );
+        assert!(
+            bytes_420.len() < bytes_444.len() || stats_420.total_bytes() <= stats_444.total_bytes()
+        );
+    }
+
+    #[test]
+    fn container_rejects_bad_magic() {
+        let err = decode_color_image(&[0u8; 16], 1).unwrap_err();
+        assert!(matches!(err, ColorFormatError::BadMagic));
+    }
+
+    #[test]
+    fn container_rejects_truncated_input() {
+        let err = decode_color_image(b"MARC", 1).unwrap_err();
+        assert!(matches!(err, ColorFormatError::Truncated));
+    }
+}

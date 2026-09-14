@@ -304,6 +304,27 @@ gate-13:
     cargo test -p mars-bench --release --test funnel_gate -- --nocapture
     @echo "gate-13: PASS (scoped to kodim01 -- see docs/predictions.md's Step 13 outcome)"
 
+# Step 18 -- colour (RGB <-> YCbCr, independent per-plane quality control, 4:4:4/4:2:0
+# chroma subsampling, the `MARC` colour container wrapping three independent `.mars` v0
+# streams, `encmars`/`decmars` colour round trips). Built under the §5 dependency-graph
+# reading of Step 18 as concurrent-with-Step-14, NOT the brief's own "Gate D passed" entry
+# condition text -- both readings, and why they conflict, are recorded in
+# `docs/decisions.md` D37, since Gate D has not passed. Checks: `mars_core`'s YCbCr round-
+# trip unit tests, `mars_codec::color`'s own unit tests (container round trip, subsampling
+# dimensions, 4:2:0 chroma <= 4:4:4 chroma at matched t_rms), and `color_gate.rs`'s
+# synthetic-image + (if `corpus/images/kodak/kodim01.png` is present) one real Kodak image
+# round trip through the full encode -> `.mars` -> decode path in both subsampling modes.
+# Does NOT check BD-rate against any anchor -- that measurement (kodim01 only, JPEG only,
+# PSNR-YUV only, and explicitly provisional pending Gate D) lives in
+# `docs/predictions.md`'s Step 18 outcome, run once by hand this session, not wired into a
+# routine gate because a single 4-point/2-mode sweep takes several minutes of exhaustive-
+# encoder wall time -- too slow to run on every gate check.
+gate-18:
+    cargo build --release -p mars-cli
+    cargo test -p mars-core -p mars-codec --release --lib
+    cargo test -p mars-codec --release --test color_gate -- --nocapture
+    @echo "gate-18: PASS (colour pipeline + container round-trip only -- BD-rate vs anchors is a provisional, manually-run, pre-Gate-D measurement; see docs/predictions.md's Step 18 outcome and docs/decisions.md D37/D38)"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval
