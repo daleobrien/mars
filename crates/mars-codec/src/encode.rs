@@ -195,22 +195,17 @@ pub(crate) const AFFINE_GRAD_CLAMP: i32 = 2048;
 //
 // `search`'s domain-position stride is, before this step, a single global constant
 // (`params.shift`) applied everywhere regardless of content. Step 16 varies it per block:
-// a denser stride (more candidate domain positions) where the block's own pixel-domain
-// complexity is high and a better match is more likely to be worth the extra evals, a
-// sparser stride where the block is nearly flat and every nearby domain position fits
-// about equally well. This reuses the *existing* `FIELD_DOM_ROW`/`FIELD_DOM_COL` bitstream
-// fields (only their coded *values* change, not the field vocabulary), which is why this
-// is a materially lower-risk change than Step 15's new leaf modes were against the frozen
-// `RateModels` snapshot (`docs/decisions.md`'s D40): there is no new field type for the
-// snapshot to have zero observations of.
+// originally a denser stride where local complexity was high *and* a sparser one where a
+// block was nearly flat; the denser half was removed by D48's CONTRACT-CHANGE (see
+// `adaptive_shift`'s own doc) because it could produce domain positions off the one,
+// image-wide `hdr.shift` grid `mars_format` can represent, silently corrupting the
+// bitstream. Only the sparser stride remains -- doubling a multiple of `params.shift` is
+// still a multiple of it, so this half stays format-safe. This reuses the *existing*
+// `FIELD_DOM_ROW`/`FIELD_DOM_COL` bitstream fields (only their coded *values* change, not
+// the field vocabulary), which is why this is a materially lower-risk change than Step
+// 15's new leaf modes were against the frozen `RateModels` snapshot (`docs/decisions.md`'s
+// D40): there is no new field type for the snapshot to have zero observations of.
 
-/// Pixel-domain RMS at or above this threshold routes a block to the denser
-/// (half-`params.shift`) search stride. `16.0` sits above `RD_WARMUP_T_RMS` (`8.0`) --
-/// deliberately higher, since this threshold gates *domain-search density*, a strictly
-/// more expensive knob than the warm-up's own leaf-vs-split threshold, and should only
-/// fire for blocks whose own pixel content (not just their eventual fractal-fit residual)
-/// is genuinely busy.
-const DENSITY_HIGH_RMS: f64 = 16.0;
 /// Pixel-domain RMS at or below this threshold routes a block to the sparser
 /// (double-`params.shift`) search stride -- a near-flat block, where doubling the domain
 /// stride costs almost nothing in fit quality (every nearby domain position is itself
@@ -245,15 +240,33 @@ fn block_rms(image: &Plane, row: u32, col: u32, size: u32) -> f64 {
 }
 
 /// Map a block's own [`block_rms`] to a domain-search stride, relative to the run's base
-/// `params.shift`: denser (half, floor 1) above [`DENSITY_HIGH_RMS`], sparser (double)
-/// below [`DENSITY_LOW_RMS`], unchanged in between. Pure function of already-computed
-/// scalars -- no shared state, so calling it from parallel `rayon::join` subtrees
-/// introduces no thread-count dependence (the same determinism argument `crate::rate`'s
-/// module doc makes for the frozen `RateModels` snapshot).
+/// `params.shift`: sparser (double) below [`DENSITY_LOW_RMS`], unchanged otherwise. Pure
+/// function of already-computed scalars -- no shared state, so calling it from parallel
+/// `rayon::join` subtrees introduces no thread-count dependence (the same determinism
+/// argument `crate::rate`'s module doc makes for the frozen `RateModels` snapshot).
+///
+/// **CONTRACT-CHANGE (`docs/decisions.md` D48).** This originally also had a *denser*
+/// branch (`(base_shift / 2).max(1)`) above [`DENSITY_HIGH_RMS`], which is what Step
+/// 16/D43's own "content-adaptive domain-pool **density**" name and measured -6.82%
+/// BD-rate referred to. That branch is removed here, not merely disabled: it produced
+/// domain positions that are not, in general, multiples of `base_shift`, and
+/// `mars_format`'s domain-position encoding (`row_units = leaf.dom_row / hdr.shift`, per
+/// Mars 1's own pinned §4.3 coordinate-field formula -- `crate::ifs::Header::
+/// bits_coord_row`/`bits_coord_col`) can only represent positions on that one, single,
+/// image-wide `shift` grid. Every prior Step 16 test/gate measured quality by decoding
+/// the search's in-memory `Leaf`s directly, never through an actual `mars_format::write`/
+/// `read` round trip, so this silent truncation (up to `base_shift - 1` px of position
+/// error, re-fit against the *wrong* domain content on decode) went undetected until
+/// `encmars-decmars-cli-plan.md`'s CLI-A work exercised the real `.mars` bitstream for the
+/// first time and measured a multi-dB PSNR collapse at CLI scope that the library-level
+/// gate never saw. A real per-leaf finer-grid format extension is out of this fix's scope
+/// (`.mars` v0's coordinate encoding is shared, image-wide, not per-leaf) -- this is the
+/// minimal, always-correct cut: keep the (format-safe, since doubling a multiple of
+/// `base_shift` is still a multiple of it) sparsify-near-flat half of the mechanism, drop
+/// the densify-near-complex half entirely, and re-measure rather than reuse D43's stale
+/// number (see D48 for the corrected numbers).
 fn adaptive_shift(base_shift: u32, rms: f64) -> u32 {
-    if rms >= DENSITY_HIGH_RMS {
-        (base_shift / 2).max(1)
-    } else if rms <= DENSITY_LOW_RMS {
+    if rms <= DENSITY_LOW_RMS {
         base_shift.saturating_mul(2)
     } else {
         base_shift
@@ -1752,15 +1765,18 @@ mod tests {
 
     // ------------------------------------------------------------------------ Step 16
 
-    /// [`adaptive_shift`]'s three-way routing, checked directly rather than only through
-    /// an end-to-end encode -- a cheap, exact-equality oracle for the density-selection
-    /// logic itself.
+    /// [`adaptive_shift`]'s two-way routing, checked directly rather than only through an
+    /// end-to-end encode -- a cheap, exact-equality oracle for the density-selection logic
+    /// itself. D48's CONTRACT-CHANGE removed the high-RMS "densify" branch (it could
+    /// produce domain positions off `mars_format`'s single `hdr.shift` grid); this test
+    /// now covers only the surviving sparsify/unchanged routing, plus the explicit
+    /// regression check that high RMS no longer changes the stride at all.
     #[test]
-    fn adaptive_shift_routes_high_low_and_mid_rms_correctly() {
+    fn adaptive_shift_routes_low_rms_and_leaves_everything_else_unchanged() {
         assert_eq!(
             adaptive_shift(4, 20.0),
-            2,
-            "high RMS should halve the base shift"
+            4,
+            "high RMS no longer densifies (D48 CONTRACT-CHANGE) -- stays at the base shift"
         );
         assert_eq!(
             adaptive_shift(4, 2.0),
@@ -1771,11 +1787,6 @@ mod tests {
             adaptive_shift(4, 10.0),
             4,
             "mid RMS should leave the base shift unchanged"
-        );
-        assert_eq!(
-            adaptive_shift(1, 20.0),
-            1,
-            "halved shift is floored at 1, never 0"
         );
     }
 
@@ -1797,24 +1808,93 @@ mod tests {
         );
     }
 
-    /// Step 16's own A/B: `adaptive_density: true` must actually change the domain
-    /// positions searched (and hence, generically, the resulting leaves) relative to
-    /// `false` on an image with genuinely non-uniform local complexity -- otherwise the
-    /// density knob would be wired in but inert. Not a BD-rate claim, just a harness-
-    /// sanity check that the feature does something observable.
+    /// Step 16's own A/B, rescoped by D48's CONTRACT-CHANGE: after removing the densify
+    /// branch (see `adaptive_shift`'s doc), the only surviving mechanism is the sparsify
+    /// branch, which halves the number of domain candidates `search_with_shift` tries on
+    /// a low-RMS block -- but a near-flat block's *final* mode/leaf choice is essentially
+    /// always mode 0 (flat) regardless of which domain candidates were considered (§8.1's
+    /// override; a domain reference is never cheaper than a flat DC leaf when there is
+    /// nothing worth matching), so this A/B can no longer show up as a *leaf-content*
+    /// difference the way it could before D48 (that was entirely the now-removed densify
+    /// branch's doing, confirmed by the fact that this test used to fail exactly this way
+    /// once densify was removed -- see D48's own writeup for the diagnostic trail). It
+    /// still shows up as an **eval-count** difference: a genuinely low-RMS image should
+    /// spend measurably fewer domain-search evals under `adaptive_density: true`, since
+    /// every block is routed to the doubled stride. Not a BD-rate claim, just a
+    /// harness-sanity check that the surviving mechanism does something observable.
     #[test]
-    fn adaptive_density_changes_the_partition_on_a_mixed_complexity_image() {
+    fn adaptive_density_reduces_evals_on_a_uniformly_low_rms_image() {
+        // A whole-image gentle gradient, RMS well under DENSITY_LOW_RMS (4.0) everywhere,
+        // so every block routes to the sparsify branch under `adaptive_density: true`.
+        let (w, h) = (64usize, 64usize);
+        let mut data = vec![0u8; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                data[r * w + c] = (100 + (r + c) % 5) as u8;
+            }
+        }
+        let image = Plane::from_vec(w, h, data);
+        let params = rd_params(200.0);
+        let (_hdr, _base_leaves, base_evals, _stats) =
+            encode_image_rd_with_modes_and_density(&image, &params, [true; 4], false);
+        let (_hdr, _adaptive_leaves, adaptive_evals, _stats) =
+            encode_image_rd_with_modes_and_density(&image, &params, [true; 4], true);
+        assert!(
+            adaptive_evals < base_evals,
+            "adaptive density's surviving sparsify branch should spend fewer evals on a \
+             uniformly low-RMS image (base={base_evals}, adaptive={adaptive_evals})"
+        );
+    }
+
+    /// **Regression test for a real bug found during `encmars-decmars-cli-plan.md`'s
+    /// CLI-A work (`docs/decisions.md` D48).** `mars_format`'s domain-position encoding
+    /// (`row_units = leaf.dom_row / hdr.shift`, per Mars 1's own pinned §4.3 formula) can
+    /// only represent domain positions that are exact multiples of the header's single,
+    /// image-wide `shift`. Step 16's density-search stride (`adaptive_shift`) used to be
+    /// able to return `params.shift / 2` for high-RMS blocks -- a stride whose resulting
+    /// `dom_row`/`dom_col` are *not* generally multiples of `params.shift`, which
+    /// `mars_format::write`'s integer division then silently truncated (up to
+    /// `params.shift - 1` pixels of position error), corrupting the leaf's actual
+    /// reconstructed content on decode without ever erroring. This was invisible to every
+    /// prior Step 16 test/gate because none of them round-tripped through
+    /// `mars_format::write`/`read` before measuring quality -- they all decoded the
+    /// original in-memory `Leaf`s directly. D48 fixed this by capping `adaptive_shift` at
+    /// `params.shift` (never finer), so every domain position the search can produce
+    /// remains representable exactly; this test is the permanent guard against a future
+    /// change reintroducing a finer-than-`shift` stride.
+    #[test]
+    fn adaptive_density_domain_positions_stay_on_the_hdr_shift_grid() {
         let image = half_flat_half_noisy_image(64, 64);
         let params = rd_params(200.0);
-        let (_hdr, base_leaves, _evals, _stats) =
-            encode_image_rd_with_modes_and_density(&image, &params, [true; 4], false);
-        let (_hdr, adaptive_leaves, _evals, _stats) =
+        let (hdr, leaves, _evals, _stats) =
             encode_image_rd_with_modes_and_density(&image, &params, [true; 4], true);
-        assert_ne!(
-            base_leaves, adaptive_leaves,
-            "adaptive density should change at least one leaf's chosen domain/partition \
-             on an image with genuinely non-uniform local complexity"
-        );
+        for leaf in &leaves {
+            if leaf.qalfa == 0 {
+                continue; // modes 0/1 carry no domain reference (dom_row/dom_col are 0).
+            }
+            assert_eq!(
+                leaf.dom_row % hdr.shift,
+                0,
+                "leaf at ({},{},{}) has dom_row {} not aligned to hdr.shift {} -- would be \
+                 silently truncated by mars_format's row_units = dom_row / hdr.shift",
+                leaf.row,
+                leaf.col,
+                leaf.size,
+                leaf.dom_row,
+                hdr.shift
+            );
+            assert_eq!(
+                leaf.dom_col % hdr.shift,
+                0,
+                "leaf at ({},{},{}) has dom_col {} not aligned to hdr.shift {} -- would be \
+                 silently truncated by mars_format's col_units = dom_col / hdr.shift",
+                leaf.row,
+                leaf.col,
+                leaf.size,
+                leaf.dom_col,
+                hdr.shift
+            );
+        }
     }
 
     /// Step 12/14's determinism discipline, extended to Step 16's new density path:

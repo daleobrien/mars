@@ -31,8 +31,10 @@ use mars_core::image::{ColorSpace, Image};
 use mars_core::metrics::{rgb_from_ycbcr, ycbcr};
 use mars_core::Plane;
 
-use crate::encode::{encode_image, EncodeParams};
-use crate::ifs::{decode_iterative, decode_step, decode_until_stable, max_pixel_delta, zoom_leaves};
+use crate::encode::{encode_image_rd_with_modes_and_density, EncodeParams};
+use crate::ifs::{
+    decode_iterative, decode_step, decode_until_stable, max_pixel_delta, zoom_leaves,
+};
 use crate::mars_format::{self, MarsFormatError};
 
 // ---------------------------------------------------------------------------
@@ -104,6 +106,11 @@ pub struct ColorEncodeParams {
     pub y: EncodeParams,
     pub chroma: EncodeParams,
     pub subsampling: Subsampling,
+    /// Step 16's content-adaptive domain-pool density (`docs/decisions.md` D43, measured
+    /// -6.82% mean BD-rate on kodim01/kodim02). Applies to every plane (Y, Cb, Cr alike) --
+    /// a codec-wide encode choice, not a luma/chroma-specific one like `t_rms`. `false`
+    /// (the default) reproduces every pre-Step-16 caller's behaviour byte-for-byte.
+    pub adaptive_density: bool,
 }
 
 /// Per-plane stats from a colour encode, for measurement (bpp attribution, evals).
@@ -153,7 +160,12 @@ const MODE_RGB_420: u8 = 2;
 pub fn encode_color_image(img: &Image, params: &ColorEncodeParams) -> (Vec<u8>, ColorEncodeStats) {
     match img.color() {
         ColorSpace::Gray => {
-            let (hdr, leaves, evals) = encode_image(&img.planes()[0], &params.y);
+            let (hdr, leaves, evals, _stats) = encode_image_rd_with_modes_and_density(
+                &img.planes()[0],
+                &params.y,
+                [true; 4],
+                params.adaptive_density,
+            );
             let bytes = mars_format::write(&hdr, &leaves)
                 .expect("encode_image always produces a header valid for mars_format::write");
             let y_bytes = bytes.len();
@@ -175,9 +187,24 @@ pub fn encode_color_image(img: &Image, params: &ColorEncodeParams) -> (Vec<u8>, 
                 Subsampling::Yuv420 => (MODE_RGB_420, downsample_box(&cb), downsample_box(&cr)),
             };
 
-            let (y_hdr, y_leaves, y_evals) = encode_image(&y, &params.y);
-            let (cb_hdr, cb_leaves, cb_evals) = encode_image(&cb_enc, &params.chroma);
-            let (cr_hdr, cr_leaves, cr_evals) = encode_image(&cr_enc, &params.chroma);
+            let (y_hdr, y_leaves, y_evals, _) = encode_image_rd_with_modes_and_density(
+                &y,
+                &params.y,
+                [true; 4],
+                params.adaptive_density,
+            );
+            let (cb_hdr, cb_leaves, cb_evals, _) = encode_image_rd_with_modes_and_density(
+                &cb_enc,
+                &params.chroma,
+                [true; 4],
+                params.adaptive_density,
+            );
+            let (cr_hdr, cr_leaves, cr_evals, _) = encode_image_rd_with_modes_and_density(
+                &cr_enc,
+                &params.chroma,
+                [true; 4],
+                params.adaptive_density,
+            );
 
             let y_bytes = mars_format::write(&y_hdr, &y_leaves).expect("valid header");
             let cb_bytes = mars_format::write(&cb_hdr, &cb_leaves).expect("valid header");
@@ -538,6 +565,7 @@ mod tests {
             y: params(1.0),
             chroma: params(1.0),
             subsampling: Subsampling::Yuv444,
+            adaptive_density: false,
         };
         let (bytes, _stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -553,6 +581,7 @@ mod tests {
             y: params(4.0),
             chroma: params(4.0),
             subsampling: Subsampling::Yuv444,
+            adaptive_density: false,
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -583,11 +612,13 @@ mod tests {
             y: params(4.0),
             chroma: params(4.0),
             subsampling: Subsampling::Yuv444,
+            adaptive_density: false,
         };
         let cfg_420 = ColorEncodeParams {
             y: params(4.0),
             chroma: params(4.0),
             subsampling: Subsampling::Yuv420,
+            adaptive_density: false,
         };
         let (bytes_444, stats_444) = encode_color_image(&img, &cfg_444);
         let (bytes_420, stats_420) = encode_color_image(&img, &cfg_420);

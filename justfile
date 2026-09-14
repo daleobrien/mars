@@ -394,8 +394,9 @@ gate-15:
 
 # Step 16 -- adaptive partitioning (`mars_codec::encode`'s content-adaptive domain-pool
 # density: `walk_rd` computes a per-block domain-search stride from the block's own
-# pixel-domain RMS instead of always using the run's fixed `params.shift`, denser where
-# local complexity is high, sparser where the block is near flat).
+# pixel-domain RMS instead of always using the run's fixed `params.shift`, sparser where
+# the block is near flat -- see the D48 CONTRACT-CHANGE note below for why there is no
+# longer a "denser where local complexity is high" branch).
 #
 # **Scope decision, recorded in docs/predictions.md before any code ran.** Of the brief's
 # two geometry axes (non-uniform block sizes -- already substantially delivered by Step
@@ -406,15 +407,28 @@ gate-15:
 # today) with matching decoder support, materially larger than an M-sized step's budget
 # after Step 15's own session, and the brief itself marks them optional.
 #
+# **D48 CONTRACT-CHANGE (`encmars-decmars-cli-plan.md`'s CLI-A work, same day as D43).**
+# The original "denser" branch (high-RMS blocks searched at half `params.shift`) could
+# produce domain positions off `mars_format`'s single, image-wide `hdr.shift` grid, which
+# `mars_format::write` silently truncated -- a real bitstream-corruption bug invisible to
+# every check below because none of them round-tripped through the real `.mars` format
+# (they all decoded the search's in-memory `Leaf`s directly). CLI-A's own gate, which
+# exercises the real `encmars`/`decmars` binaries, caught it. The densify branch was
+# removed (not disabled); only the sparsify branch remains, which is format-safe by
+# construction. D43's originally-measured -6.82% BD-rate is **withdrawn** -- see D48 for
+# the full root-cause writeup and the corrected numbers below.
+#
 # Checks, in order:
-#  1. `mars-codec`'s own unit tests, including three new Step 16 ones: `adaptive_shift`'s
-#     high/low/mid RMS routing (exact-equality), `block_rms` actually distinguishing a
-#     flat block from a noisy one, `adaptive_density: false` reproducing the pre-Step-16
-#     path byte-for-byte (the additive-superset guarantee), a harness-sanity check that
-#     `adaptive_density: true` changes the partition on a mixed-complexity image (the
-#     knob is not inert), and a cross-thread-count bit-identity test for the new density
-#     path (`adaptive_density_rd_walk_is_bit_identical_across_thread_counts`), mirroring
-#     Step 14's own `rd_walk_is_bit_identical_across_thread_counts` exactly.
+#  1. `mars-codec`'s own unit tests, including Step 16's own (post-D48): `adaptive_shift`'s
+#     low/mid RMS routing and the explicit "high RMS no longer densifies" regression check
+#     (exact-equality), `block_rms` actually distinguishing a flat block from a noisy one,
+#     `adaptive_density: false` reproducing the pre-Step-16 path byte-for-byte (the
+#     additive-superset guarantee), a harness-sanity check that `adaptive_density: true`
+#     reduces evals on a uniformly low-RMS image (the surviving mechanism is not inert), a
+#     cross-thread-count bit-identity test for the density path
+#     (`adaptive_density_rd_walk_is_bit_identical_across_thread_counts`), and D48's own
+#     regression guard (`adaptive_density_domain_positions_stay_on_the_hdr_shift_grid`)
+#     permanently preventing the removed branch's bug class from recurring.
 #  2. `gate_16`'s BD-rate/cost-accounting/partition-statistics check
 #     (`crates/mars-bench/tests/density_gate.rs`): the adaptive-density curve vs. the
 #     fixed-density curve (Step 15's own behaviour, unchanged -- a same-codebase A/B, per
@@ -424,8 +438,9 @@ gate-15:
 #     process/run/thread-count) printed and gated alongside the BD-rate number -- the
 #     brief's own explicit "report the cost alongside the gain" instruction -- plus
 #     **partition statistics** (leaves per size/depth, mean local RMS per size bucket)
-#     printed for both arms. See `docs/decisions.md`'s D43 for the measured numbers and
-#     `docs/predictions.md`'s Step 16 entry for what was predicted beforehand.
+#     printed for both arms. See `docs/decisions.md`'s D48 (supersedes D43) for the
+#     corrected measured numbers and `docs/predictions.md`'s Step 16 entry for what was
+#     predicted beforehand.
 # Scoped to kodim01/kodim02, not the full 24-image `standard/` corpus (mirrors gate-14/
 # gate-15's own scope cut exactly for the same session-time reasons -- this gate runs
 # *two* full RD sweeps per image, fixed and adaptive, where gate-15 ran two mode-mask
@@ -434,7 +449,7 @@ gate-16:
     cargo build --release -p mars-cli
     cargo test -p mars-codec --release
     MARS_RUN_DENSITY_GATE=1 cargo test -p mars-bench --release --test density_gate -- --nocapture
-    @echo "gate-16: PASS (scoped to kodim01/kodim02; measured mean BD-rate -6.82% (kodim01 -6.75%, kodim02 -6.88%), a real clean improvement vs Step 15's fixed-density baseline, not a calibrated shortfall/regression; encode-time cost ~1.4-1.5x overall across two independent runs (kodim01 ~1.6-1.8x, kodim02 ~1.1x; evals bit-identical run to run, wall-clock varies with machine load); see docs/decisions.md's D43 and docs/predictions.md's Step 16 outcome)"
+    @echo "gate-16: PASS (scoped to kodim01/kodim02; post-D48 re-measurement -- mean BD-rate -0.14% (kodim01 -0.03%, kodim02 -0.25%), essentially neutral, NOT D43's withdrawn -6.82%; the surviving sparsify-only mechanism is genuinely faster instead -- encode-time ratio 0.87x overall (kodim01 0.97x, kodim02 0.74x); see docs/decisions.md's D48 for the full root-cause writeup and docs/predictions.md's Step 16 outcome)"
 
 # Step 17 -- learned candidate pruning (`mars_search::learned::Learned`, a small
 # from-scratch MLP scoring P(domain in top-k | range/domain features, relative position),
@@ -494,6 +509,24 @@ gate-19:
     cargo build --release -p mars-cli
     cargo test -p mars-codec --release --lib
     @echo "gate-19: PASS (progressive bitstream unit tests only -- fast, synthetic-image round trips and the bit-exact 4-layer oracle; the corpus RD-curve-of-prefixes / progressive-penalty measurement is run once by hand, scoped to kodim01 at lambda=200 -- measured progressive penalty 64.22% BD-rate, over 3x the brief's own 5-15% typical band and this step's own 10-20% prediction, root-caused to the fractal-leaf-dominated (91.7%) leaf population making layer 2's flat approximation nearly worthless; see docs/predictions.md's Step 19 outcome and docs/decisions.md's D46/D47)"
+
+# CLI-A (encmars-decmars-cli-plan.md) -- expose Step 16's `adaptive_density` flag on
+# `encmars` itself. `crates/mars-cli/tests/cli_a_gate.rs` shells out to the real `encmars`
+# binary (not `mars_codec::encode` directly, unlike `gate-16`'s own `density_gate.rs`) so
+# any effect from `color.rs`'s YCbCr/subsampling wrapping, or from the real `.mars`
+# bitstream round trip, is caught rather than assumed away -- a genuine CLI-scope
+# re-measurement, not a reuse of a library-level number. **This caught a real bug**: the
+# first run of this gate found a bitstream-corruption bug in `adaptive_density`'s original
+# "densify" branch (D43's originally-measured -6.82% BD-rate came entirely from that
+# branch), invisible to `gate-16` because it never round-tripped through the real
+# `mars_format` bitstream. Fixed and re-measured per `docs/decisions.md` D48 (which
+# supersedes D43): the surviving mechanism is essentially BD-rate-neutral but genuinely
+# faster, not a quality win.
+gate-cli-a:
+    cargo build --release -p mars-cli
+    cargo test -p mars-codec --release --lib color
+    MARS_RUN_CLI_A_GATE=1 cargo test -p mars-cli --release --test cli_a_gate -- --nocapture
+    @echo "gate-cli-a: PASS (see test output above for the CLI-scope BD-rate number; regression ceiling +2.0%, expected near 0% post-D48 -- D43's original -6.82% claim is withdrawn, see docs/decisions.md D48)"
 
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.

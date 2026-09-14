@@ -2467,6 +2467,17 @@ recorded as a complete, honest step closure, not a deferred or partially-resolve
 
 ## D43 · 2026-09-15 · Step 16's content-adaptive domain-pool density: a genuine, clean BD-rate improvement (-6.82% mean), breaking rather than extending the three-consecutive-calibrated-gate pattern D40 flagged
 
+**Superseded by D48 (`encmars-decmars-cli-plan.md`'s CLI-A work, same day).** The -6.82%
+number below came entirely from a branch (`adaptive_shift`'s high-RMS "densify" case) that
+D48 found to silently corrupt the bitstream whenever it fired, and removed. **D43 is kept
+unmodified as the historical record** (mirroring D40/D41/D42's own precedent for the same
+reason) rather than rewritten — the measurement and the reasoning below were both real,
+correctly performed given what this entry's own gate checked at the time; the bug was in
+what the gate *didn't* check (a real bitstream round trip), not in the BD-rate arithmetic
+itself. Do not cite -6.82%, "1.42x", or "kodim01 -6.75%/kodim02 -6.88%" as current; see D48
+for the corrected, re-measured numbers (mean -0.14%, i.e. essentially neutral) and the full
+root-cause writeup.
+
 **Context.** Step 16 (R&D plan §5) replaces fixed quadtree geometry with content-adaptive
 structure. Per `docs/predictions.md`'s Step 16 prediction (written before any code ran),
 the brief's two geometry axes were scoped down to one: content-adaptive domain-pool
@@ -3012,3 +3023,140 @@ number; see the reasoning above for why there is nothing to widen.
 produces a smaller penalty at operating points with more flat/affine leaves, or on other
 images, is untested this session (`docs/predictions.md`'s Step 19 outcomes entry states
 this as the explicit remaining gap).
+
+---
+
+## D48 · 2026-09-15 · CLI-A (`encmars-decmars-cli-plan.md`) found a real bitstream-corruption bug in Step 16's `adaptive_density`, invisible to `gate-16` because it never round-tripped through `mars_format`; fixed by a CONTRACT-CHANGE that drops the densify branch and re-measures at essentially neutral BD-rate
+
+**Context.** `encmars-decmars-cli-plan.md`'s CLI-A item exposes Step 16's `adaptive_density`
+flag (D43) as `encmars --adaptive-density`, with an explicit exit criterion: a **CLI-scope
+re-measurement** of D43's -6.82% BD-rate number, not a reuse of it, because the CLI path
+threads through the real `encmars` binary and the real `.mars` container in a way D43's own
+gate (`crates/mars-bench/tests/density_gate.rs`) never did. The plan's own abort-rule text
+anticipated this measurement might disagree with D43's and said to document it, "not a
+reason to drop the flag" — written expecting a modest measurement discrepancy, not what was
+actually found.
+
+**What the CLI-scope gate found.** `crates/mars-cli/tests/cli_a_gate.rs`, run for real
+against the `encmars` binary on kodim01/kodim02 at the same 4-point λ grid D43 used,
+measured a catastrophic quality collapse specific to the adaptive arm at low λ: kodim01 at
+λ=50, fixed density gave PSNR 29.279 dB at bpp 1.208; adaptive density, at essentially the
+same bpp (1.182), gave PSNR **22.165 dB** — a 7 dB collapse, not a small discrepancy.
+BD-rate came out **+184.63%** (a severe regression, not D43's -6.82% improvement).
+
+**Root-cause investigation, in order:**
+1. First suspicion: a parameter mismatch (`encmars`'s CLI default `t_rms = 8.0` vs.
+   `density_gate.rs`'s own `BASE.t_rms = 0.0`, which `--lambda`'s own doc says still seeds
+   the rate-estimation warm-up pass even when it no longer drives the split decision).
+   Fixed the gate to pass `--t-rms 0` explicitly and re-ran. **Identical bytes, identical
+   evals, identical collapse** — ruled out. This was a real fix to make regardless (an
+   honest CLI-scope re-measurement needs matched parameters), just not the cause.
+2. Direct control: re-ran `gate-16`'s own library-level test fresh, same session, same
+   machine. It reproduced D43's original numbers exactly (mean BD-rate -6.82%, kodim01
+   adaptive PSNR at λ=50: **29.629 dB**) — bpp and evals matched the CLI run almost exactly
+   (same leaves, same search), but PSNR did not (29.629 vs. the CLI gate's 22.165). Since
+   the *encode* was producing the same bitstream size/evals either way, the divergence had
+   to be in how quality was being measured, not in the encoder.
+3. The actual difference: `density_gate.rs`'s `sample_with_density` writes bytes only to
+   measure file size, but computes PSNR by calling `decode_iterative` on the search's
+   *original in-memory* `Leaf`s — it never reads those leaves back from the bytes it wrote.
+   The CLI-scope gate, correctly exercising what `encmars`/`decmars` users actually do,
+   decodes the *real serialized bytes*. Those differ whenever serialization is lossy.
+4. `mars_format`'s domain-position encoding (`crates/mars-codec/src/mars_format.rs`) codes
+   each domain-referencing leaf's position as `row_units = leaf.dom_row / hdr.shift` (plain
+   integer division) on write, and reconstructs `dom_row = hdr.shift * row_units` on read —
+   per Mars 1's own pinned §4.3 coordinate-field formula (`crate::ifs::Header::
+   bits_coord_row`/`bits_coord_col`), which assumes every domain position in the image is
+   an exact multiple of the header's single, global `shift`. Step 16's `adaptive_shift`
+   could return `params.shift / 2` for high-RMS blocks (the "densify" branch) — a stride
+   whose resulting `dom_row`/`dom_col` are, in general, *not* multiples of `params.shift`.
+   `mars_format::write`'s integer division then silently truncates such a position (up to
+   `params.shift - 1` px of error) with no error, and the decoder reconstructs the *wrong*
+   domain content at that position — a genuine, silent bitstream-corruption bug, confirmed
+   directly by a new regression test
+   (`encode::tests::adaptive_density_domain_positions_stay_on_the_hdr_shift_grid`, added
+   first and confirmed failing against the pre-fix code before the fix was written).
+
+**Why every prior Step 16 check missed this.** `gate-16`'s own gate, the
+`adaptive_density_rd_walk_is_bit_identical_across_thread_counts` determinism test, and the
+`adaptive_density_false_is_byte_identical_to_the_pre_step16_path` additive-superset test
+all compare in-memory `Leaf` values or `mars_format::write` byte output directly — none of
+them decode from a `mars_format::read` of those bytes. The bug is invisible unless you
+write, then read back, then decode — exactly the one thing `encmars`/`decmars` always do
+and `gate-16` never did. This is the concrete instance `encmars-decmars-cli-plan.md`'s own
+opening framing predicted in the abstract ("capability that is built, tested ... is
+unreachable from the command line" as a plumbing gap) turning out to also be a **testing**
+gap: the CLI path is a strictly more faithful oracle than the library gate for anything
+touching serialization.
+
+**CONTRACT-CHANGE: `adaptive_shift`'s densify branch is removed, not merely disabled.**
+A real per-leaf fine-grid format extension (e.g. a bit indicating a leaf's domain position
+is in `hdr.shift / 2` units) would preserve the densify mechanism correctly, but is a
+`.mars` v0 bitstream-format change — genuinely new codec/format design work, out of scope
+for `encmars-decmars-cli-plan.md` (explicitly "not a codec problem ... a plumbing gap")
+and for a same-day hotfix. The minimal, always-correct fix instead caps `adaptive_shift` at
+`params.shift` (`crates/mars-codec/src/encode.rs`): the densify branch (`(base_shift /
+2).max(1)` above `DENSITY_HIGH_RMS`) is deleted outright, along with the now-dead
+`DENSITY_HIGH_RMS` constant; only the sparsify branch (double `params.shift` below
+`DENSITY_LOW_RMS`) survives, which is format-safe by construction (doubling a multiple of
+`params.shift` is still a multiple of it). `encode::tests::
+adaptive_shift_routes_high_low_and_mid_rms_correctly` (which asserted the old halving
+behaviour) was replaced with `adaptive_shift_routes_low_rms_and_leaves_everything_else_
+unchanged`, which asserts high RMS now leaves the stride unchanged. `encode::tests::
+adaptive_density_changes_the_partition_on_a_mixed_complexity_image` (which asserted the
+adaptive arm produces different *leaves* on a flat-vs-noisy image) was replaced with
+`adaptive_density_reduces_evals_on_a_uniformly_low_rms_image`, because the removed densify
+branch was the only thing that test's specific fixture ever actually exercised — the
+surviving sparsify branch on a near-flat block almost never changes the *final* leaf choice
+(§8.1's override means mode 0 wins regardless of which domain candidates were searched), so
+the observable effect is fewer evals, not a different partition.
+
+**Re-measured result: essentially BD-rate-neutral, but genuinely faster, not the claimed
+-6.82% win.** `gate-16` re-run after the fix, same corpus/grid:
+
+| image | BD-rate (adaptive vs. fixed density) | encode-time ratio |
+|---|---|---|
+| kodim01 | **-0.03%** | 0.97x |
+| kodim02 | **-0.25%** | 0.74x |
+| mean | **-0.14%** | 0.87x (overall) |
+
+A near-flat block's winning mode is almost always mode 0 regardless of domain-search
+stride, so halving-then-un-halving the candidate count (the removed branch) was where
+essentially all of D43's -6.82% came from; the surviving sparsify-only mechanism changes
+which domain gets matched on low-RMS blocks just rarely enough that the aggregate BD-rate
+effect is noise-level. What *did* survive cleanly: real eval/wall-clock savings (fewer
+domain candidates tried on low-RMS blocks, no denser-branch blocks paying extra) — encode
+time dropped to 0.87x overall (0.74x on kodim02), the inverse of D43's original 1.42x
+*slower* number, which was entirely the removed branch's extra search cost. `gate-16`'s own
+bars were updated to match: `BD_RATE_CEILING_PCT` changed from an improvement floor
+(-3.0%) to a regression ceiling (+2.0%, since there is no improvement left to floor), and
+`MAX_ENCODE_TIME_RATIO` tightened from 3.0x to 1.2x (there is real margin above the
+measured 0.97x worst case, and the mechanism is now expected to be faster, not slower).
+CLI-A's own gate (`crates/mars-cli/tests/cli_a_gate.rs`) and `encmars --adaptive-density`'s
+`--help` text were updated to describe the corrected behaviour honestly (an eval/wall-clock
+optimisation with negligible BD-rate effect, not a quality win), rather than continuing to
+advertise -6.82%.
+
+**What this means for CLI-A's own deliverable.** The flag ships — it is real, it does not
+corrupt output any more, and it does save real encode time on low-complexity images — but
+CLI-A's original premise ("the feature is built, tested ... and already has a measured
+-6.82% BD-rate number on record", making CLI-A "the highest-value, lowest-risk item") is
+false as stated. The correct framing, now: `--adaptive-density` is a real, correctness-
+verified, modest-eval-savings flag, not a BD-rate win, and users should not reach for it
+expecting the withdrawn -6.82% number.
+
+**Tolerance impact.** `gate-16`'s two bars were both changed, per the CONTRACT-CHANGE
+discipline above (recorded here, not silently loosened): from an improvement floor to a
+regression ceiling (BD-rate) and tightened, not widened (encode-time ratio, 3.0x → 1.2x,
+since the mechanism is now faster rather than slower). Two new unit tests were added
+(the shift-alignment regression guard, and the eval-count sanity check replacing the
+leaf-content one); two existing unit tests were updated to match the new, narrower
+`adaptive_shift` contract, not weakened.
+
+**Scope note.** This fix is scoped to what correctness requires (cap the stride at
+`params.shift`) and re-measurement of exactly what changed (`gate-16`, CLI-A's own gate).
+A real fine-grained-domain-position format extension that could recover some or all of the
+withdrawn -6.82% remains open, unattempted, out of scope for this session, and not
+tracked as a numbered step of any plan this project currently has — if it is wanted, it
+needs its own scoped step (a `.mars` format-version bump, decoder support, and a fresh
+BD-rate measurement of its own).

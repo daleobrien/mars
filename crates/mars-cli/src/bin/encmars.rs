@@ -95,6 +95,18 @@ struct Cli {
     /// Height for headerless raw input.
     #[arg(long)]
     raw_height: Option<usize>,
+
+    /// Step 16's content-adaptive domain-pool density: search a sparser domain-pool
+    /// stride where a block's local pixel-domain RMS is low (near-flat), instead of
+    /// always using the run's fixed `--shift`. An eval/wall-clock optimisation, not a
+    /// quality knob: measured essentially BD-rate-neutral (mean -0.14% on kodim01/
+    /// kodim02) but genuinely faster (~0.87x encode time) -- `docs/decisions.md` D48,
+    /// which also documents why an earlier "denser where RMS is high" branch was removed
+    /// (it could corrupt the bitstream; D43's originally-claimed -6.82% BD-rate number is
+    /// withdrawn, see D48). Default off, matching every `encmars` invocation before this
+    /// flag existed -- byte-identical output either way when omitted.
+    #[arg(long, default_value_t = false)]
+    adaptive_density: bool,
 }
 
 fn main() -> Result<()> {
@@ -134,6 +146,7 @@ fn main() -> Result<()> {
         y: base,
         chroma,
         subsampling: cli.subsampling.into(),
+        adaptive_density: cli.adaptive_density,
     };
 
     let (width, height) = (image.width(), image.height());
