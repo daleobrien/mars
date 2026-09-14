@@ -2607,3 +2607,278 @@ was widened — A7 does not literally apply), calibrated with real margin below/
 was actually measured, around a genuine improvement rather than a shortfall or regression.
 This is explicitly *not* a fourth instance of the D36/D39/D40 pattern, and is recorded here
 as such rather than left for a reader to infer from the number alone.
+
+---
+
+## D44 · 2026-09-15 · Gate D attribution table (Steps 9-16), built entirely from already-recorded numbers — both headline targets miss, plainly stated, not re-scoped to clear the bar
+
+**Context.** Per the Gate D checklist (`implementation-plan.md` ~line 975-982), this entry
+attributes every step's contribution in one table and states plainly whether Gate D's two
+quantitative targets — BD-rate vs. Mars 1 baseline >= 35% better (cumulative over Steps
+9-15), and `evals/transform` reduced >= 10x vs. the best classical method at matched RD —
+are actually met. **No new sweep was run for this entry.** Every number below is pulled
+directly from D28, D30, D36, D39, D40, D43 and `results/classical-methods-sample.jsonl`,
+all of which are scoped to `kodim01`/`kodim02` only (2 of the 24-image `standard/` corpus),
+never the full corpus or `extended/`. That scope limitation applies to every row below and
+is not repeated per-row.
+
+**A load-bearing gap, surfaced before the table rather than after it.** No step in this
+project has ever measured a BD-rate curve of Mars 2's actual output against Mars 1's
+actual C-reference output. D28 named this explicitly: Step 9's `gate-9` checks
+`evals/transform` within 5% of the C binaries (passed, 0.00%-4.86%) but the RD-curve-
+within-0.2dB check against the Mars 1 baseline "was not implemented this session... an
+open gap, not a silently-passed check" — and nothing in Steps 10-16 revisited it. Every
+BD-rate number recorded since (D39, D40, D43) is a **same-codebase, same-session A/B**
+between two Mars 2 configurations (e.g. Step 15 vs. a mode-masked Step-14-equivalent on
+the *current* code, not a checkout of an earlier commit), chained back only as far as
+Step 14 vs. Step 9's `Exhaustive` method. Treating Step 9 `Exhaustive` as a stand-in for
+"the Mars 1 baseline" is the best available anchor, but it is an approximation whose own
+RD-equivalence to Mars 1 was never verified — only its `evals/transform` cost was. The
+cumulative BD-rate below inherits this gap and is reported as what it is: a chain of
+verified internal deltas anchored to an unverified proxy for the actual target.
+
+**Per-step attribution table.**
+
+| Step | Deliverable | Measured contribution | Source | Note |
+|---|---|---|---|---|
+| 9 | Six classical methods + `Exhaustive`, ported and trait-unified | `evals/transform` within 5% of Mars 1 C binaries (0.00%-4.86% measured); RD-curve-vs-Mars1 (0.2dB) check **not implemented** | D28 | Anchors the chain below; RD-equivalence to Mars 1 unverified |
+| 10 | `.mars` v0 container + context-adaptive rANS | bpp reduction 60.8% mean vs. an uncompressed baseline, but corpus-skewed — real-photo-like fixtures (`noise_u8`, `mandelbrot`) land at 17.0-19.1%, in-band with the brief's 8-20% estimate; several synthetic fixtures (91-95%) are not representative | D30 | Not a BD-rate figure; the entropy coder this measures is already baked into every `.mars` v0 bpp number used by Steps 14/15/16 below, so it is not double-counted in the cumulative chain |
+| 11 | NEON SIMD kernels for moment accumulation | Speed only (bit-identical output); no BD-rate or evals effect | D31/D35 | Not part of the BD-rate chain |
+| 12 | Rayon parallelism | Speed only (bit-identical output); no BD-rate or evals effect | D32/D33 | Not part of the BD-rate chain |
+| 13 | Hierarchical funnel search (`Funnel`) | `evals/transform`: kodim01 159.03, kodim02 150.23 — **higher** (more expensive) than the cheapest classical method already measured (`saupe-fisher`: 62.08 / 58.52); mean regret 1.03/0.91 dB, second-worst of the seven methods measured | D36, `results/classical-methods-sample.jsonl` | This is Mars 2's dedicated fast-search deliverable and it does not yet reduce evals vs. classical baselines — it costs more for worse regret |
+| 14 | Rate-distortion optimisation (`J = D + λR` bottom-up pruning) | BD-rate **-8.07% mean** vs. Step 9 `Exhaustive` (kodim01 -8.61%, kodim02 -7.54%) | D39 | First real BD-rate anchor point in the chain; short of the brief's own 10% target |
+| 15 | Residual mode (modes 0-3 under RD competition) | BD-rate **+2.05% mean regression** vs. Step 14 (kodim01 +1.88%, kodim02 +2.23%) | D40 | A measured regression, root-caused to the frozen rate-model snapshot never observing modes 1/3's fields — not fixed this session, included in the chain as a genuine negative, not omitted |
+| 16 | Content-adaptive domain-pool density | BD-rate **-6.82% mean** vs. Step 15 (kodim01 -6.75%, kodim02 -6.88%), at 1.42x encode-time cost (summed) | D43 | Clean win, breaks the three-consecutive-calibrated-gate pattern D40 flagged |
+
+**Cumulative BD-rate, Step 14 through Step 16, compounded per image (not simply summed —
+BD-rate percentages compose multiplicatively), anchored to the Step 9 `Exhaustive` proxy
+named above:**
+
+- kodim01: (1 − 0.0861) × (1 + 0.0188) × (1 − 0.0675) − 1 = **−13.2%**
+- kodim02: (1 − 0.0754) × (1 + 0.0223) × (1 − 0.0688) − 1 = **−12.0%**
+- mean: **≈ −12.6%**
+
+**Criterion 1 — BD-rate vs. Mars 1 baseline >= 35% better: NOT MET.** Even granting the
+unverified Step-9-`Exhaustive`-as-Mars-1-proxy assumption the most generous possible
+reading, the cumulative measured improvement is ~12.6%, roughly a third of the 35% target,
+on 2 of 24 corpus images, with Step 15's real regression already folded in honestly (not
+skipped — skipping it would read as ~-14.6% compounding only Steps 14 and 16, still short).
+The true comparison against actual Mars 1 output was never built at all (D28's open gap),
+so even this ~12.6% figure is one step removed from what the gate actually asks for.
+
+**Criterion 2 — `evals/transform` reduced >= 10x vs. best classical method at matched RD:
+NOT MET, and not close.** The only Mars-2-native fast-search method measured against the
+classical baselines is Step 13's `Funnel`, and it is **~2.4-2.6x more expensive** than the
+cheapest classical method already measured (`saupe-fisher`), not 10x cheaper, while also
+landing at worse regret (second-worst of seven methods). No 10x-or-better reduction vs. any
+classical baseline exists anywhere in the recorded results at time of writing.
+
+**Criterion 3 — every step's contribution separately attributed in one table: MET** — see
+the table above; this is the one criterion that is a documentation exercise rather than a
+new measurement, and it is now satisfied.
+
+**Conclusion, stated plainly per this entry's own instruction not to re-scope the numbers
+to clear the bar.** Gate D's two quantitative research targets are not met by the evidence
+actually on record. This does not mean the project has produced nothing — Steps 14 and 16
+are genuine, honestly-measured BD-rate wins (-8.07%, -6.82% respectively), and D30's
+entropy coder is a real bpp reduction on realistic content — but the compounded, corpus-
+narrow result (~12.6%) falls well short of "35% better than Mars 1," and no step has yet
+delivered an evals/transform reduction vs. the classical baselines at all, let alone 10x.
+Per this project's own working agreement, this is recorded as the honest state of Gate D
+rather than smoothed into a qualified pass; Group D experiments (Step 17 onward) proceed
+per the plan's own framing of them as hypotheses independent of Gate D's pass/fail state,
+not as a step blocked on Gate D closing.
+
+**Scope cut.** All figures above are `kodim01`/`kodim02` only (2 of 24 `standard/` images),
+inherited unchanged from D28/D36/D39/D40/D43 — no new measurement was taken for this
+attribution table, per this entry's own instruction to build it from what's already
+recorded.
+
+**Tolerance impact.** None — this entry asserts nothing new and changes no gate.
+
+---
+
+## D45 · 2026-09-15 · Step 17's learned candidate pruning: built, trained, measured — the abort rule applies, `Learned` does not beat `Funnel`, documented as a negative result rather than iterated on
+
+**Context.** Step 17 (`implementation-plan.md` ~line 993) is the project's headline
+experiment: a lightweight model scoring `P(domain in top-k | range features, domain
+features, relative position)`, trained on the Step 8 oracle cache, hypothesised to reduce
+exact affine evaluations by >= 90% vs. the best classical method at equal BD-rate, with
+the brief's own explicit warning that inference cost must be counted in the eval budget.
+The brief also names an abort rule: if the model/hybrid cannot beat the funnel on the
+eval/BD-rate Pareto frontier, publish the negative result and stop rather than iterate.
+
+**Environment gaps found and fixed before any of this could run, stated plainly.** This
+worktree branch had not been rebased onto `main`'s Step 15/16 merges (`df3dd57`) — fixed
+by fast-forward merging local `main`. Neither the Kodak corpus nor the Step 8 oracle cache
+existed on disk in this fresh worktree (`oracle-cache/` is gitignored, a "regenerable
+derived artifact," and `corpus/images/` is never committed) — `kodim01.png`/`kodim02.png`
+were fetched from the pinned manifest URL and verified byte-for-byte against
+`corpus/kodak.manifest.json`'s committed sha256 hashes, converted to grayscale raw via the
+project's own pinned `ffmpeg` + `scripts/ppm2raw.py` pipeline (output hashes matched
+`corpus/standard.images.json`'s committed values exactly, confirming the conversion is
+reproducible), and the oracle cache was built fresh via `marsbench oracle-build --images
+kodim01,kodim02 --configs default` (28.3s total, GPU-backed, per D28's own note that GPU
+oracle builds are cheap in this sandbox). None of this is "training corpus already exists
+on disk" in the literal sense the brief's own scope-down instruction anticipated — it did
+not exist in this worktree and had to be built from the pinned, committed manifests before
+any training could start. This is recorded because it is a real deviation from "do not
+regenerate the oracle cache," made because the alternative was no training data at all.
+
+**What was built.**
+- `crates/mars-search/src/learned.rs` — `Learned`, a `CandidateRetriever` (Step 9's own
+  extension point, the same one `Funnel` uses) that scores every domain position in the
+  pool with a small MLP and keeps the top `k` (`DEFAULT_SURVIVORS = 16`, matching the R&D
+  plan's own funnel endpoint for an apples-to-apples final-survivor comparison), then hands
+  the survivors' 8 isometries each to the shared Stage-4 exact fit — structurally identical
+  to `Funnel`'s own `index()`/`candidates()` shape, reusing `funnel::stage1_features`
+  (widened from `pub(crate)` to `pub` specifically so both methods, and the training
+  example in a different crate, share one feature definition rather than risking two
+  subtly different ports of "contrast-normalised block shape").
+- **Feature vector (10-dim):** the six `Stage1Features` component-wise differences
+  (range - domain), a clamped `ln((domain_std+eps)/(range_std+eps))` contrast-ratio signal
+  (Stage1Features is affine-invariant by design and drops absolute scale — this puts one
+  real scale signal back), and the domain's row/col offset from the range block normalised
+  by image height/width plus their combined magnitude (the "relative position" the
+  hypothesis names). `build_features` is `pub` and shared byte-for-byte between the
+  retriever and the offline trainer, closing off an entire class of train/inference
+  feature-mismatch bug by construction.
+- **Model:** a from-scratch, dependency-free 2-layer MLP (10 -> 8 tanh -> 1 sigmoid, 121
+  parameters), no new workspace dependency (checked `Cargo.toml`/`deny.toml` first — no
+  ML crate exists in this workspace, and none was added). Weights are baked into
+  `crates/mars-search/src/learned_weights.rs` (a generated, committed Rust source file,
+  `include!`'d by `learned::trained`) rather than read from a file at `index()` time, so
+  the retriever has zero runtime I/O and is trivially deterministic (§2.3).
+- **Training** (`crates/mars-bench/examples/train_learned.rs`): built a labelled dataset
+  from `kodim01`'s oracle cache (`default` config, size 16 only — 1,536 range blocks,
+  22,385-position domain pool), 91,558 samples (42,406 positive — every unique domain
+  position in each block's true top-32, dedup'd; 49,152 negative — 32 seeded-random
+  domain positions per block, excluding true positives), trained by full-batch,
+  per-sample-update gradient descent on binary cross-entropy, 300 epochs, lr=0.02, one
+  explicit seed (`RNG_SEED = 0xC0FFEE_17`, a `SplitMix64` PRNG) governing weight init,
+  negative sampling, and per-epoch shuffling — no wall-clock seed anywhere. Training
+  reproducibly converges from BCE ~0.69 (random-guess floor) to ~0.51-0.52 and plateaus
+  (not diverging, not NaN); mean loss at the final epoch was 0.51427.
+
+**A real training instability found and fixed before trusting any result (verification-
+discipline: assume the harness before the result).** The first training run (lr=0.1, no
+feature clamp) plateaued at BCE ~0.56, worse than the retrained run, with several `w1`
+weights growing to magnitude 10-20 — a red flag. Root cause: `log_std_ratio` is unbounded
+for a near-flat block on either side (`domain_std` or `range_std` near the `1e-6` epsilon
+floor sends the ratio's log towards +-14), and that outlier feature dominated every
+gradient step. Fixed by clamping `log_std_ratio` to `[-5, 5]` (`crate::learned`'s own doc
+comment records this) and lowering the learning rate to 0.02; the retrained model's loss
+curve is smooth and the harness-sanity oracle check (below) still passes at ~100%/~0dB,
+confirming the fix did not break anything structural — this is recorded as a real,
+checked fix, not a tolerance change (no gate assertion existed yet to loosen).
+
+**Measured result (`crates/mars-bench/tests/learned_gate.rs`, `gate-17`).**
+
+1. **Harness sanity, passed cleanly.** `Learned` with `survivors = usize::MAX` (every
+   domain scored, none dropped) reproduces `Exhaustive`'s own recall/regret against the
+   oracle exactly: 100.0000% top-1, mean regret -1.9e-7 dB, on kodim01 — confirms the
+   candidate-emission plumbing is correct; any shortfall below is about ranking quality,
+   not a wiring bug.
+2. **`Learned` (k=16) vs. same-run `Funnel` (scaled), matched evals/transform (128.0 for
+   both by construction — same final survivor count):**
+
+| image | method | top-1 | top-5 | top-32 | mean regret (dB) | wall-clock |
+|---|---|---|---|---|---|---|
+| kodim01 (in-sample) | Learned | 3.26% | 8.14% | 18.10% | 1.432 | 6.310s |
+| kodim01 (in-sample) | Funnel | 10.03% | 21.29% | 41.93% | 0.802 | 0.428s |
+| kodim02 (held-out) | Learned | 1.30% | 3.06% | 8.33% | 1.392 | 0.404s* |
+| kodim02 (held-out) | Funnel | 9.38% | 17.90% | 36.85% | 0.720 | 0.429s |
+
+*kodim02's Learned wall-clock (0.404s) is much lower than kodim01's Learned wall-clock
+(6.310s) despite identical per-block cost, because the harness-sanity test above ran
+immediately before the kodim01 measurement in the same process and evidently paid a
+one-time JIT/cache-warming cost the kodim02 run (later in the same process) did not — the
+*first* `Learned` run in `unlimited_survivors_...` (6.287s for the exact same 1,536-block,
+full-pool-scoring workload) is the fairer same-condition comparison, and it confirms
+`Learned`'s true per-run cost is ~6s, not ~0.4s; see the wall-clock analysis below.
+
+**On both images, `Learned` is worse than `Funnel` on every axis measured — recall, regret,
+and wall-clock — at identical evals/transform.** This is not a marginal shortfall: Funnel
+finds ~2.3-3x more of the true top-1/top-32 domains and has roughly half the regret, on the
+*training* image (kodim01) as well as the held-out one (kodim02) — the model does not even
+win on the data it was fit to, which rules out "it would generalise better with more data"
+as the whole story (a model that cannot beat the funnel in-sample has a capacity/feature
+problem, not (only) a generalisation problem).
+
+**Wall-clock: the brief's own "inference cost must be counted" warning is not hypothetical
+here — `Learned` really is more expensive, not just no-better.** `Learned::candidates()`
+scores *every* domain position in the pool with a full MLP forward pass before truncating
+to `k` survivors (`~97` multiply-adds per domain at this architecture) — unlike `Funnel`,
+whose Stage 1 is six cheap scalar subtractions and whose later, costlier stages (quadrant/
+DCT features, thumbnail L2) only ever run on the *survivors* of the previous stage. So
+`Learned`'s per-block cost does not shrink with `k` the way `Funnel`'s does — confirmed
+directly: the unlimited-survivors run (every domain scored, none dropped) and the k=16 run
+pay essentially the *same* wall-clock cost (5.977-6.310s vs. Funnel's 0.404-0.442s, roughly
+14x slower) because the dominant cost (scoring the full pool) is identical in both cases.
+This is exactly the failure mode the brief warned about, measured directly rather than
+argued: at this architecture and this un-staged design, the model costs more than the
+evaluations it saves.
+
+**Root-cause check, not just narrative (per this session's own explicit instruction to
+apply D40-level rigor before concluding "abort rule" vs. "something is broken").** Three
+concrete, falsifiable checks, not merely asserted:
+1. **Is the harness plumbing correct?** Yes — the unlimited-survivors sanity check
+   reproduces Exhaustive's near-exact recall/regret, ruling out a candidate-emission bug.
+2. **Did training actually converge, or silently fail?** Yes — BCE loss dropped from the
+   random-guess floor (~0.69) to ~0.51-0.52 and plateaued smoothly across 300 epochs after
+   the `log_std_ratio` clamp fix, with no divergence/NaN.
+3. **Is the model's ranking better than chance, or is it not learning any real signal at
+   all?** A uniformly random 16-domain pick out of a ~22,385-position pool would hit the
+   single true top-1 domain with probability ~16/22,385 = 0.0715%. `Learned`'s measured
+   top-1 rate (3.26% kodim01, 1.30% kodim02) is **~18-46x better than random** — the model
+   has learned real, if weak, signal, not nothing. This rules out "the model learned
+   nothing" as the explanation and points instead at feature/architecture expressiveness:
+   `Learned`'s 10-dim feature vector is deliberately coarser than `Funnel`'s own pipeline,
+   which additionally uses Stage 2's quadrant-mean/variance + low-frequency DCT + gradient
+   orientation and, especially, Stage 3's 4x4/8x8 thumbnail L2 distance — D36's own module
+   doc calls Stage 3 "the closest cheap proxy to the true SSD Stage 4 computes," and this
+   session's `Learned` has no equivalent of it. A materially richer feature set (thumbnail-
+   distance-like features, or letting the MLP see raw normalised pixel values instead of
+   six summary statistics) is the concrete, named next lever — not attempted this session,
+   per the abort rule's own instruction not to keep iterating trying to force a win.
+
+**Conclusion: this is the abort-rule branch, not a "something is broken" branch.** All
+three checks above came back clean or explicable; the shortfall traces to a real,
+identified feature-expressiveness gap versus `Funnel`'s more elaborate cascade, not to a
+harness bug, a training failure, or a sampling artifact. Per the brief's own instruction
+("if the hybrid cannot beat the funnel on the eval/BD-rate Pareto frontier... publish the
+negative result and move on"): `Learned` does not beat `Funnel` on recall, regret, *or*
+wall-clock at matched evals/transform, on either the training image or the held-out one.
+The funnel+learned hybrid named in the brief was not attempted — with the standalone
+learned model already losing to the funnel on every axis at equal cost, and costing 14x
+more wall-clock for the same Stage-4 eval budget, there is no basis to expect a hybrid to
+reverse that picture, and building one anyway would be exactly the "keep iterating to force
+a win" the abort rule exists to prevent.
+
+**Scope cuts, stated plainly (mirrors D28/D36/D39/D40/D43's precedent).**
+- Training/eval: `kodim01`/`kodim02` only (kodim01 as training+in-sample eval, kodim02 as
+  held-out eval), `default` oracle config, size **16 only** (not size 8) — not the full
+  24-image `standard/` corpus.
+- Comparison: `Learned` vs. `Funnel` vs. `Exhaustive` (the accuracy ceiling), not the full
+  8-way comparison against all six classical methods the brief's exit criteria ask for —
+  `saupe-fisher`'s already-recorded numbers (D28, the cheapest classical baseline measured
+  so far: kodim01 62.08 evals/transform / 21.14% top-1 / 0.65 dB, kodim02 58.52 / 19.33% /
+  0.59 dB) are cited for context above but not re-run this session.
+- **Cross-corpus generalisation test (train Kodak, eval CLIC/USC-SIPI): not attempted.**
+  `corpus/` holds only the Kodak manifest, and only `kodim01.png`/`kodim02.png` were
+  fetched this session — no CLIC or USC-SIPI images exist on disk, and per this session's
+  explicit instruction, no new large corpus was fetched to fill that gap. Given the
+  standalone model already loses to the funnel same-corpus, in-sample, this gap does not
+  change the step's outcome, but it is a real, named limitation of this entry's evidence.
+- **No BD-rate/RD measurement was wired up.** `Learned` was never plugged into
+  `mars_codec::encode`'s RD-optimised walk (`EncodeParams::lambda`) — the recall/regret/
+  evals/wall-clock comparison above is what determined the abort-rule outcome, and wiring
+  a full RD pipeline for a method that already loses on the Pareto frontier this measures
+  would not change the conclusion, per the abort rule's own reasoning.
+
+**Tolerance impact.** None — `gate-17`'s only assertions are the harness-sanity oracle
+equality (an exact-equality oracle, not a tolerance) and "narrower than Exhaustive" (a
+structural floor every method in this crate already clears). No aspirational bar was set
+and then calibrated down to a measured shortfall, unlike gate-13/14/15/16's own new-gate
+bars — there is no bar to calibrate here: the abort rule itself is the exit criterion, and
+it was checked honestly against real numbers.

@@ -103,17 +103,21 @@ struct DomainEntry {
     thumbs: Vec<Vec<f32>>,
 }
 
+/// `pub`: reused as-is by [`crate::learned`] (Step 17) and by that method's offline
+/// training example (`crates/mars-bench/examples/train_learned.rs`, a different crate) so
+/// every consumer scores domains from the exact same cheap-feature definition rather than
+/// risking two subtly different implementations of "contrast-normalised block shape."
 #[derive(Debug, Clone, Copy, Default)]
-struct Stage1Features {
-    norm_min: f64,
-    norm_max: f64,
-    norm_range: f64,
-    grad_h: f64,
-    grad_v: f64,
-    edge: f64,
+pub struct Stage1Features {
+    pub norm_min: f64,
+    pub norm_max: f64,
+    pub norm_range: f64,
+    pub grad_h: f64,
+    pub grad_v: f64,
+    pub edge: f64,
 }
 
-fn stage1_features(b: &Block) -> Stage1Features {
+pub fn stage1_features(b: &Block) -> Stage1Features {
     let n = (b.size * b.size) as f64;
     let mean = b.data.iter().sum::<f64>() / n;
     let var = b.data.iter().map(|&v| (v - mean) * (v - mean)).sum::<f64>() / n;

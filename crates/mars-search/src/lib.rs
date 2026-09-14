@@ -19,6 +19,7 @@ pub mod fisher;
 pub mod funnel;
 pub mod hurtgen;
 pub mod kdtree;
+pub mod learned;
 pub mod masscenter;
 pub mod mc_saupe;
 pub mod saupe;
@@ -312,10 +313,11 @@ pub enum MethodName {
     SaupeFisher,
     McSaupe,
     Funnel,
+    Learned,
 }
 
 impl MethodName {
-    pub const ALL: [MethodName; 8] = [
+    pub const ALL: [MethodName; 9] = [
         MethodName::Exhaustive,
         MethodName::Fisher,
         MethodName::Hurtgen,
@@ -324,6 +326,7 @@ impl MethodName {
         MethodName::SaupeFisher,
         MethodName::McSaupe,
         MethodName::Funnel,
+        MethodName::Learned,
     ];
 
     pub fn key(self) -> &'static str {
@@ -336,6 +339,7 @@ impl MethodName {
             MethodName::SaupeFisher => "saupe-fisher",
             MethodName::McSaupe => "mc-saupe",
             MethodName::Funnel => "funnel",
+            MethodName::Learned => "learned",
         }
     }
 
@@ -350,6 +354,7 @@ impl MethodName {
             MethodName::SaupeFisher => Box::new(saupe_fisher::SaupeFisher::default()),
             MethodName::McSaupe => Box::new(mc_saupe::McSaupe::default()),
             MethodName::Funnel => Box::new(funnel::Funnel::default()),
+            MethodName::Learned => Box::new(learned::Learned::default()),
         }
     }
 }

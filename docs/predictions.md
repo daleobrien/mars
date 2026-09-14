@@ -1951,3 +1951,109 @@ gates passed only after a tolerance was calibrated to a shortfall/regression" pa
 `docs/decisions.md`'s D40 flagged as a kill-criteria audit trigger — recorded here plainly,
 per the same A7/A4 discipline this file's every prior entry has followed, not because the
 result happened to be convenient but because it is what was actually measured.
+
+---
+
+## 2026-09-15 (not yet run) · Step 17 · learned candidate pruning — prediction, before any training/measurement
+
+**Hypothesis under test (pre-registered, `implementation-plan.md`'s own framing).** A
+lightweight learned model scoring `P(domain ∈ top-k | range features, domain features,
+relative position)`, trained on the Step 8 oracle cache, reduces exact affine evaluations
+by >= 90% versus the best classical method at equal BD-rate (within 0.5%), with inference
+cost counted in the eval budget.
+
+**Scope for this session, decided before training (mirrors D28/D36/D39/D40/D43's
+precedent).** Training data: the oracle cache built this session for `kodim01`/`kodim02`
+only, `default` config (`min_size=8, max_size=16, shift=4`), size `16` only (1,536 range
+blocks on kodim01 — fewer blocks than size 8's 6,144, keeping the training set small
+enough to build and train in-session; size 8 is not covered by the learned model this
+session). Train on `kodim01`; evaluate in-sample on `kodim01` and held-out on `kodim02` —
+this is a same-corpus (Kodak) generalisation check only. The brief's own cross-corpus
+generalisation test (train Kodak, eval CLIC/USC-SIPI) is **not attempted**: `corpus/`
+holds only the Kodak manifest and (as of this session) only `kodim01.png`/`kodim02.png`
+fetched — no CLIC or USC-SIPI images exist on disk, and per this session's explicit
+instruction, no new large corpus is fetched to fill that gap. This is stated as a known
+gap now, not discovered after training. Model: a from-scratch, workspace-dependency-free
+2-layer MLP (10 input features → 8 hidden (tanh) → 1 output (sigmoid)), trained by seeded
+full-batch gradient descent on binary cross-entropy (label = "is this domain position in
+the oracle's true top-32 for this range block", positives from the cache, negatives
+sampled from the rest of the domain pool with an explicit seed). Comparison is
+learned-vs-funnel-vs-exhaustive-vs-`saupe-fisher` (the cheapest classical method measured
+in D28/`results/classical-methods-sample.jsonl`, not all six classical methods) — narrower
+than the brief's full 8-way comparison, per this session's scope instruction.
+
+**Expectation, stated plainly before measuring.** Step 13's own funnel (D36) — a
+hand-engineered version of exactly the same idea (cheap features narrowing a domain pool
+before the exact fit) — already measured *worse* regret than several classical methods
+(1.03/0.91 dB mean regret, second-worst of seven) despite extensive feature engineering
+(six classical-method-derived statistics across three stages). A learned model over a
+similar (if not identical) feature set, trained on two images' worth of data, is not
+expected to leapfrog that by a wide margin: the more likely outcome is that the learned
+model lands somewhere in the same rough regret/evals territory as the funnel, not
+dramatically better. Given D44's own finding that no method measured so far in this
+project reduces evals/transform below the cheapest classical baseline (`saupe-fisher`,
+~60 evals/transform) at all, the >= 90%-reduction-at-matched-BD-rate target is **not
+expected to be met**. The abort rule (`implementation-plan.md`'s own instruction: "if the
+hybrid cannot beat the funnel on the eval/BD-rate Pareto frontier... publish the negative
+result and move on") is treated as the live, expected branch going in, not a fallback
+written in case of failure — this prediction is written so that outcome, if it happens,
+is legible as "matched expectation" rather than "surprise" (A4's own reasoning for why the
+prediction must be pre-registered). A genuine surprise would be the learned model clearing
+**both** a real regret/recall improvement over the funnel **and** a large (order-of-
+magnitude) evals reduction simultaneously — that combination is what would need the most
+scrutiny before being believed, per verification-discipline's "assume the harness before
+the result" rule.
+
+**What would change this prediction.** If the learned model's regret/recall land clearly
+better than the funnel's own measured numbers (D36: kodim01 1.03 dB / 10.30% top-1,
+kodim02 0.91 dB / 11.23% top-1) at meaningfully fewer evals/transform than the funnel's
+own 159.03/150.23, that would be the genuine positive result worth pursuing further
+(wiring into the full RD/BD-rate pipeline). Anything else — comparable or worse regret,
+comparable or higher evals, or a collapse to near-zero recall — is the abort-rule branch,
+to be closed as a documented negative result rather than iterated on.
+
+---
+
+## 2026-09-15 · Step 17 · outcomes — confirmed: the abort-rule branch, not the surprise branch
+
+Full numbers, root-cause checks, and the abort-rule reasoning are in `docs/decisions.md`'s
+D45. Summary against this prediction:
+
+**Confirmed.** The prediction's central expectation — that `Learned` would land in "the
+same rough regret/evals territory as the funnel, not dramatically better" — undersold how
+one-sided the actual gap would be, but the *direction* (funnel wins, no order-of-magnitude
+eval reduction) is exactly what was measured. At matched evals/transform (128.0, both
+methods, by construction), `Funnel` beats `Learned` on kodim01 (in-sample) 10.03% vs.
+3.26% top-1 and 0.80 dB vs. 1.43 dB mean regret, and on kodim02 (held-out) 9.38% vs. 1.30%
+top-1 and 0.72 dB vs. 1.39 dB mean regret — `Funnel` is not marginally better, it roughly
+triples top-1 recall and roughly halves regret, on both images. The >= 90%-eval-reduction
+target is not met by any measure: `Learned` does not reduce evals below `Funnel`'s own
+(already non-reducing, per D44) evals/transform at all.
+
+**A genuine surprise not anticipated by the prediction.** The prediction did not call out
+wall-clock cost as a separate axis of concern beyond "inference cost must be counted" — the
+measured result is that `Learned`'s wall-clock (~6s, dominated by scoring the *entire*
+domain pool with an MLP forward pass before truncating to `k` survivors) is ~14x `Funnel`'s
+(~0.4s), because unlike `Funnel`'s staged design, `Learned`'s single-shot full-pool scoring
+does not get cheaper as `k` shrinks. This is a real, measured instance of the brief's own
+named risk ("a model that costs more than it saves is not an acceleration"), not just a
+theoretical one — recorded as a finding this prediction did not specifically foresee.
+
+**The abort rule was invoked, not a calibrated bar.** Per the brief's own instruction and
+this session's own explicit guidance to prefer the abort rule over inventing a new
+calibrated pass bar: `gate-17` asserts only the harness-sanity oracle equality and
+"narrower than Exhaustive," and closes with the honest, documented conclusion that
+`Learned` does not beat `Funnel`. Three falsifiable checks (harness-plumbing correctness,
+training convergence, and above-chance ranking signal — D45's own writeup) confirm this is
+a real feature-expressiveness shortfall (`Learned`'s 10-dim feature vector lacks anything
+like `Funnel`'s Stage 3 thumbnail-distance proxy for the true SSD), not a broken harness or
+an undertrained model — the same rigor D40 applied to Step 15's regression, applied here
+before concluding the abort rule (rather than a bug) is the right explanation.
+
+**Known gaps, as predicted.** The cross-corpus generalisation test (train Kodak, eval
+CLIC/USC-SIPI) was not attempted — no CLIC/USC-SIPI images exist in `corpus/` this
+session, exactly as flagged before training. The full 8-way classical-method comparison
+was narrowed to `Funnel` + `Exhaustive` (+ `saupe-fisher`'s already-recorded numbers cited
+for context), and no BD-rate/RD pipeline was wired up — with the standalone model already
+losing to the funnel on the recall/regret/evals/wall-clock frontier, wiring a full RD
+comparison would not change the outcome, per the abort rule's own reasoning.

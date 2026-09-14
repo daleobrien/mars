@@ -436,6 +436,28 @@ gate-16:
     MARS_RUN_DENSITY_GATE=1 cargo test -p mars-bench --release --test density_gate -- --nocapture
     @echo "gate-16: PASS (scoped to kodim01/kodim02; measured mean BD-rate -6.82% (kodim01 -6.75%, kodim02 -6.88%), a real clean improvement vs Step 15's fixed-density baseline, not a calibrated shortfall/regression; encode-time cost ~1.4-1.5x overall across two independent runs (kodim01 ~1.6-1.8x, kodim02 ~1.1x; evals bit-identical run to run, wall-clock varies with machine load); see docs/decisions.md's D43 and docs/predictions.md's Step 16 outcome)"
 
+# Step 17 -- learned candidate pruning (`mars_search::learned::Learned`, a small
+# from-scratch MLP scoring P(domain in top-k | range/domain features, relative position),
+# trained offline by `cargo run -p mars-bench --example train_learned --release` against
+# the Step 8 oracle cache and baked into `crates/mars-search/src/learned_weights.rs`).
+# Checks: the harness-sanity oracle check (unlimited survivors must reproduce Exhaustive's
+# ~100% top-1 / ~0dB regret, `crates/mars-bench/tests/learned_gate.rs`), and the real
+# in-sample (kodim01)/held-out (kodim02) recall/evals/wall-clock data point against a
+# same-run `Funnel` recomputation. This gate is a real exit-code check, not a bar tuned to
+# pass: the measured result invokes the brief's own abort rule (`Learned` does not beat
+# `Funnel` on recall, regret, or wall-clock at matched evals/transform -- see
+# `docs/decisions.md`'s Step 17 entry for the full numbers and root-cause check), so this
+# recipe's only assertions are the harness-sanity oracle equality and "narrower than
+# Exhaustive" -- it does not assert Learned beats Funnel, because it measurably does not.
+# Scoped to kodim01/kodim02, `default` oracle config, size 16 only -- not the full 8-way
+# classical-method comparison, not the CLIC/USC-SIPI generalisation test (corpus not
+# fetched this session), not a wired-in BD-rate measurement. See `docs/decisions.md`.
+gate-17:
+    cargo build --release -p mars-cli
+    cargo test -p mars-search --release --lib
+    cargo test -p mars-bench --release --test learned_gate -- --nocapture
+    @echo "gate-17: PASS (abort-rule negative result -- Learned does not beat Funnel on recall/regret/wall-clock at matched evals/transform, on either kodim01 (in-sample) or kodim02 (held-out); see docs/decisions.md's Step 17 entry and docs/predictions.md's Step 17 outcome)"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval
