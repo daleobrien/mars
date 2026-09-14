@@ -1697,3 +1697,86 @@ expected to be scoped to `kodim01`/`kodim02` at the same 4-point λ grid Step 14
 `standard/` corpus — bottom-up RD search with four extra mode evaluations per node is
 strictly more expensive per encode than Step 14's own already-slow walk. `μT` (decode-cost
 term) remains out of scope, inherited unchanged from Step 14.
+
+---
+
+## 2026-09-14 · Step 15 · outcomes
+
+Measured via `crates/mars-bench/tests/residual_gate.rs` (`gate-15`), kodim01/kodim02, the
+same 4-point λ grid Step 14's own gate used (`[50, 200, 800, 3200]`), Step 15's full
+4-mode curve against a same-codebase "Step 14 equivalent" curve (modes 0/2 only, via
+`encode_image_rd_with_modes`'s mode mask — see `mars_bench::mode_gate`'s doc for why this
+was chosen over diffing a separate git revision), both at `.mars` v0 (entropy-coded) bpp.
+
+### P15.1 — **falsified, in the opposite direction predicted**
+
+Predicted fractal (modes 2+3) would win "well under half" of leaf decisions, with
+flat+affine taking the majority. Measured corpus-wide mode-usage histogram:
+`mode0=14.3% mode1=0.1% mode2=85.0% mode3=0.6%`. Fractal prediction (modes 2+3 combined)
+won **85.6%** of leaf decisions — a wide margin in the *opposite* direction from the
+prediction. This is the brief's own "more scientifically interesting than the BD-rate
+number" finding, taken at face value rather than smoothed toward what was expected: on
+this corpus, under genuine competing-mode pressure (flat, affine, and residual all
+available as cheaper alternatives at every node), self-similarity prediction is not a
+weak default that wins only because nothing cheaper was offered — it is, empirically, the
+dominant winning representation by a wide margin. Mode 1 (affine)'s share (0.1%) is also
+far smaller than the prediction's implicit expectation that it would meaningfully
+compete with mode 0 — most blocks that are not well-served by a domain match are
+apparently well-served by a flat refit already, with a genuine spatial gradient rarely
+being the deciding factor at this corpus's block sizes (4-16 px).
+
+### P15.2 — **roughly confirmed on the raw share, but the underlying reasoning also
+explains a regression the prediction did not anticipate**
+
+Predicted mode 3 would win only a small minority of fractal-eligible decisions because
+the residual quantisation step is fixed, not λ-swept. Measured: mode 3 won **0.6%** of all
+leaves corpus-wide (a small share, consistent with "small minority"). What the prediction
+did not anticipate: this same fixed-step mismatch, combined with a rate-estimation gap
+inherited unchanged from Step 14 (`docs/decisions.md`'s D40 has the full root-cause
+analysis), is also the proximate cause of the BD-rate regression below — a fixed step
+being occasionally *mispriced as attractive* by the frozen rate snapshot, not merely
+*rarely winning*, turns out to be the more consequential effect.
+
+### P15.3 — **falsified: a small regression, not an improvement**
+
+Predicted 3-12% BD-rate improvement vs. Step 14. Measured: **mean +2.05%** (kodim01
++1.88%, kodim02 +2.23%) — a positive number, meaning Step 15's full mode competition
+needs *more* bits than the Step-14-equivalent curve for the same quality. This falsifies
+the prediction outright, including its stated floor of "a regression is not expected and
+would indicate a bug." A regression was found; per A7 it is investigated, not dismissed.
+The root cause (`docs/decisions.md`'s D40) is not a defect in the DCT/quantiser/entropy-
+coding machinery itself (every stage has passing exact round-trip tests, including a full
+mixed-mode encode through the real `.mars` v0 bitstream) but in Step 14's already-
+documented frozen rate-estimation snapshot, which structurally cannot ever observe modes
+1/3's fields (the legacy warm-up walk that builds it cannot produce those modes), so `J`
+occasionally misprices them as attractive when the real coded cost is higher. The
+convexity/monotonicity check passed cleanly, ruling out the specific failure mode P14.2
+worried about (a sign-error/unit-mismatch in the rate estimate) — this is a *calibration*
+gap in an approximation already known to be approximate, not an arithmetic bug.
+
+**Confirmed, not just argued (added after independent review flagged the result and
+proposed two specific alternative hypotheses — a mismatched-snapshot comparison bug, or a
+violation of "more candidates can't make the estimate worse").** Both were checked
+directly rather than reasoned about in the abstract: (1) `build_rate_snapshot` calls the
+legacy `walk`, which never reads the mode mask at all, so both compared curves are priced
+against a byte-identical frozen snapshot — ruled out by code inspection; (2) a new test
+(`encode::tests::aggregate_estimated_cost_is_provably_no_worse_under_more_modes_even_though_real_bpp_can_be`)
+reads `walk_rd`'s own internal `RdResult.d`/`.r` directly and confirms the provable
+property holds (`j_4mode <= j_2mode` under the identical snapshot) — `best_mode_leaf`'s
+minimisation is correct; the divergence is entirely in the estimate-vs-reality gap, not
+in the search. `docs/decisions.md`'s D40 has the full trace, including a test-methodology
+bug caught and fixed mid-investigation (an earlier version of the same test compared
+against the *wrong* estimate convention — the real sequential domain-position predictor
+instead of the fresh-per-leaf one `best_mode_leaf` actually prices against — and failed
+for that reason alone, not because of a codec bug).
+
+### Known gap, now sharper than when predicted
+
+The self-consistent (iterated) rate-estimation warm-up named as Step 14's own natural next
+step (never attempted there, for time-budget reasons) is now also the concrete fix for
+this step's regression, and was not attempted here either, for the same reason — one
+already-expensive ~15-minute gate sweep was this session's realistic budget, and a
+warm-up that itself runs `walk_rd` once would roughly double every encode's cost.
+`docs/decisions.md`'s D40 records this as the named next step, not a silently repeated
+deferral, and flags the gate's own calibrated ceiling as an open concern for the kill-
+criteria audit rather than asserting it is obviously fine.

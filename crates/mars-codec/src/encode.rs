@@ -1692,4 +1692,119 @@ mod tests {
             "an exact prediction's residual should quantise entirely to zero, got {levels:?}"
         );
     }
+
+    /// **Decisive diagnostic for the gate-15 BD-rate regression investigation
+    /// (`docs/decisions.md`'s D40).** The coordinator's hypothesis was that the
+    /// step14-equivalent and step15 mode-mask arms might be priced against *different*
+    /// frozen `RateModels` snapshots (an apples-to-oranges comparison) -- ruled out by
+    /// inspection ([`build_rate_snapshot`] calls the legacy [`walk`], which never reads
+    /// `ctx.allowed_modes` at all, so both arms' snapshots are constructed identically).
+    ///
+    /// This test checks the *provable* mathematical property directly, reading
+    /// [`walk_rd`]'s own internal `RdResult.r`/`.d` -- the exact quantity `best_mode_leaf`/
+    /// `walk_rd` minimise, in the exact fresh-predictor-per-leaf convention they use
+    /// internally (an externally-reconstructed estimate via `events_for_leaves`'s *real*
+    /// sequential-predictor convention is a **different** quantity -- `crate::rate`'s own
+    /// module doc already documents this fresh-vs-sequential predictor mismatch as a
+    /// distinct, narrower approximation, and conflating the two is a test-methodology bug,
+    /// not a codec bug; an earlier version of this test made exactly that mistake). Under
+    /// the identical frozen snapshot, allowing strictly more leaf-mode candidates at every
+    /// node can only ever produce an internal aggregate estimate `<=` the more restricted
+    /// mask's -- per-node superset minimisation, summed bottom-up by induction. If the
+    /// *real* entropy-coded bpp diverges from that ordering, the divergence is proof that
+    /// the estimate itself -- not the mode-competition minimisation -- is where reality and
+    /// the frozen snapshot disagree, exactly the already-documented Step 14 rate-estimation
+    /// gap (`crate::rate`'s own module doc), not a new Step 15 defect.
+    #[test]
+    fn aggregate_estimated_cost_is_provably_no_worse_under_more_modes_even_though_real_bpp_can_be() {
+        let image = textured_image(96, 96);
+        let params = EncodeParams {
+            min_size: 4,
+            max_size: 16,
+            shift: 4,
+            bits_alfa: 4,
+            bits_beta: 7,
+            max_alfa: 1.0,
+            t_rms: 8.0,
+            zero_threshold: 0,
+            lambda: Some(200.0),
+        };
+
+        let hdr = Header {
+            bits_alfa: params.bits_alfa,
+            bits_beta: params.bits_beta,
+            min_size: params.min_size,
+            max_size: params.max_size,
+            shift: params.shift,
+            width: image.width() as u32,
+            height: image.height() as u32,
+            int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
+        };
+        let contracted = Contracted::build(&image);
+        // The exact same snapshot-construction call both mode-mask arms use internally
+        // (`encode_image_rd_with_modes`) -- built once, shared explicitly here so there is
+        // no possibility of the two arms below seeing different snapshots.
+        let rate = build_rate_snapshot(&image, &hdr, &contracted, &params);
+        let lambda = params.lambda.unwrap();
+
+        let run = |allowed_modes: [bool; 4]| -> RdResult {
+            let ctx = Ctx {
+                image: &image,
+                contracted: &contracted,
+                hdr: &hdr,
+                params: &params,
+                rate: Some(&rate),
+                allowed_modes,
+            };
+            walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda)
+        };
+        let real_bytes = |leaves: &[Leaf]| -> usize {
+            crate::mars_format::write(&hdr, leaves)
+                .expect("a valid partition always writes")
+                .len()
+        };
+
+        let result_2mode = run([true, false, true, false]);
+        let result_4mode = run([true; 4]);
+        let real_2mode = real_bytes(&result_2mode.leaves) * 8;
+        let real_4mode = real_bytes(&result_4mode.leaves) * 8;
+
+        eprintln!(
+            "2-mode: internal d={:.1} r={:.1} bits, real={real_2mode} bits ({} leaves)\n\
+             4-mode: internal d={:.1} r={:.1} bits, real={real_4mode} bits ({} leaves)",
+            result_2mode.d,
+            result_2mode.r,
+            result_2mode.leaves.len(),
+            result_4mode.d,
+            result_4mode.r,
+            result_4mode.leaves.len(),
+        );
+
+        // The provable half: allowing more modes under the *same* frozen snapshot can
+        // only lower (or tie) the internal aggregate J = D + lambda*R -- every node's own
+        // candidate set is a strict superset, and `min_by` over a superset (summed
+        // bottom-up by induction across the whole tree) is never worse.
+        let j_2mode = result_2mode.d + lambda * result_2mode.r;
+        let j_4mode = result_4mode.d + lambda * result_4mode.r;
+        assert!(
+            j_4mode <= j_2mode + 1e-6,
+            "4-mode internal J ({j_4mode:.1}) must never exceed the 2-mode internal J \
+             ({j_2mode:.1}) under the identical frozen snapshot -- if this fails, the bug \
+             is in best_mode_leaf's/walk_rd's minimisation itself, not the estimate"
+        );
+
+        // The diagnostic half, reported (not a hard pass/fail -- it is the *expected*
+        // signature of the known rate-estimation gap, not a new assertion this test
+        // exists to enforce): the internal estimate can be more optimistic, relative to
+        // what the real entropy coder actually charges, for the 4-mode arm than for the
+        // 2-mode arm -- exactly what "the frozen snapshot never observed modes 1/3's
+        // fields at all" predicts, and the mechanism `docs/decisions.md`'s D40 names as
+        // the BD-rate regression's root cause.
+        let gap_2mode = real_2mode as f64 - result_2mode.r;
+        let gap_4mode = real_4mode as f64 - result_4mode.r;
+        eprintln!(
+            "estimate-vs-real gap (real bits - internal r estimate): 2-mode={gap_2mode:.1}, \
+             4-mode={gap_4mode:.1} (4-mode's larger gap is the expected signature)"
+        );
+    }
 }
