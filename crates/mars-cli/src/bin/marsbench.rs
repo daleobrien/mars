@@ -70,6 +70,9 @@ enum Cmd {
     /// Step 11's A/B-interleaved NEON-vs-scalar speed comparison, reported only (not
     /// gated -- `just gate-11` is the exact-equality differential tests instead).
     SimdBench(SimdBenchArgs),
+    /// Step 12's thread-count scaling curve, reported only (not gated -- `cargo test -p
+    /// mars-codec --test parallel_determinism` is the bitstream-identity exit criterion).
+    ParallelBench(ParallelBenchArgs),
     /// Step 7's bit-identical + speedup exit criteria as a command that exits 0 or 1
     /// (§A1, gate-7).
     GpuSearchCheck(GpuSearchCheckArgs),
@@ -212,6 +215,22 @@ struct SimdBenchArgs {
     images: Vec<String>,
     #[arg(long, value_delimiter = ',', default_value = "4,8,16,32")]
     sizes: Vec<u32>,
+    #[arg(long, default_value_t = 5)]
+    runs: usize,
+}
+
+#[derive(Args)]
+struct ParallelBenchArgs {
+    #[arg(long, default_value = "corpus/fixtures.images.json")]
+    fixtures_index: PathBuf,
+    /// Image names to benchmark. Defaults to the largest fixtures, since a scaling curve
+    /// needs enough per-image work for thread overhead to be a small fraction of it.
+    #[arg(long, value_delimiter = ',')]
+    images: Vec<String>,
+    /// Thread counts to sweep, in the order to measure. First entry is the baseline every
+    /// later speedup/efficiency is measured against, so it should normally be 1.
+    #[arg(long, value_delimiter = ',', default_value = "1,2,4,8,16")]
+    threads: Vec<usize>,
     #[arg(long, default_value_t = 5)]
     runs: usize,
 }
@@ -466,6 +485,7 @@ fn main() -> Result<()> {
         Cmd::RustEncoderCheck(a) => rust_encoder_check(a),
         Cmd::MarsFormatCheck(a) => mars_format_check(a),
         Cmd::SimdBench(a) => simd_bench(a),
+        Cmd::ParallelBench(a) => parallel_bench(a),
         Cmd::GpuSearchCheck(a) => gpu_search_check(a),
         Cmd::GpuSearchBench(a) => gpu_search_bench(a),
         Cmd::OracleBuild(a) => oracle_build(a),
@@ -1925,6 +1945,57 @@ fn simd_bench(a: SimdBenchArgs) -> Result<()> {
                     r.speedup
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+fn parallel_bench(a: ParallelBenchArgs) -> Result<()> {
+    eprintln!("{}", mars_bench::parallel_bench::machine_fingerprint_line());
+    let root = Path::new(".");
+    let images = mars_bench::sweep::ImageSet::read(&root.join(&a.fixtures_index))?.images;
+    let want: Vec<&str> = if a.images.is_empty() {
+        vec!["mandelbrot", "noise_u8"]
+    } else {
+        a.images.iter().map(String::as_str).collect()
+    };
+    // §8's 1998 defaults -- the same "exhaustive-equivalent settings" `rust_encoder::BASE`
+    // uses, so this scaling curve is measured under the same search cost this project
+    // reports elsewhere, not an artificially cheap or expensive configuration.
+    let params = mars_codec::encode::EncodeParams {
+        min_size: 4,
+        max_size: 16,
+        shift: 4,
+        bits_alfa: 4,
+        bits_beta: 7,
+        max_alfa: 1.0,
+        t_rms: 8.0,
+        zero_threshold: 0,
+    };
+
+    println!(
+        "{:<12} {:>7} {:>12} {:>7} {:>10}",
+        "image", "threads", "median (ms)", "speedup", "efficiency"
+    );
+    for image in &images {
+        if !want.contains(&image.name.as_str()) {
+            continue;
+        }
+        let plane = mars_core::io::read_raw(
+            &root.join(&image.file),
+            image.width as usize,
+            image.height as usize,
+        )?;
+        for p in mars_bench::parallel_bench::scaling_curve(&plane, &params, &a.threads, a.runs) {
+            println!(
+                "{:<12} {:>7} {:>9.2}±{:<5.2} {:>6.2}x {:>9.1}%",
+                image.name,
+                p.threads,
+                p.median.as_secs_f64() * 1e3,
+                p.mad.as_secs_f64() * 1e3,
+                p.speedup,
+                p.efficiency * 100.0
+            );
         }
     }
     Ok(())

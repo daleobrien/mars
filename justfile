@@ -259,6 +259,28 @@ simd-bench:
     cargo build --release -p mars-cli
     ./target/release/marsbench simd-bench
 
+# Step 12 -- Rayon parallelism (`mars_codec::encode`): parallel `Contracted::build` (one
+# task per output row) and parallel range-block search, decoupled from emission (each
+# quadrant of the RMS-driven quadtree walk returns its own leaves/evals, merged by plain
+# concatenation in the same TL/BL/TR/BR order the sequential walk always used, above an
+# 8-pixel size cutoff below which `rayon::join` overhead would exceed the search it
+# parallelises -- see `encode.rs`'s `PARALLEL_SIZE_CUTOFF`). The exit bar is bitstream
+# identity across thread counts, not a speed floor (§ the step's low verification burden):
+# `parallel_determinism` builds a scoped `rayon::ThreadPool` at 1/2/4/8/16 threads and
+# asserts the header, eval count, and full leaf list are byte-identical to the
+# single-threaded run, on both the RMS-driven fixture (`mandelbrot`, 512x512) and the
+# forced-subdivision one (`mixed_129x127`).
+gate-12:
+    cargo test -p mars-codec --release
+    @echo "gate-12: PASS"
+
+# Step 12's thread-count scaling curve, reported only (not gated -- see gate-12's own
+# comment). Run this on an idle machine, in the foreground, per the benchmark-protocol
+# skill -- never from a background session.
+parallel-bench:
+    cargo build --release -p mars-cli
+    ./target/release/marsbench parallel-bench
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval

@@ -183,21 +183,30 @@ pub struct Contracted {
 }
 
 impl Contracted {
+    /// Step 12: each output row is an independent reduction over its own two input rows
+    /// (no cross-row state), so this is exact data parallelism -- one Rayon task per
+    /// output row, each writing only its own `stride`-wide slice, with no possibility of
+    /// a different result at any thread count (every row computes the same sum either
+    /// way; only which thread does it changes).
     fn build(image: &Plane) -> Self {
+        use rayon::prelude::*;
+
         let (w, h) = (image.width(), image.height());
         let (stride, rows) = (w / 2, h / 2);
         let px = image.as_slice();
         let mut data = vec![0i32; stride * rows];
-        for i in 0..rows {
-            for j in 0..stride {
-                let (r0, c0) = (2 * i, 2 * j);
-                let sum = i32::from(px[r0 * w + c0])
-                    + i32::from(px[r0 * w + c0 + 1])
-                    + i32::from(px[(r0 + 1) * w + c0])
-                    + i32::from(px[(r0 + 1) * w + c0 + 1]);
-                data[i * stride + j] = sum;
-            }
-        }
+        data.par_chunks_mut(stride)
+            .enumerate()
+            .for_each(|(i, row_out)| {
+                let r0 = 2 * i;
+                for (j, out) in row_out.iter_mut().enumerate() {
+                    let c0 = 2 * j;
+                    *out = i32::from(px[r0 * w + c0])
+                        + i32::from(px[r0 * w + c0 + 1])
+                        + i32::from(px[(r0 + 1) * w + c0])
+                        + i32::from(px[(r0 + 1) * w + c0 + 1]);
+                }
+            });
         Self { data, stride }
     }
 
@@ -481,14 +490,14 @@ pub fn encode_image(image: &Plane, params: &EncodeParams) -> (Header, Vec<Leaf>,
         hdr: &hdr,
         params,
     };
-    let mut leaves = Vec::new();
-    let mut evals = 0u64;
-    walk(&ctx, 0, 0, hdr.virtual_size(), &mut leaves, &mut evals);
+    let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
     (hdr, leaves, evals)
 }
 
 /// The read-only context one `walk` recursion shares — bundled so the recursive calls
-/// stay readable instead of threading four parameters through every one.
+/// stay readable instead of threading four parameters through every one. Every field is
+/// a shared reference to plain data (no interior mutability), so `Ctx` is `Sync` and safe
+/// to share across the `rayon::join` calls below.
 struct Ctx<'a> {
     image: &'a Plane,
     contracted: &'a Contracted,
@@ -496,19 +505,30 @@ struct Ctx<'a> {
     params: &'a EncodeParams,
 }
 
-fn walk(ctx: &Ctx, row: u32, col: u32, size: u32, leaves: &mut Vec<Leaf>, evals: &mut u64) {
+/// Step 12: below this block size, a `rayon::join`'s task-spawn/steal overhead costs more
+/// than the search it would parallelise, so the four quadrants recurse on the calling
+/// thread instead. Chosen well under every project config's `min_size` (>= 4) so the
+/// parallel/sequential boundary never falls inside the region a config actually searches
+/// at — see the Step 12 prediction (P12.2) for the reasoning and the measured scaling
+/// curve this cutoff produces.
+const PARALLEL_SIZE_CUTOFF: u32 = 8;
+
+/// Search and partition are still one RMS-driven recursion (§5.2's split rule genuinely
+/// depends on this block's own search result), but emission is decoupled from it: each
+/// call returns its own `(leaves, evals)` instead of pushing into a shared `Vec`, so
+/// independent subtrees can be searched in parallel and merged afterwards in the same
+/// TL/BL/TR/BR order the sequential walk always used — the merge is pure concatenation,
+/// not a sort, so it reproduces the sequential leaf order (and hence bitstream) exactly
+/// regardless of how many threads did the searching.
+fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64) {
     let hdr = ctx.hdr;
     if row >= hdr.height || col >= hdr.width {
-        return; // §5.1
+        return (Vec::new(), 0); // §5.1
     }
     let forced = size > hdr.max_size || row + size > hdr.height || col + size > hdr.width;
     if forced {
         let half = size / 2;
-        walk(ctx, row, col, half, leaves, evals);
-        walk(ctx, row + half, col, half, leaves, evals);
-        walk(ctx, row, col + half, half, leaves, evals);
-        walk(ctx, row + half, col + half, half, leaves, evals);
-        return;
+        return split(ctx, row, col, half);
     }
 
     // §5.3 / coding_func.c `tip == 0`: a size-1 block is a raw, truncated pixel — no
@@ -517,7 +537,7 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32, leaves: &mut Vec<Leaf>, evals:
     if size == 1 {
         let pixel =
             u32::from(ctx.image.as_slice()[row as usize * ctx.image.width() + col as usize]);
-        leaves.push(Leaf {
+        let leaf = Leaf {
             row,
             col,
             size,
@@ -526,21 +546,17 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32, leaves: &mut Vec<Leaf>, evals:
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
-        });
-        return;
+        };
+        return (vec![leaf], 0);
     }
 
     let (candidate, block_evals) = search(ctx.image, ctx.contracted, row, col, size, ctx.params);
-    *evals += block_evals;
     let best_rms = candidate.map_or(f64::INFINITY, |c| c.rms);
 
     if best_rms > ctx.params.t_rms && size > hdr.min_size {
         let half = size / 2;
-        walk(ctx, row, col, half, leaves, evals);
-        walk(ctx, row + half, col, half, leaves, evals);
-        walk(ctx, row, col + half, half, leaves, evals);
-        walk(ctx, row + half, col + half, half, leaves, evals);
-        return;
+        let (leaves, sub_evals) = split(ctx, row, col, half);
+        return (leaves, sub_evals + block_evals);
     }
 
     let mut leaf = candidate.map_or(
@@ -584,7 +600,40 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32, leaves: &mut Vec<Leaf>, evals:
         leaf.dom_row = 0;
         leaf.dom_col = 0;
     }
-    leaves.push(leaf);
+    (vec![leaf], block_evals)
+}
+
+/// Recurse into the four quadrants of a `2*half x 2*half` region at `(row, col)`, in
+/// canonical TL/BL/TR/BR order (§5's tree order, matched by `mars_format`'s writer). Above
+/// [`PARALLEL_SIZE_CUTOFF`], the two pairs run via `rayon::join`; below it, sequentially on
+/// the calling thread. Either way the four results are concatenated in the same fixed
+/// order, so the merge itself introduces no thread-count dependence.
+fn split(ctx: &Ctx, row: u32, col: u32, half: u32) -> (Vec<Leaf>, u64) {
+    let quadrants = if half >= PARALLEL_SIZE_CUTOFF {
+        let ((tl, tl_e), (bl, bl_e)) = rayon::join(
+            || walk(ctx, row, col, half),
+            || walk(ctx, row + half, col, half),
+        );
+        let ((tr, tr_e), (br, br_e)) = rayon::join(
+            || walk(ctx, row, col + half, half),
+            || walk(ctx, row + half, col + half, half),
+        );
+        [(tl, tl_e), (bl, bl_e), (tr, tr_e), (br, br_e)]
+    } else {
+        [
+            walk(ctx, row, col, half),
+            walk(ctx, row + half, col, half),
+            walk(ctx, row, col + half, half),
+            walk(ctx, row + half, col + half, half),
+        ]
+    };
+    let mut leaves = Vec::new();
+    let mut evals = 0u64;
+    for (mut q_leaves, q_evals) in quadrants {
+        leaves.append(&mut q_leaves);
+        evals += q_evals;
+    }
+    (leaves, evals)
 }
 
 #[cfg(test)]

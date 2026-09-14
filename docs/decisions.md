@@ -1470,3 +1470,66 @@ duplication risk given the inner-loop workload already isolates exactly what cha
 **Tolerance impact.** None — this is a performance finding, not a correctness or tolerance
 change. `gate-11`'s pass/fail bar (exact-equality differential tests) never moved; only the
 *speed* changed, and only in the direction the regression should have been caught in.
+
+---
+
+## D32 · 2026-09-14 · Step 12's Rayon parallelism, and the measured scaling ceiling at this machine's core count
+
+**Context.** The brief's only design change (§4, Step 12): "decoupling search from
+emission" because Mars 1 writes the bitstream during the quadtree walk. In this codebase
+that coupling was already looser than the C reference — `mars_codec::encode::walk` pushed
+`Leaf`s into a shared `Vec` during the same recursion that ran the search, but a separate
+`mars_format` module already does the actual bitstream serialisation from the finished
+leaf list. The real remaining coupling was the shared `&mut Vec<Leaf>`/`&mut u64` the old
+`walk` threaded through every recursive call, which is exactly what makes a function
+un-parallelisable with `rayon::join` (both branches would need mutable access to the same
+value at once).
+
+**What changed.** `walk` and a new `split` helper now return `(Vec<Leaf>, u64)` per call
+instead of mutating shared state. `split` recurses into the four quadrants via
+`rayon::join` (two pairs) when the child size is >= `PARALLEL_SIZE_CUTOFF` (8), or
+sequentially on the calling thread below it, then concatenates the four results in the
+same TL/BL/TR/BR order the sequential code always used — concatenation, not a sort, so
+thread count cannot change leaf order. `Contracted::build`'s row loop (2:1 box-sum
+contraction) was parallelised separately with `rayon::par_chunks_mut`, one task per output
+row, since each row is an independent reduction over its own two input rows.
+
+**Determinism (the hard exit criterion).** `crates/mars-codec/tests/parallel_determinism.rs`
+encodes `mandelbrot` (512x512, exercises the RMS-driven split) and `mixed_129x127`
+(exercises the forced-subdivision split, §5.1) at 1/2/4/8/16 threads via scoped
+`rayon::ThreadPool`s (the global pool can only be built once per process, and this test
+needs several counts in one run) and asserts the header, eval count, and full leaf list —
+not just a summary statistic — are byte-identical to the single-threaded run at every
+count. Passed on the first attempt (P12.1): every block's search is a pure function of
+`(image, contracted, row, col, size, params)` with no cross-block shared-mutable state, so
+parallelising *which thread* runs a block's search cannot change that block's own
+floating-point result, and the plain-concatenation merge preserves order regardless of
+which thread finished first. `just gate-12` is this test.
+
+**Scaling (reported per the brief, not gated).** `marsbench parallel-bench`
+(`crates/mars-bench/src/parallel_bench.rs`), median of 5 runs per thread count, no A/B
+interleaving needed (one implementation, several thread counts, not two implementations to
+alternate between). Apple M3 Pro, `sysctl hw.perflevel0.physicalcpu`/
+`hw.perflevel1.physicalcpu` = 6/6 (12 logical total):
+
+| threads | mandelbrot (512²) | noise_u8 (256²) |
+|---:|---:|---:|
+| 1  | 1.00x (100.0%) | 1.00x (100.0%) |
+| 2  | 1.92x (95.8%)  | 1.97x (98.5%)  |
+| 4  | 3.44x (86.1%)  | 3.80x (95.0%)  |
+| 8  | 5.04x (63.0%)  | 5.94x (74.3%)  |
+| 16 | 5.54x (34.6%)  | 7.07x (44.2%)  |
+
+Confirms P12.2's direction and band (docs/predictions.md): efficiency stays high through
+4 threads (at or below the P-core count) and drops sharply at 8+ (past it, onto E-cores
+and oversubscription — 12 logical cores total, so 16 threads is genuine oversubscription,
+not just a slower core type). Not disentangled this session: whether the drop past 4-8 is
+purely core-topology saturation or partly `PARALLEL_SIZE_CUTOFF`-driven task overhead at
+`min_size=4`'s smallest blocks — both fixtures used the same cutoff, so this sweep cannot
+tell them apart. Worth a follow-up `PARALLEL_SIZE_CUTOFF` sweep only if a later step
+actually needs headroom above 6-8 threads on machines like this one; not blocking here
+since the brief's exit criterion is bitstream identity, not a speedup floor.
+
+**Tolerance impact.** None. No exactness bar was touched or widened — `gate-12`'s bar
+(bit-identical output at every thread count) is exactly the brief's own criterion, met
+without any relaxation.

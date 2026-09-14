@@ -12,6 +12,7 @@ authors.workspace = true
 mars-core = { workspace = true }
 mars-entropy = { workspace = true }
 mars-simd = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

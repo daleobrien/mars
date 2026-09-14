@@ -1064,3 +1064,46 @@ block counts). If parallel efficiency instead stays high (>= 70%) all the way to
 threads, that would mean the search cost per block dominates task overhead by a wider
 margin than expected, which would be worth noting as a reason *not* to bother with a
 size-based parallel cutoff in later steps.
+
+---
+
+## 2026-09-14 · Step 12 · outcomes
+
+`parallel_determinism` (`crates/mars-codec/tests/parallel_determinism.rs`) encodes
+`mandelbrot` (512x512, RMS-driven) and `mixed_129x127` (forced-subdivision geometry) at
+1/2/4/8/16 threads via scoped `rayon::ThreadPool`s and asserts the header, eval count, and
+full leaf list are byte-identical to the single-threaded run at every count.
+
+### P12.1 — **confirmed**, first attempt, no reordering bug
+
+Both fixtures pass at every thread count with no changes needed beyond the merge-by-plain-
+concatenation design itself. `just gate-12` is this test.
+
+### P12.2 — **confirmed in direction and magnitude band, with one number better than
+predicted**
+
+This machine (Apple M3 Pro, `hw.perflevel0.physicalcpu`/`hw.perflevel1.physicalcpu` = 6/6,
+12 total logical) measured, `mandelbrot` / `noise_u8`, median of 5 runs each, all times
+relative to that image's own 1-thread run:
+
+| threads | mandelbrot speedup | mandelbrot efficiency | noise_u8 speedup | noise_u8 efficiency |
+|---:|---:|---:|---:|---:|
+| 1  | 1.00x | 100.0% | 1.00x | 100.0% |
+| 2  | 1.92x |  95.8% | 1.97x |  98.5% |
+| 4  | 3.44x |  86.1% | 3.80x |  95.0% |
+| 8  | 5.04x |  63.0% | 5.94x |  74.3% |
+| 16 | 5.54x |  34.6% | 7.07x |  44.2% |
+
+Predicted 2-thread efficiency >= 80% and "well under 50%" by 16: both hold, and 2-thread
+efficiency (95.8-98.5%) is meaningfully higher than the >= 80% floor guessed at. The
+predicted mechanism (P-core count, 6 here, as the point where returns start diminishing)
+is directionally right — efficiency is still high at 4 threads (<= P-core count) and drops
+sharply at 8 (> P-core count, onto E-cores/oversubscription) — but the prediction's other
+named mechanism (small-block task-spawn overhead dominating at `min_size`) is not
+distinguished from simple core-topology saturation by this measurement alone: both
+fixtures use the same `min_size=4` / `PARALLEL_SIZE_CUTOFF=8` boundary, so this sweep
+cannot tell whether a lower cutoff would recover more of the 8-16 thread range or whether
+the ceiling is purely "this machine has 6 P-cores." Not investigated further this session
+— worth a follow-up sweep over `PARALLEL_SIZE_CUTOFF` if a later step needs more headroom
+above 6-8 threads. Filed alongside the full run command and machine fingerprint in
+`docs/decisions.md` D32.

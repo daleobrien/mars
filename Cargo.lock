@@ -562,6 +562,7 @@ dependencies = [
  "mars-core",
  "mars-entropy",
  "mars-simd",
+ "rayon",
  "sha2",
  "thiserror",
 ]
