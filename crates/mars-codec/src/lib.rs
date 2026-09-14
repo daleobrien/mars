@@ -11,6 +11,7 @@ pub mod encode;
 pub mod ifs;
 pub mod isometry;
 pub mod mars_format;
+pub mod progressive;
 pub mod quant;
 pub mod rate;
 pub mod residual;
