@@ -580,3 +580,19 @@ gate-cli-c:
     cargo test -p mars-search --release --lib
     cargo test -p mars-cli --release --test cli_c_gate -- --nocapture
     @echo "gate-cli-c: PASS (all 9 methods produce a decodable .mars file whose reported evals count matches the library path exactly; --method+--lambda and --method on colour input are both refused)"
+
+# CLI-D (encmars-decmars-cli-plan.md) -- `encmars --threads`, mirroring marsbench's own
+# rayon::ThreadPoolBuilder usage exactly.
+#
+# **`--gpu` deferred, not implemented this session** -- see docs/decisions.md D49. The
+# real blocker is architectural, not the code-duplication risk the plan's own abort rule
+# anticipated: mars_gpu::GpuSearcher::search is a one-size, whole-image kernel, not a
+# mars_search::CandidateRetriever a quadtree walk could call per-node, so there is no
+# existing integration point to wire a full GPU-driven encode through. D49 also notes the
+# plan's stated exit criterion (bit-identical CPU/GPU output) describes an oracle D25
+# already replaced with a bounded-divergence tolerance, so it would need correcting even
+# if the architectural gap were closed.
+gate-cli-d:
+    cargo build --release -p mars-cli
+    cargo test -p mars-cli --release --test cli_d_gate -- --nocapture
+    @echo "gate-cli-d: PASS (--threads byte-identical across 1/4/8 threads and against the default; --gpu not implemented this session, see docs/decisions.md D49)"

@@ -175,10 +175,29 @@ struct Cli {
     /// it here.
     #[arg(long, value_enum)]
     method: Option<MethodArg>,
+
+    /// Pin Rayon's global thread pool to this many threads instead of Rayon's own
+    /// default (`std::thread::available_parallelism()`). Matches `marsbench`'s own
+    /// `rayon::ThreadPoolBuilder` usage exactly, so the two binaries' thread-count
+    /// semantics don't silently diverge. Must be set before any parallel work runs
+    /// (Rayon lazily builds an unpinned default pool on first use otherwise), so this is
+    /// applied as the very first thing `main` does. Determinism (Step 12/14's own
+    /// discipline): every encode path in this crate is bit-identical across thread
+    /// counts by construction, so this flag exists for controlling wall-clock/CPU usage,
+    /// never for reproducing a different result.
+    #[arg(long)]
+    threads: Option<usize>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(threads) = cli.threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .context("pinning Rayon's global thread pool to --threads")?;
+    }
 
     let raw_dims = match (cli.raw_width, cli.raw_height) {
         (Some(w), Some(h)) => Some((w, h)),

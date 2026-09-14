@@ -3160,3 +3160,76 @@ withdrawn -6.82% remains open, unattempted, out of scope for this session, and n
 tracked as a numbered step of any plan this project currently has — if it is wanted, it
 needs its own scoped step (a `.mars` format-version bump, decoder support, and a fresh
 BD-rate measurement of its own).
+
+---
+
+## D49 · 2026-09-15 · CLI-D (`encmars-decmars-cli-plan.md`): `--threads` shipped, `--gpu` deferred — `mars-gpu`'s search kernel is not a `CandidateRetriever`, and D25 already relaxed its own oracle to a tolerance, not bit-identity
+
+**Context.** CLI-D's deliverable is `encmars --threads <n>` (mirroring `marsbench`'s own
+`rayon::ThreadPoolBuilder` usage) and `encmars --gpu` (running the search on
+`mars_gpu::GpuSearcher` instead of the CPU path), with an abort rule anticipating one
+specific risk: that wiring `--gpu` would require duplicating `GpuSearchParams`
+construction logic currently private to `marsbench`, in which case that construction
+should be factored into `mars-cli::lib.rs` first rather than copy-pasted.
+
+**`--threads`: shipped, exactly as scoped.** `encmars --threads <n>` pins Rayon's global
+pool via the same `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` call
+`marsbench`'s own `gpu_search_check`/other commands use, applied as the first thing
+`main` does (before any parallel work can lazily build an unpinned default pool). Default
+(flag omitted) is unchanged — Rayon's own default parallelism, matching every `encmars`
+invocation before this flag existed. Verified byte-identical output at `--threads 1` vs.
+`--threads 4` on a real encode (Step 12/14's determinism discipline, which every encode
+path in this crate already satisfies by construction — this flag does not add a new
+determinism obligation, it exercises an existing one).
+
+**`--gpu`: deferred, for a different and more fundamental reason than the plan's own
+abort rule anticipated.** The abort rule worried about code-duplication risk; the actual
+blocker is architectural. `mars_gpu::GpuSearcher::search(image, params: &GpuSearchParams)`
+takes one **single, fixed `size`** and returns the top-1 domain candidate for **every**
+range block of that size across the whole image in one dispatch — it is a raw,
+image-wide, one-size search kernel, not a `mars_search::CandidateRetriever` (the trait
+`mars-search`'s nine methods, and CLI-C's `--method` wiring, actually implement, and the
+abstraction `mars_codec::encode`'s recursive per-node quadtree walk would need in order
+to substitute *any* alternative search engine node-by-node during a live top-down/bottom-
+up partition decision). There is no code today that drives `GpuSearcher` from inside a
+quadtree walk producing a real leaf partition — `mars_bench::gpu_search::gate` (Step 7's
+own differential harness) calls it directly, once per size, purely to *compare* its
+per-block candidates against the CPU search's own candidates at that size; it never
+assembles those candidates into an actual encoded image. Wiring `--gpu` into `encmars` as
+a genuine substitute search engine inside a real encode would mean either (a) restricting
+`encmars --gpu` to a single fixed `--min-size == --max-size` run (no real quadtree, a
+materially different and much narrower capability than "encode this image with GPU
+search"), or (b) writing a new per-node GPU dispatch integration into `mars_codec::
+encode`'s walk that does not exist today — real codec-integration work, not CLI plumbing,
+and squarely the kind of scope this plan's own opening framing (`docs/decisions.md`
+throughout this plan) says is out of bounds.
+
+**A second, independent reason the plan's own exit criterion needs correcting even if
+(a) or (b) were attempted.** CLI-D's stated exit criterion — "`--gpu` output is bit-
+identical to the CPU path... reusing Step 7's own bit-identity oracle" — describes an
+oracle that no longer exists in that form. D25 (this file, Step 7) is itself a
+CONTRACT-CHANGE that relaxed Step 7's own gate from bit-identical equality to a bounded-
+divergence-rate/relative-RMS-delta tolerance (`MAX_DIVERGENCE_RATE = 0.001`,
+`MAX_RELATIVE_RMS_DELTA = 0.01`, both in `crates/mars-cli/src/bin/marsbench.rs`'s
+`gpu_search_check`), because the GPU and CPU search engines are not, in fact, bit-
+identical to each other — a real, already-recorded, already-accepted divergence source.
+Any future `--gpu` gate would need to reuse *that* tolerance-based oracle, not a bit-
+identity one that predates D25 and that D25 itself replaced.
+
+**Decision.** Ship `--threads` now. Do not implement `--gpu` this session — it is not a
+CLI-plumbing gap the way CLI-A/B/C's flags were (each of those wired an already-complete,
+already-integrated capability through to the command line); it needs the
+`CandidateRetriever`-shaped GPU integration into `mars_codec::encode`'s walk built first,
+which is new codec-integration engineering, not exposure of existing capability. This is
+recorded as a scope cut, per this project's convention, rather than a silent omission --
+if GPU-accelerated full encodes are wanted, that integration is its own scoped step (most
+naturally: implement `mars_search::CandidateRetriever` for a `GpuSearcher`-backed type,
+which would then automatically become reachable through CLI-C's own `--method` mechanism
+rather than needing a second, parallel `--gpu` flag at all).
+
+**Tolerance impact.** None — no gate's assertion was calibrated or widened; `--gpu`
+simply does not exist yet, so there is nothing to gate.
+
+**Scope note.** `--threads` is the whole of this session's CLI-D deliverable. `--gpu`
+remains open, unattempted, and not tracked as a numbered step of any plan this project
+currently has.
