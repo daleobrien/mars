@@ -1780,3 +1780,18 @@ warm-up that itself runs `walk_rd` once would roughly double every encode's cost
 `docs/decisions.md`'s D40 records this as the named next step, not a silently repeated
 deferral, and flags the gate's own calibrated ceiling as an open concern for the kill-
 criteria audit rather than asserting it is obviously fine.
+
+### Follow-up — the named fix was implemented and attempted; it did not close the gap
+
+Per the parent session's direction, the self-consistent two-pass rate-estimation warm-up
+named above was implemented (`mars_codec::encode::build_rate_snapshot`, `docs/
+decisions.md`'s D41). It was verified correct (the search's superset-minimisation
+property and cross-thread determinism both still hold), but the re-measured BD-rate
+regression is **larger**, not smaller: mean **+3.90%** (kodim01 +3.94%, kodim02 +3.85%),
+up from the single-pass warm-up's +2.05%. This is the opposite of the intended effect,
+reported plainly rather than smoothed over or fixed further per the parent session's own
+instruction ("report that back plainly rather than trying further workarounds"). D41 has
+a candidate mechanism (freezing a single warm-up pass's marginal mode-3 adoption can look
+artificially cheap in the final snapshot, encouraging more of it rather than converging),
+offered as a hypothesis, not established with the same rigour as D40's root-cause finding.
+This remains an open finding for the parent session to weigh.

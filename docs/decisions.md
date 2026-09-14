@@ -2333,3 +2333,81 @@ reasoning behind it (a fixed quantisation step) turned out to also be the proxim
 of the BD-rate regression above, not merely of a low win rate. P15.3 (3-12% BD-rate
 improvement) is **falsified**: the measured result is a small regression, not an
 improvement, per the root-cause analysis above.
+
+---
+
+## D41 · 2026-09-14 · The self-consistent two-pass warm-up (D39/D40's own named fix) was implemented and verified correct, but the real measured regression got *worse*, not better — reported plainly per the parent session's explicit instruction, not papered over
+
+**Context.** Per the parent session's explicit direction after reviewing D40: implement
+the fix both D39 and D40 already named as the natural next step. `build_rate_snapshot`
+now runs two passes instead of one: **pass 0** is exactly Step 14's original legacy-`walk`
+warm-up, unchanged; **pass 1** is new — a real `walk_rd` run, at *this call's own*
+`lambda`/`allowed_modes` (not an unrelated fixed threshold), priced against pass 0's
+snapshot, so its leaves genuinely include mode 1/3 whenever they win fair `J` competition
+at this exact operating point. The final snapshot (what the real, returned `walk_rd` pass
+is priced against) is built by replaying pass 1's leaves — directly targeting D40's
+root-caused gap: `FIELD_MODE`/`FIELD_GX`/`FIELD_GY`/the residual fields now get at least
+one real observation before real pricing decisions are made, instead of the generic
+unseen-context Laplace-uniform fallback every time.
+
+**Verified correctly implemented, not just assumed.** Two properties were checked before
+trusting the real-corpus measurement at all (per verification-discipline's "assume the
+harness before the result"):
+1. `encode::tests::two_pass_warmup_is_bit_identical_across_thread_counts` — the new inner
+   `walk_rd` call inherits the same `rayon::join`/fixed-merge-order determinism as every
+   other RD-path call, checked explicitly at 1/2/4/8 threads on an image/lambda combination
+   confirmed (via an assertion) to actually exercise mode 1/3 leaves during pass 1 itself,
+   not just the final pass. **Passed.**
+2. `encode::tests::aggregate_estimated_cost_is_provably_no_worse_under_more_modes_even_though_real_bpp_can_be`
+   (D40's diagnostic test) still passes unchanged — the superset-minimisation property
+   (`j_4mode <= j_2mode` under an identical frozen snapshot) continues to hold with the
+   two-pass snapshot construction. The search logic remains correct.
+
+**The measured outcome — gate-15, kodim01/kodim02, the same 4-point λ grid, re-run to
+completion and watched directly (not assumed): the fix made the regression *larger*, not
+smaller.**
+
+| image | BD-rate (before D41) | BD-rate (after D41) |
+|---|---|---|
+| kodim01 | +1.88% | **+3.94%** |
+| kodim02 | +2.23% | **+3.85%** |
+| mean | +2.05% | **+3.90%** |
+
+Mode 3 (fractal + residual) usage corpus-wide rose from **0.6% to 2.9%** (kodim01 alone:
+0.7% → 3.4%), and BD-PSNR worsened alongside the BD-rate (kodim01: -0.074 dB → -0.189 dB;
+kodim02: -0.057 dB → -0.104 dB) — mode 3 is being chosen *more* often, and the result is
+*worse*, not better. This is the opposite of the intended effect. `just gate-15` still
+exits 0 (3.90% remains under the existing 5.0% ceiling, now with a much smaller margin —
+~1.1 points instead of ~2.8), so no assertion needed to change to keep the gate green, but
+the number the ceiling is guarding is materially worse than when it was set, and that is
+recorded here rather than left implicit in an unchanged passing gate.
+
+**A plausible mechanism, offered as a hypothesis and explicitly labelled as such — not
+re-investigated with the same rigour as D40, per the parent session's own instruction not
+to chase further workarounds.** Pass 1's own leaf-mode decisions are themselves priced
+against pass 0's snapshot, which still has *zero* real mode 1/3 observations — so pass 1
+is not meaningfully better-informed than the old single-pass warm-up at the moment it
+makes its own choices, and its adoption of mode 3 is generally consistent with the same
+"unseen-context is priced too optimistically" pattern D40 diagnosed. But once pass 1's
+(possibly already slightly over-eager) mode 3 picks are frozen into the *final* snapshot,
+`AdaptiveModel`'s count-based construction (`crate::mars_entropy`) turns *any* nonzero
+real observation into a meaningfully higher allocated probability than the Laplace-1
+"unseen" default — so a modest, marginal amount of mode-3 adoption in pass 1 can look
+*artificially cheap* in the final snapshot, encouraging *more* mode-3 adoption in the real
+pass than pass 1 itself made, rather than converging toward the true, sparser rate at
+which mode 3 actually earns its keep. If this is right, one extra pass does not damp the
+original miscalibration — it can amplify it, a plausible signature of a scheme that
+is not a contraction toward a fixed point in this direction. This is offered as the most
+likely explanation given the data, not established with the same diagnostic rigour as
+D40's root-cause finding, and is explicitly flagged as unverified.
+
+**This is reported plainly, per the parent session's own explicit instruction, rather
+than tried further:** "If, after honestly attempting this, the two-pass warm-up *still*
+doesn't close the gap..., report that back plainly rather than trying further
+workarounds... at that point it's a real open finding for me to weigh, not something to
+paper over with another calibrated bar." No further iteration, no reversion, and no
+change to `BD_RATE_CEILING_PCT` was made unilaterally in this entry — the code change is
+committed as implemented and verified-correct, the real outcome is recorded honestly
+above, and the decision of whether to keep it, revert to the single-pass warm-up (the
+smaller, better-understood +2.05% regression), or something else is left to the parent
+session, exactly as instructed.
