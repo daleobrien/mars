@@ -73,6 +73,11 @@ enum Cmd {
     /// Step 12's thread-count scaling curve, reported only (not gated -- `cargo test -p
     /// mars-codec --test parallel_determinism` is the bitstream-identity exit criterion).
     ParallelBench(ParallelBenchArgs),
+    /// Gate C: CPU encode speedup vs. Mars 1 at matched RD (NEON x threads, GPU
+    /// excluded), Fisher-method-vs-Fisher-method, A/B interleaved. Exits 0/1 on the
+    /// brief's >= 20x target (§A1, gate-c); the kill criterion (< 5x) is called out
+    /// separately in the summary if hit.
+    GateCBench(GateCBenchArgs),
     /// Step 7's bit-identical + speedup exit criteria as a command that exits 0 or 1
     /// (§A1, gate-7).
     GpuSearchCheck(GpuSearchCheckArgs),
@@ -217,6 +222,26 @@ struct SimdBenchArgs {
     sizes: Vec<u32>,
     #[arg(long, default_value_t = 5)]
     runs: usize,
+}
+
+#[derive(Args)]
+struct GateCBenchArgs {
+    #[arg(long, default_value = "corpus/standard.images.json")]
+    standard_index: PathBuf,
+    /// Image names to benchmark. Defaults to a fixed 5-image subset of `standard`
+    /// (fast enough to run every session; the full 24-image corpus is available via
+    /// this flag for a final Gate C record).
+    #[arg(long, value_delimiter = ',')]
+    images: Vec<String>,
+    #[arg(long, default_value = "target/mars1")]
+    mars1_dir: PathBuf,
+    #[arg(long, default_value = "target/gate-c")]
+    scratch: PathBuf,
+    #[arg(long, default_value_t = 5)]
+    runs: usize,
+    /// Append-only JSONL to write to (§M7). Omit to skip recording.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -486,6 +511,7 @@ fn main() -> Result<()> {
         Cmd::MarsFormatCheck(a) => mars_format_check(a),
         Cmd::SimdBench(a) => simd_bench(a),
         Cmd::ParallelBench(a) => parallel_bench(a),
+        Cmd::GateCBench(a) => gate_c_bench(a),
         Cmd::GpuSearchCheck(a) => gpu_search_check(a),
         Cmd::GpuSearchBench(a) => gpu_search_bench(a),
         Cmd::OracleBuild(a) => oracle_build(a),
@@ -1947,6 +1973,160 @@ fn simd_bench(a: SimdBenchArgs) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Gate C's brief-specified target: CPU encode >= 20x Mars 1 at matched RD. The kill
+/// criterion from §6 (after Gate C, < 5x stops the project) is checked and reported
+/// separately, since it is a project-level decision, not this command's own exit code.
+const GATE_C_TARGET_SPEEDUP: f64 = 20.0;
+const GATE_C_KILL_SPEEDUP: f64 = 5.0;
+/// Matched-RD tolerance, reused from Step 6's own already-adopted BD-PSNR floor
+/// (`mars_bench::rust_encoder::BD_PSNR_TOLERANCE_DB`) since both encoders here run the
+/// identical Fisher algorithm at the identical params -- any PSNR gap this size or larger
+/// points at a harness/config mismatch, not a real quality difference.
+const GATE_C_PSNR_TOLERANCE_DB: f64 = 0.2;
+
+fn gate_c_bench(a: GateCBenchArgs) -> Result<()> {
+    eprintln!("{}", mars_bench::gpu_search::machine_fingerprint_line());
+    let root = Path::new(".");
+    let bins = Mars1Binaries::from_dir(&a.mars1_dir)?;
+    std::fs::create_dir_all(&a.scratch)?;
+
+    let images = mars_bench::sweep::ImageSet::read(&root.join(&a.standard_index))?.images;
+    let want: Vec<&str> = if a.images.is_empty() {
+        vec!["kodim01", "kodim05", "kodim13", "kodim19", "kodim23"]
+    } else {
+        a.images.iter().map(String::as_str).collect()
+    };
+
+    let threads = p_cores().max(1);
+    eprintln!("(Mars 2 full-thread runs pinned to {threads} P-core threads)");
+
+    println!(
+        "{:<10} {:>10} {:>10} {:>7} {:>7} {:>8} {:>8} {:>8} {:>8} {:>9} {:>9}",
+        "image",
+        "mars1(ms)",
+        "mars2(ms)",
+        "total×",
+        "thread×",
+        "m1 bpp",
+        "m2 bpp",
+        "m1 dB",
+        "m2 dB",
+        "m1 dec(s)",
+        "m2 dec(s)"
+    );
+
+    let mut out_rows: Vec<serde_json::Value> = Vec::new();
+    let mut speedups: Vec<f64> = Vec::new();
+    let mut thread_speedups: Vec<f64> = Vec::new();
+    let mut worst_psnr_gap = 0.0f64;
+    for entry in &images {
+        if !want.contains(&entry.name.as_str()) {
+            continue;
+        }
+        let workdir = a.scratch.join(&entry.name);
+        let point = mars_bench::gate_c::run_one(
+            &bins,
+            &workdir,
+            &root.join(&entry.file),
+            entry.width,
+            entry.height,
+            a.runs,
+            threads,
+        )
+        .with_context(|| format!("gate-c on {}", entry.name))?;
+
+        println!(
+            "{:<10} {:>10.2} {:>10.2} {:>6.2}x {:>6.2}x {:>8.4} {:>8.4} {:>8.2} {:>8.2} {:>9.4} {:>9.4}",
+            point.image,
+            point.mars1_encode_median.as_secs_f64() * 1e3,
+            point.mars2_encode_median.as_secs_f64() * 1e3,
+            point.encode_speedup,
+            point.thread_speedup,
+            point.mars1_bpp,
+            point.mars2_bpp,
+            point.mars1_psnr,
+            point.mars2_psnr,
+            point.mars1_decode_seconds,
+            point.mars2_decode_median.as_secs_f64(),
+        );
+
+        let psnr_gap = (point.mars1_psnr - point.mars2_psnr).abs();
+        worst_psnr_gap = worst_psnr_gap.max(psnr_gap);
+        speedups.push(point.encode_speedup);
+        thread_speedups.push(point.thread_speedup);
+
+        out_rows.push(serde_json::json!({
+            "image": point.image,
+            "mars1_encode_median_s": point.mars1_encode_median.as_secs_f64(),
+            "mars1_encode_mad_s": point.mars1_encode_mad.as_secs_f64(),
+            "mars2_encode_median_s": point.mars2_encode_median.as_secs_f64(),
+            "mars2_encode_mad_s": point.mars2_encode_mad.as_secs_f64(),
+            "mars2_1thread_median_s": point.mars2_1thread_median.as_secs_f64(),
+            "mars2_1thread_mad_s": point.mars2_1thread_mad.as_secs_f64(),
+            "encode_speedup": point.encode_speedup,
+            "thread_speedup": point.thread_speedup,
+            "mars1_bpp": point.mars1_bpp,
+            "mars2_bpp": point.mars2_bpp,
+            "mars1_psnr_db": point.mars1_psnr,
+            "mars2_psnr_db": point.mars2_psnr,
+            "mars1_decode_seconds": point.mars1_decode_seconds,
+            "mars2_decode_median_s": point.mars2_decode_median.as_secs_f64(),
+            "runs": a.runs,
+            "full_threads": threads,
+            "search_method": "fisher",
+        }));
+    }
+
+    if speedups.is_empty() {
+        bail!(
+            "no images matched --images (or {} is empty)",
+            a.standard_index.display()
+        );
+    }
+
+    speedups.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    thread_speedups.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median_speedup = speedups[speedups.len() / 2];
+    let median_thread_speedup = thread_speedups[thread_speedups.len() / 2];
+
+    println!();
+    println!(
+        "median total speedup: {median_speedup:.2}x (target >= {GATE_C_TARGET_SPEEDUP:.0}x, kill floor {GATE_C_KILL_SPEEDUP:.0}x)"
+    );
+    println!("median thread contribution: {median_thread_speedup:.2}x (1-thread / {threads}-thread, same implementation)");
+    println!("worst matched-RD |PSNR gap|: {worst_psnr_gap:.3} dB (tolerance {GATE_C_PSNR_TOLERANCE_DB:.1} dB)");
+
+    if let Some(out) = &a.out {
+        let mut store = mars_bench::ResultStore::open(out)?;
+        for data in &out_rows {
+            let row = mars_bench::Row::new("gate-c", mars_bench::Provenance::detect(0), data)?;
+            store.append(&row)?;
+        }
+        println!("appended {} rows to {}", out_rows.len(), out.display());
+    }
+
+    if worst_psnr_gap > GATE_C_PSNR_TOLERANCE_DB {
+        bail!(
+            "gate-c: FAIL -- matched-RD PSNR gap {worst_psnr_gap:.3} dB exceeds {GATE_C_PSNR_TOLERANCE_DB:.1} dB \
+             (Mars 1 and Mars 2 disagree on the same algorithm/params -- a harness bug, not a speed result)"
+        );
+    }
+    if median_speedup < GATE_C_KILL_SPEEDUP {
+        bail!(
+            "gate-c: FAIL -- median speedup {median_speedup:.2}x is below the project's kill floor \
+             ({GATE_C_KILL_SPEEDUP:.0}x, implementation-plan.md §6): stop and diagnose before proceeding"
+        );
+    }
+    if median_speedup < GATE_C_TARGET_SPEEDUP {
+        bail!(
+            "gate-c: FAIL -- median speedup {median_speedup:.2}x is below the brief's {GATE_C_TARGET_SPEEDUP:.0}x target \
+             (above the {GATE_C_KILL_SPEEDUP:.0}x kill floor, so this is 'stop and diagnose', not 'stop the project')"
+        );
+    }
+    println!("gate-c: PASS");
     Ok(())
 }
 

@@ -270,8 +270,13 @@ simd-bench:
 # asserts the header, eval count, and full leaf list are byte-identical to the
 # single-threaded run, on both the RMS-driven fixture (`mandelbrot`, 512x512) and the
 # forced-subdivision one (`mixed_129x127`).
+#
+# Gate C prep (docs/decisions.md D33) ported the identical split/rayon::join pattern into
+# `mars_search::encode_image`'s Fisher walk (previously exhaustive-only), so its own
+# `parallel_determinism` test (mandelbrot only -- `mars_search`'s `SizedRetrievers` doesn't
+# support the forced-subdivision fixture, see that test's own doc) is included here too.
 gate-12:
-    cargo test -p mars-codec --release
+    cargo test -p mars-codec -p mars-search --release
     @echo "gate-12: PASS"
 
 # Step 12's thread-count scaling curve, reported only (not gated -- see gate-12's own

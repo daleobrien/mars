@@ -24,8 +24,11 @@ pub mod saupe;
 pub mod saupe_fisher;
 pub mod tables;
 
-use mars_codec::encode::{cross_term, domain_sums, Contracted, EncodeParams, RawMoments};
+use mars_codec::encode::{
+    cross_term_permuted, domain_sums, permute_range, Contracted, EncodeParams, RawMoments,
+};
 use mars_codec::ifs::{Header, Leaf};
+use mars_codec::isometry;
 use mars_core::Plane;
 
 /// What one [`CandidateRetriever::index`] call needs: the whole image's 2:1 box-sum plane
@@ -146,7 +149,12 @@ impl Iterator for CandidateIter<'_> {
 /// coded; `candidates` is called once per range block and must restrict the search to
 /// whatever subset the method's index supports — `Exhaustive` is the trivial case that
 /// returns every legal domain position x isometry.
-pub trait CandidateRetriever {
+///
+/// `Sync` (Gate C / the parallel `walk` below): `index` runs once, single-threaded, before
+/// any `candidates` call; every method's index is plain owned data (no interior
+/// mutability) by the time `candidates(&self, ..)` — read-only — is shared across
+/// `rayon::join` tasks.
+pub trait CandidateRetriever: Sync {
     fn index(&mut self, pool: &DomainPool);
     fn candidates(&self, range: &RangeBlock) -> CandidateIter<'_>;
 }
@@ -171,12 +179,42 @@ pub fn search_block(
     let size = range.size as usize;
     let s0 = i64::from(range.size) * i64::from(range.size);
 
+    // Permuted once per isometry here, not once per candidate inside the loop below --
+    // mirrors `mars_codec::encode::search`'s own fix for the identical regression (D31):
+    // `cross_term`'s NEON dot product only pays off once the permutation it needs is
+    // amortised across many calls sharing an isometry, and a range block's candidates
+    // (at most 8 distinct isometries, `MAPPING[isom][dom_iso]` over `dom_iso in 0..8`)
+    // reuse each permutation many times over the whole eval loop (D35).
+    let range_by_iso: [Vec<u8>; 8] =
+        std::array::from_fn(|k| permute_range(range.pixels, k as u8, size));
+    debug_assert_eq!(isometry::ALL, [0, 1, 2, 3, 4, 5, 6, 7]);
+
+    let timing = diag::enabled();
+    let cand_start = timing.then(std::time::Instant::now);
+    let candidates = retriever.candidates(range);
+    if let Some(s) = cand_start {
+        diag::CANDIDATES_NS.fetch_add(
+            s.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    if timing {
+        diag::BLOCKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    let eval_start = timing.then(std::time::Instant::now);
     let mut best: Option<(Candidate, u32, u32, f64)> = None;
     let mut evals = 0u64;
-    for c in retriever.candidates(range) {
+    for c in candidates {
         let (dr_half, dc_half) = ((c.dom_row / 2) as usize, (c.dom_col / 2) as usize);
         let (s1_x4, s2_x16) = domain_sums(contracted, dr_half, dc_half, size);
-        let t1_x4 = cross_term(contracted, dr_half, dc_half, size, c.isometry, range.pixels);
+        let t1_x4 = cross_term_permuted(
+            contracted,
+            dr_half,
+            dc_half,
+            size,
+            &range_by_iso[c.isometry as usize],
+        );
         let moments = RawMoments {
             s0,
             s1_x4,
@@ -196,7 +234,66 @@ pub fn search_block(
             best = Some((c, qalfa, qbeta, rms));
         }
     }
+    if let Some(s) = eval_start {
+        diag::EVAL_NS.fetch_add(
+            s.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        diag::EVALS.fetch_add(evals, std::sync::atomic::Ordering::Relaxed);
+    }
     (best, evals)
+}
+
+/// A root-causing diagnostic for Gate C's D33 finding (single-threaded Fisher encode
+/// measured ~2x slower than Mars 1's C Fisher despite matching evals/transform) — opt-in
+/// via `MARS_SEARCH_TIMING=1`, same pattern as `mars-gpu`'s `MARS_GPU_TIMING` (D24). Not
+/// on the hot path unless enabled: `diag::enabled()` is a `OnceLock` read, and the timers
+/// are plain atomics with no lock contention.
+pub mod diag {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    pub static CANDIDATES_NS: AtomicU64 = AtomicU64::new(0);
+    pub static EVAL_NS: AtomicU64 = AtomicU64::new(0);
+    pub static BLOCKS: AtomicU64 = AtomicU64::new(0);
+    pub static EVALS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var("MARS_SEARCH_TIMING").is_ok())
+    }
+
+    pub fn reset() {
+        CANDIDATES_NS.store(0, Ordering::Relaxed);
+        EVAL_NS.store(0, Ordering::Relaxed);
+        BLOCKS.store(0, Ordering::Relaxed);
+        EVALS.store(0, Ordering::Relaxed);
+    }
+
+    /// Deliberately coarse: one timer pair per *block* (not per eval), so this adds one
+    /// `Instant::now()` pair per `search_block` call rather than per candidate. An earlier
+    /// version of this diagnostic timed `domain_sums`/`cross_term`/`fit_f64` individually
+    /// (two extra `Instant::now()` calls per *eval*) and measured its own overhead as ~26%
+    /// of the loop it was trying to measure at ~15M evals/run -- accurate enough to see
+    /// that `domain_sums`+`cross_term` dominates `fit_f64`, but not to trust the absolute
+    /// ns/eval split. Kept at this granularity instead: still isolates "candidate-list
+    /// construction" from "the per-candidate domain_sums/cross_term/fit_f64 loop" cleanly,
+    /// which is what mattered for Gate C's D33 finding.
+    pub fn summary() -> String {
+        let cand_ms = CANDIDATES_NS.load(Ordering::Relaxed) as f64 / 1e6;
+        let eval_ms = EVAL_NS.load(Ordering::Relaxed) as f64 / 1e6;
+        let blocks = BLOCKS.load(Ordering::Relaxed);
+        let evals = EVALS.load(Ordering::Relaxed);
+        format!(
+            "blocks={blocks} evals={evals} candidates()={cand_ms:.2}ms eval-loop={eval_ms:.2}ms \
+             ({:.1}ns/eval)",
+            if evals > 0 {
+                eval_ms * 1e6 / evals as f64
+            } else {
+                0.0
+            }
+        )
+    }
 }
 
 /// The seven methods this crate provides, `Exhaustive` included as the sanity baseline
@@ -306,7 +403,7 @@ impl SizedRetrievers {
 /// a plain struct here rather than a tuple (`clippy::type_complexity`) and rather than a
 /// dependency on `mars-bench` (wrong direction: `mars-bench` depends on this crate, not
 /// the reverse). `mars-bench`'s driver converts one-for-one into `MethodPick`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pick {
     pub row: u32,
     pub col: u32,
@@ -341,56 +438,55 @@ pub fn encode_image(
         int_max_alfa: quantise(params.max_alfa / 8.0 * 256.0, 255),
     };
     let contracted = mars_codec::encode::build_contracted(image);
-    let mut leaves = Vec::new();
-    let mut evals = 0u64;
-    let mut picks = Vec::new();
-    walk(
+    let ctx = Ctx {
         image,
-        &contracted,
-        &hdr,
+        contracted: &contracted,
+        hdr: &hdr,
         params,
         retrievers,
-        0,
-        0,
-        hdr.virtual_size(),
-        &mut leaves,
-        &mut evals,
-        &mut picks,
-    );
+    };
+    let (leaves, evals, picks) = walk(&ctx, 0, 0, hdr.virtual_size());
     (hdr, leaves, evals, picks)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn walk(
-    image: &Plane,
-    contracted: &Contracted,
-    hdr: &Header,
-    params: &EncodeParams,
-    retrievers: &SizedRetrievers,
-    row: u32,
-    col: u32,
-    size: u32,
-    leaves: &mut Vec<Leaf>,
-    evals: &mut u64,
-    picks: &mut Vec<Pick>,
-) {
+/// The read-only context one `walk` recursion shares (mirrors `mars_codec::encode::Ctx`
+/// from Step 12): every field is a shared reference to plain, already-indexed data, so
+/// `Ctx` is `Sync` and safe to share across the `rayon::join` calls in [`split`].
+struct Ctx<'a> {
+    image: &'a Plane,
+    contracted: &'a Contracted,
+    hdr: &'a Header,
+    params: &'a EncodeParams,
+    retrievers: &'a SizedRetrievers,
+}
+
+/// Gate C: below this block size, a `rayon::join`'s task-spawn/steal overhead costs more
+/// than the classified search it would parallelise. Same value and reasoning as
+/// `mars_codec::encode::PARALLEL_SIZE_CUTOFF` (Step 12) — chosen well under every
+/// project config's `min_size` (>= 4) so the boundary never falls inside a config's own
+/// search range.
+const PARALLEL_SIZE_CUTOFF: u32 = 8;
+
+/// Search and partition are one RMS-driven recursion, but emission is decoupled from it
+/// (Step 12's pattern, ported here for Gate C): each call returns its own
+/// `(leaves, evals, picks)` instead of pushing into shared `Vec`s, so independent
+/// subtrees can be searched in parallel and merged afterwards in the same TL/BL/TR/BR
+/// order the original sequential walk always used.
+fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64, Vec<Pick>) {
+    let hdr = ctx.hdr;
     if row >= hdr.height || col >= hdr.width {
-        return;
+        return (Vec::new(), 0, Vec::new());
     }
     let forced = size > hdr.max_size || row + size > hdr.height || col + size > hdr.width;
     if forced {
         let half = size / 2;
-        for (r, c) in quad(row, col, half) {
-            walk(
-                image, contracted, hdr, params, retrievers, r, c, half, leaves, evals, picks,
-            );
-        }
-        return;
+        return split(ctx, row, col, half);
     }
 
     if size == 1 {
-        let pixel = u32::from(image.as_slice()[row as usize * image.width() + col as usize]);
-        leaves.push(Leaf {
+        let pixel =
+            u32::from(ctx.image.as_slice()[row as usize * ctx.image.width() + col as usize]);
+        let leaf = Leaf {
             row,
             col,
             size,
@@ -399,13 +495,13 @@ fn walk(
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
-        });
-        return;
+        };
+        return (vec![leaf], 0, Vec::new());
     }
 
     let size_u = size as usize;
-    let px = image.as_slice();
-    let stride = image.width();
+    let px = ctx.image.as_slice();
+    let stride = ctx.image.width();
     let mut pixels = vec![0u8; size_u * size_u];
     for i in 0..size_u {
         let src = (row as usize + i) * stride + col as usize;
@@ -417,26 +513,21 @@ fn walk(
         size,
         pixels: &pixels,
     };
-    let retriever = retrievers.get(size);
+    let retriever = ctx.retrievers.get(size);
     let (best, block_evals) = search_block(
         retriever,
-        contracted,
+        ctx.contracted,
         &range,
-        params.max_alfa,
-        params.bits_alfa,
-        params.bits_beta,
+        ctx.params.max_alfa,
+        ctx.params.bits_alfa,
+        ctx.params.bits_beta,
     );
-    *evals += block_evals;
     let best_rms = best.map_or(f64::INFINITY, |(_, _, _, rms)| rms);
 
-    if best_rms > params.t_rms && size > hdr.min_size {
+    if best_rms > ctx.params.t_rms && size > hdr.min_size {
         let half = size / 2;
-        for (r, c) in quad(row, col, half) {
-            walk(
-                image, contracted, hdr, params, retrievers, r, c, half, leaves, evals, picks,
-            );
-        }
-        return;
+        let (leaves, sub_evals, picks) = split(ctx, row, col, half);
+        return (leaves, sub_evals + block_evals, picks);
     }
 
     let mut leaf = best.map_or(
@@ -462,6 +553,7 @@ fn walk(
         },
     );
 
+    let mut picks = Vec::new();
     if let Some((c, qalfa, qbeta, rms)) = best {
         picks.push(Pick {
             row,
@@ -476,7 +568,7 @@ fn walk(
         });
     }
 
-    if leaf.qalfa.abs_diff(0) <= params.zero_threshold {
+    if leaf.qalfa.abs_diff(0) <= ctx.params.zero_threshold {
         let mut range_sum = 0i64;
         for i in 0..size_u {
             let src = (row as usize + i) * stride + col as usize;
@@ -485,23 +577,54 @@ fn walk(
             }
         }
         let mean = range_sum as f64 / (size_u * size_u) as f64;
-        let max_qbeta = (1u32 << params.bits_beta) - 1;
+        let max_qbeta = (1u32 << ctx.params.bits_beta) - 1;
         leaf.qbeta = quantise(mean / 255.0 * f64::from(max_qbeta), max_qbeta);
         leaf.qalfa = 0;
         leaf.isometry = 0;
         leaf.dom_row = 0;
         leaf.dom_col = 0;
     }
-    leaves.push(leaf);
+    (vec![leaf], block_evals, picks)
 }
 
-fn quad(row: u32, col: u32, half: u32) -> [(u32, u32); 4] {
-    [
-        (row, col),
-        (row + half, col),
-        (row, col + half),
-        (row + half, col + half),
-    ]
+/// Recurse into the four quadrants of a `2*half x 2*half` region at `(row, col)`, in
+/// canonical TL/BL/TR/BR order. Above [`PARALLEL_SIZE_CUTOFF`], the two pairs run via
+/// `rayon::join`; below it, sequentially on the calling thread. Either way the four
+/// results are concatenated in the same fixed order, so the merge introduces no
+/// thread-count dependence (mirrors `mars_codec::encode::split`, Step 12).
+fn split(ctx: &Ctx, row: u32, col: u32, half: u32) -> (Vec<Leaf>, u64, Vec<Pick>) {
+    let quadrants = if half >= PARALLEL_SIZE_CUTOFF {
+        let ((tl, tl_e, tl_p), (bl, bl_e, bl_p)) = rayon::join(
+            || walk(ctx, row, col, half),
+            || walk(ctx, row + half, col, half),
+        );
+        let ((tr, tr_e, tr_p), (br, br_e, br_p)) = rayon::join(
+            || walk(ctx, row, col + half, half),
+            || walk(ctx, row + half, col + half, half),
+        );
+        [
+            (tl, tl_e, tl_p),
+            (bl, bl_e, bl_p),
+            (tr, tr_e, tr_p),
+            (br, br_e, br_p),
+        ]
+    } else {
+        [
+            walk(ctx, row, col, half),
+            walk(ctx, row + half, col, half),
+            walk(ctx, row, col + half, half),
+            walk(ctx, row + half, col + half, half),
+        ]
+    };
+    let mut leaves = Vec::new();
+    let mut evals = 0u64;
+    let mut picks = Vec::new();
+    for (mut q_leaves, q_evals, mut q_picks) in quadrants {
+        leaves.append(&mut q_leaves);
+        evals += q_evals;
+        picks.append(&mut q_picks);
+    }
+    (leaves, evals, picks)
 }
 
 fn quantise(x: f64, max: u32) -> u32 {

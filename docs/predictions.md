@@ -1107,3 +1107,118 @@ the ceiling is purely "this machine has 6 P-cores." Not investigated further thi
 — worth a follow-up sweep over `PARALLEL_SIZE_CUTOFF` if a later step needs more headroom
 above 6-8 threads. Filed alongside the full run command and machine fingerprint in
 `docs/decisions.md` D32.
+
+---
+
+## 2026-09-14 · Gate C · prediction, before measuring
+
+**Context.** Gate C asks for CPU encode speedup vs. Mars 1 at matched RD (target >= 20x),
+NEON x threads, GPU excluded, with entropy/NEON/threads individually attributed. The
+apples-to-apples comparison is Mars 2's Fisher-method encode (`mars_search::encode_image`,
+same evals/transform algorithm as Mars 1's `-M f`) against `encmars -M f`, same
+`EncodeParams` (the `default` baseline-mars1 variant: min/max 4/16, shift 4, bits 4/7,
+max_alfa 1.0) at `t_rms=8.0` (the sweep's mid rate). Fisher's classified search was only
+just parallelised this session (porting Step 12's split/rayon::join pattern into
+`mars_search::walk`, since it previously only existed in `mars_codec::encode`'s exhaustive
+path) -- `parallel_determinism` (mars-search) passes at 1/2/4/8/16 threads on `mandelbrot`.
+
+### P-gate-c.1 — total CPU speedup
+
+Mars 1's own Fisher indicative time on `kodim01` (768x512) was ~1.3s (`results/
+baseline-mars1.jsonl`, though at an unrecorded `t_rms`). Fisher restricts the search to a
+small classified candidate set (Step 9's own evals/transform table showed order-of-
+magnitude fewer evals than exhaustive), so per-block work is small -- which cuts the other
+way from Step 12's exhaustive-search parallel-efficiency measurement (P12.2): with less
+work per block, `rayon::join`'s task-spawn overhead is a *larger* fraction of the total,
+so I expect Fisher's thread scaling to be measurably worse than exhaustive's (P12.2 saw
+3.44-3.80x at 4 threads) -- I predict 4-thread speedup in the 2.0-3.0x range for Fisher,
+not matching exhaustive's band. Combined with a Rust-vs-C implementation/NEON factor I
+expect to be substantial (Step 11's D31 measured 1.4-9.2x per kernel, and the C reference
+carries 1998-era cache-unfriendly access patterns this project's `Contracted` box-sum
+layout was designed around), I predict the **total measured speedup clears 20x**, but with
+threads contributing a smaller share of that total than they did for the exhaustive gate,
+and most of the total coming from the kernel/implementation side rather than from
+threading. If threads instead contribute a similar multiplier to P12.2's exhaustive
+measurement, that would mean per-block overhead is not actually the bottleneck I expect at
+Fisher's evals/transform, which would be worth a note given how it cuts against P12.2's own
+reasoning about the same `PARALLEL_SIZE_CUTOFF`.
+
+### P-gate-c.2 — matched RD
+
+Same algorithm, same `EncodeParams`, both implementations independently validated against
+Mars 1's isometry/quantisation conventions (Step 6/9's own gates) -- I predict bpp and PSNR
+match within Step 6's already-adopted 0.2 dB BD-PSNR floor, i.e. this is confirmatory, not
+a new finding, and any divergence bigger than that would point to a params/config mismatch
+in the harness rather than a real algorithmic difference.
+
+### P-gate-c.3 — decode
+
+Decode was never a bottleneck in this project (Step 2's baseline shows Mars 1 decode in
+the tens of milliseconds); I predict Mars 2's decode is comparably fast and the "no slower
+than Mars 1" criterion passes without needing its own optimisation work.
+
+---
+
+## 2026-09-14 · Gate C · outcomes: P-gate-c.1 and P-gate-c.2 both falsified
+
+First run: `kodim01`, `runs=5` A/B interleaved, `t_rms=8.0` (the `default` variant), full
+threads = 6 (this machine's P-core count), via the new `marsbench gate-c-bench`.
+
+### P-gate-c.1 — **falsified**: measured speedup is 2.36x, below even the 5x kill floor,
+not >= 20x
+
+| | mars1 (median, ms) | mars2 full-thread (median, ms) | total speedup | mars2 1-thread (median, ms) | thread speedup |
+|---|---:|---:|---:|---:|---:|
+| kodim01 | 971.92 | 411.72 | 2.36x | 1948* | 4.73x |
+
+(*derived from `thread_speedup = mars2_1thread / mars2_full = 4.73x` x 411.72ms.)
+
+The predicted mechanism was backwards in direction: I expected the Rust/NEON
+implementation factor to dominate and threading to be the weaker contributor (given
+Fisher's smaller per-block work). Measured, thread scaling (4.73x at 6 threads, actually
+*better* than Step 12's own 4-thread exhaustive-search number of 3.44-3.80x) is not the
+bottleneck; the 1-thread Rust Fisher implementation itself (~1.95s) is *slower* than
+Mars 1's C Fisher (~0.97s) before any threading is applied at all. This is the opposite of
+what P-gate-c.1 assumed ("a Rust-vs-C implementation/NEON factor I expect to be
+substantial" in Mars 2's favour) and means the NEON kernel speedups measured in Step 11
+(D31, per-kernel 1.4-9.2x) are not translating into a faster single-threaded full encode --
+something in the classified-search driver (`mars_search::walk`/`search_block`, or the
+per-block bucket/classify overhead Fisher's indexing adds) is costing more than the NEON
+kernels save. Not root-caused this session.
+
+### P-gate-c.2 — **falsified**: matched-RD gap is 1.4 dB, not within 0.2 dB
+
+`kodim01` at identical `EncodeParams`: mars1 27.26 dB / 1.4238 bpp (verified to match
+`results/baseline-mars1.jsonl`'s already-recorded quality numbers exactly -- the mars1
+side of this harness is confirmed correct); mars2 28.65 dB / 1.4265 bpp -- bpp agrees to
+0.2% (consistent with D27's already-measured 0.04% evals/transform agreement, so the
+*amount* of search work matches), but mars2's decoded PSNR is 1.4 dB *better* despite
+nearly identical bpp. This is the RD-curve-within-0.2dB check D28 explicitly flagged as
+"not implemented this session, an open gap" -- Gate C's harness is the first to actually
+run it, and it did not pass. Not root-caused this session; candidate explanations not yet
+distinguished: a real quality difference from Rust's f64 fit precision vs the C reference's
+arithmetic, a tie-breaking difference in which block among near-equal candidates Fisher's
+restricted bucket scan picks, or a decode-side effect despite reusing gate-6's already-
+validated decode-agreement pairing.
+
+**Neither number is safe to report as Gate C's result until the RD gap is explained** --
+if mars2's search is doing something subtly different per block (not just a similar total
+count), the speed comparison itself may not be measuring "the same work, faster."
+
+---
+
+## 2026-09-14 · Gate C · D35 outcome: the speed gap was `cross_term`'s Step 11 regression, unfixed at this call site
+
+P-gate-c.1 guessed the Rust/NEON implementation factor would dominate and threading would
+be the weaker contributor; D33 found the opposite (single-threaded Rust was *slower* than
+C). D35 found why: `mars_search::search_block` was still calling `cross_term`'s
+naive per-eval-repermuting path — exactly the regression D31 (Step 11) diagnosed and fixed
+for the exhaustive encoder, but D31's own fix never touched this call site (its writeup
+says so explicitly). Amortising the permutation the same way D31 did cut single-threaded
+eval cost from ~140 ns/eval to ~60 ns/eval (2.3-2.4x), moving Gate C's median total
+speedup from 1.75-2.36x to 4.09-4.15x. Tested and ruled out LTO/cross-crate-inlining as a
+compounding factor (no measurable change from `lto = "thin"`). Neither the 5x kill floor
+nor the 20x target is met yet; the remaining gap is attributed to single-threaded Mars 2
+now sitting at roughly *parity* with Mars 1's C per-eval cost (not a further easy win) and
+would need either a real demonstrated NEON advantage at Fisher's actual (sparse)
+candidate-count profile, or fewer evals altogether (Step 13).

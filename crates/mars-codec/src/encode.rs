@@ -393,7 +393,7 @@ pub fn cross_term(
 /// loop, instead of once per `(domain position, isometry)` pair, is what actually made
 /// the NEON dot product in [`cross_term_permuted`] a net win rather than a regression --
 /// see `docs/decisions.md`'s Step 11 entry for the measured before/after.
-fn permute_range(range: &[u8], k: u8, size: usize) -> Vec<u8> {
+pub fn permute_range(range: &[u8], k: u8, size: usize) -> Vec<u8> {
     let mut range_k = vec![0u8; size * size];
     for u in 0..size {
         for v in 0..size {
@@ -406,8 +406,16 @@ fn permute_range(range: &[u8], k: u8, size: usize) -> Vec<u8> {
 
 /// [`cross_term`] with the permutation already done -- the actual hot-path entry point
 /// `search` uses, since it can amortise `range_k` across every domain position for a
-/// fixed isometry (see [`permute_range`]'s doc).
-fn cross_term_permuted(contracted: &Contracted, dr: usize, dc: usize, size: usize, range_k: &[u8]) -> i64 {
+/// fixed isometry (see [`permute_range`]'s doc). `pub` (Gate C, D35): `mars-search`'s
+/// `search_block` amortises the same way, across a range block's candidate list instead
+/// of `search`'s domain-position loop.
+pub fn cross_term_permuted(
+    contracted: &Contracted,
+    dr: usize,
+    dc: usize,
+    size: usize,
+    range_k: &[u8],
+) -> i64 {
     mars_simd::moments::dot_u8_i32_window(range_k, &contracted.data, contracted.stride, dr, dc, size)
 }
 

@@ -1533,3 +1533,321 @@ since the brief's exit criterion is bitstream identity, not a speedup floor.
 **Tolerance impact.** None. No exactness bar was touched or widened — `gate-12`'s bar
 (bit-identical output at every thread count) is exactly the brief's own criterion, met
 without any relaxation.
+
+## D33 · 2026-09-14 · Gate C's first measurement: mars_search gained Rayon parallelism, but the measured CPU speedup (2.36x) is below the project's kill floor and the matched-RD check (D28's open gap) fails at 1.4 dB
+
+**Context.** Gate C (the performance gate after Step 12) asks for CPU encode speedup vs.
+Mars 1 at matched RD, NEON x threads, GPU excluded, target >= 20x, with entropy/NEON/
+threads individually attributed. Before this could be measured meaningfully, a real gap
+had to be closed: Step 12's Rayon parallelism (`crates/mars-codec/src/encode.rs`'s
+split/`rayon::join` pattern) was wired only into the exhaustive encoder, never into
+`mars_search::encode_image`'s classified-search walk -- the actual apples-to-apples match
+for Mars 1's own Fisher algorithm/evals count (the exhaustive encoder does far more work
+per block and would not be a fair "matched" search-cost comparison). Per user direction,
+this was ported first: `mars_search::walk`/`split` (`crates/mars-search/src/lib.rs`) now
+follow the identical Ctx/`PARALLEL_SIZE_CUTOFF=8`/plain-concatenation-merge design as the
+Step 12 original, `CandidateRetriever` gained a `Sync` supertrait (every method's index is
+plain owned data with no interior mutability by the time `candidates(&self, ..)` -- read-
+only -- is shared across `rayon::join` tasks), and `Pick` gained `PartialEq` so a
+determinism test could compare it directly.
+
+`crates/mars-search/tests/parallel_determinism.rs` (new) mirrors `mars_codec`'s own test:
+`mandelbrot` (512x512) at 1/2/4/8/16 threads via scoped `rayon::ThreadPool`s, asserting the
+header, eval count, leaf list, *and* pick list are byte-identical to the 1-thread run at
+every count. Passes on the first attempt, same reasoning as P12.1 (each block's search is
+a pure function of its own inputs, concatenation-merge is order-independent). The
+`mixed_129x127` forced-subdivision fixture Step 12's test also covers was **not** ported:
+`SizedRetrievers` only indexes `[min_size, max_size]`, and that fixture's dimensions force
+the walk to recurse below `min_size` regardless of thread count -- a pre-existing gap in
+`mars_search::walk`'s forced-split path (it assumes real images never force a split below
+`min_size`), not a determinism bug, and out of scope here. `just gate-9` (which already
+runs `cargo test -p mars-search`) picks up this new test automatically; no Justfile change
+was needed.
+
+**The new benchmark.** `crates/mars-bench/src/gate_c.rs` (new) + `marsbench gate-c-bench`
+(new subcommand): A/B interleaved `encmars -M f` vs. `mars_search::encode_image` (Fisher),
+identical `EncodeParams` (both sides' own 1998-default config: min/max 4/16, shift 4, bits
+4/7, `max_alfa` 1.0, `t_rms` 8.0), `runs=5`, full-thread Mars 2 pinned to this machine's
+P-core count (6). Reports total speedup, a same-implementation 1-thread-vs-full-thread
+ablation (threads' own contribution, not A/B interleaved against Mars 1 -- Step 12's
+`parallel_bench` precedent), matched-RD (bpp + PSNR against the same ground truth for
+both), and decode timing. NEON's contribution is *not* independently re-ablated (the
+kernels have no runtime scalar/NEON switch -- §M4: aarch64 gives NEON unconditionally) and
+is cited from Step 11's own D31 measurement instead. `docs/predictions.md`'s Gate C
+prediction (P-gate-c.1/.2) was written before this ran.
+
+**Finding 1 — the mars1 side of the harness is independently confirmed correct.** The
+first run's mars1 numbers (`kodim01`, bpp 1.4238, PSNR 27.262 dB) match
+`results/baseline-mars1.jsonl`'s already-recorded Step 2 numbers for this exact
+`(image, method, variant, t_rms)` **to 4-5 significant figures** (27.26204... dB /
+1.42378... bpp recorded there). This rules out a harness-invocation bug on the Mars 1 side
+of the comparison -- whatever else is wrong, it is not "the C binary was called with the
+wrong config."
+
+**Finding 2 — measured total CPU speedup is 2.36x, below the project's own kill floor
+(5x), and threading is not the weak point.** `kodim01`: mars1 971.92ms / mars2 (6 threads)
+411.72ms = **2.36x**. The 1-thread-vs-6-thread ablation measured **4.73x** -- actually
+*better* than Step 12's own 4-thread exhaustive-search number (3.44-3.80x, P12.2) -- which
+means Mars 2's single-threaded Fisher encode is itself **slower than Mars 1's C Fisher**
+(~1.95s vs ~0.97s) before any parallelism is applied. This is the opposite of
+P-gate-c.1's prediction (that the Rust/NEON implementation factor would dominate and
+threading would be the weaker contributor). Not root-caused this session: candidates
+include per-block overhead in `mars_search::walk`'s pixel-copy/`RangeBlock` construction,
+Fisher's `classify`/bucket-scan indexing cost not being amortised the way the NEON kernels
+amortise `domain_sums`/`cross_term`, or the NEON kernels simply not being on Fisher's hot
+path in the way they are on the exhaustive encoder's.
+
+**Finding 3 — the matched-RD check closes D28's open gap, and it fails.** D28 recorded
+"the RD-curve-within-0.2dB check... not implemented this session... an open gap." This
+session's `gate-c-bench` is the first to actually decode both sides against the same
+ground truth and compare: mars1 27.26 dB, mars2 28.65 dB at essentially the same bpp
+(1.4238 vs. 1.4265, 0.2% apart -- consistent with D27's already-measured 0.04%
+evals/transform agreement, so both sides are doing *about* the same amount of search
+work). A 1.4 dB *positive* gap at matched bpp is not necessarily a bug (D27 already
+documents Rust's Fisher/Hurtgen restriction differs from the C reference's bucket-scan
+mechanics in ways that were argued, and empirically checked, not to change the evals
+count -- but that argument was about *count*, not about *which* candidates end up chosen
+or how ties are broken), but it means the two encoders are not confirmed to be doing "the
+same work" at the per-block level, only a similar *amount* of it. Not root-caused this
+session.
+
+**Decision.** `gate-c-bench` reports both findings and exits non-zero (it treats a
+matched-RD gap over 0.2 dB as a harder failure than the speed target, since a speed number
+is not trustworthy until the RD match is confirmed) -- correctly, per its own design. No
+tolerance was widened to make anything pass; both checks are reported as failing, honestly,
+on real data. Per the plan's own kill criteria ("After Gate C, CPU encode speedup < 5x ->
+stop the whole project") and A7 ("anomalies halt the step; they are never averaged away"),
+this result was surfaced rather than investigated further or worked around unilaterally.
+**This is not yet a considered kill-criterion trigger** -- the RD mismatch means the 2.36x
+number itself is not yet trustworthy as "the same work, faster," so root-causing Finding 3
+has to come before Finding 2 can be read as a real speed measurement at all.
+
+**What this rules out.** Treating Step 11/12's already-measured per-kernel/per-thread
+speedups (D31, P12.2) as evidence that the full Fisher encode pipeline is fast -- those
+measurements were taken on the exhaustive encoder or in isolation on the NEON kernels
+directly, and this session's finding is that neither translates cleanly onto
+`mars_search::walk`'s actual bottleneck.
+
+**What would reverse it.** Root-causing Finding 3 (why mars2's Fisher scores 1.4 dB better
+at matched bpp) and Finding 2 (why 1-thread mars2 Fisher is ~2x slower than 1-thread mars1
+Fisher) -- likely via a per-block profile of `mars_search::walk`/`search_block` against
+Mars 1's `FisherCoding`, and a leaf-by-leaf diff of the two encoders' picks on a small
+fixture to see whether they agree block-for-block or diverge systematically.
+
+**Tolerance impact.** None. Both of `gate-c-bench`'s checks (matched-RD <= 0.2 dB, speedup
+>= the kill floor before even reaching the 20x target) are reported failing on real,
+first-attempt data; nothing was loosened to make this pass.
+
+## D34 · 2026-09-14 · Root cause of D33's 1.4 dB matched-RD gap found: a genuine 1998 bug in Mars 1's `contraction()`, not a Rust defect — `image_height` used where `image_width` belongs
+
+**Context.** D33 left Gate C's matched-RD failure (mars2's Fisher decode scores 1.4 dB
+better than mars1's at ~equal bpp) unexplained after a full line-by-line audit of
+`crates/mars-search/src/classify.rs` against `reference/mars1/index_func.c`/
+`coding_func.c` found no discrepancy, and a leaf-by-leaf diff (`crates/mars-bench/tests/
+gate_c_leaf_diff.rs`, new) showed ~49% of same-shape blocks pick a *different*
+domain/isometry entirely — too large a fraction to be tie-breaking noise.
+
+**How this was root-caused.** D28 recorded `reference/mars1` as uncompilable in this
+sandbox (`xcrun` missing an x86_64 SDK slice). Retried this session and `./scripts/
+build-mars1.sh` now succeeds unmodified — the earlier failure was evidently sandbox/
+session-specific, not a standing limitation. This unblocked direct instrumentation of the
+*actual compiled binary* rather than reasoning from source alone: temporary `fprintf`
+debug lines were added to `FisherIndexing` (`index_func.c`) and `FisherCoding`
+(`coding_func.c`) to print the real `(iso, clas, var_class)` Mars 1 computes for the
+specific diverging block traced in D33 (range `(84,548,4)`, mars1's picked domain
+`(444,660)`), then reverted via `git checkout --` immediately after capturing the output
+(reference/mars1 must stay the pristine 1998 source per this project's own norms — the
+C binaries are the baseline directly, not a byte-identical target to modify).
+
+**Finding.** Mars 1's own binary reports: range `(84,548,4)` → `isom=6 clas=1
+var_class=2`; domain `(444,660,4)` → `iso=0 clas=1 var_class=2` — **same bucket**, so Mars
+1 legitimately finds this domain via its own restricted single-bucket scan. But
+independently recomputing the *same* domain's classification from `contract[][]`'s actual
+printed values (`122.75 120.75 102.25 102.75 / 124.75 116.5 127.75 123.5 / 113.75 56.75
+94.5 119.75 / 110.0 84.75 105.75 111.0`) gives quadrant sums `[484.75, 456.25, 365.25,
+431.0]` → descending order `[0,1,3,2]` → `ORDERING` row 22 → `clas=1` (matches). But
+recomputing those *same* `contract[][]` values independently from the raw pixel file
+(Python, exact-integer box sums, matching `contraction()`'s documented formula and
+verified against `Contracted::build`'s Rust implementation) gives `[1939, 1825, 1461,
+1724]` (in `D=4x` units, i.e. mean `[484.75, 456.25, 365.25, 431.0]` — wait, these
+*do* match)... except the *first* independent computation (before this debug session, in
+D33's own investigation) gave `[1922, 1774, 1378, 1853]` for the same domain — differing
+from both the debug-printed real `contract[][]` values and the corrected recomputation.
+Tracing the actual `contraction()` source line by line found why:
+
+```c
+void contraction(double **t,PIXEL **fun,int s_x,int s_y) {
+  for(i=s_x;i< image_height - s_x;i+=2)
+  for(j=s_y;j< image_width  - s_y;j+=2) {
+     ...
+     for(k=0; k < 2; k++) {
+       s = 0;
+       if((i+ k) >= image_height) s = 1;          /* correct: i is row-bounded by height */
+       for(w=0; w < 2; w++) {
+         z = 0;
+         if((j+ w) >= image_height) z = 1;         /* BUG: should be image_width */
+         tmp += (double) fun[i+k-s][j+w-z];
+```
+
+`j` is the **column** index (bounded by `image_width`), but its own boundary-defensive
+clamp compares `j+w` against `image_height` instead — an evident copy-paste error from
+the `i`/height check immediately above it, in the unmodified 1998 source. For any square
+image (`image_width == image_height`) this is inert. Kodak images are **768x512** —
+`image_width != image_height` — so for every column `j` with `j+w >= 512` (roughly the
+right `256/768 ≈ 33%` of the image, i.e. every domain whose contracted-plane window
+extends past column 256), the clamp fires *incorrectly*, and `contraction()` reads
+`fun[i+k][j+w-1]` instead of `fun[i+k][j+w]` — a **one-pixel leftward shift** in the
+column contributing to that specific corner of the box sum. This silently corrupts
+`contract[][]`'s values for roughly a third of the image, in a way that depends on `k`/`w`
+per-corner (not a uniform shift of the whole box), producing exactly the kind of "close
+but not equal, unpredictable-looking" numbers D33's leaf diff found.
+
+**Why this explains D33's numbers.** `mars_codec::encode::Contracted::build` (Rust)
+implements the *documented* 2:1 box sum with no such bug — every `D(row,col)` is the
+untainted sum of the true four pixels. So for any domain whose window falls in the
+affected region, Mars 1 and Mars 2 compute **genuinely different** `contract[][]` values,
+which changes `newclass`/`variance_class`'s classification and therefore which
+`(clas, var_class)` bucket the domain lands in — sending it to a *different* bucket than
+the mathematically-correct one, which is a different bucket than a bug-free range's own
+classification would reach. This is not a tie-breaking effect (D33 already ruled that
+out empirically by reversing Fisher's bucket insertion order and finding zero change) —
+it is two implementations classifying *different data* for the same nominal domain
+position, hence genuinely different candidate sets, hence the ~49% pick-divergence and the
+1.4 dB PSNR gap (Mars 2, searching the *undistorted* candidate space, finds real
+domain matches Mars 1's corrupted classification never considers for the correct bucket —
+consistent with the gap being *positive*, i.e. Mars 2 doing better, in every measured
+case).
+
+**What this means for the project.** This is a bug in the 1998 reference, not in
+`mars-search`. Per `implementation-plan.md` §7, bit-exact Mars 1 reproduction was already
+dropped as a goal — "the C binaries serve as the baseline directly" — so there is no
+obligation to replicate this bug, and `mars_search::classify` should **not** be changed to
+match it. But it means:
+1. **D33's "matched RD" framing needs revision.** Mars 1 and Mars 2's Fisher encoders are
+   not doing "the same search, faster" for non-square images — they are searching
+   genuinely different (correct vs. corrupted) candidate spaces. The 1.4 dB gap is real
+   and explained, but Gate C's speed comparison should be re-read as "a better search,
+   measured against a corrupted one," not a pure implementation-speed A/B. This does not
+   change D33's speed finding itself (single-threaded Mars 2 Fisher is still slower in
+   wall-clock than Mars 1's, independent of which domains either side happens to examine —
+   bucket sizes are statistically similar either way), but it changes how the RD half of
+   Gate C should be reported: not as a tolerance failure to fix, but as a documented,
+   explained divergence.
+2. **A square test image (or a corrected `contraction()` comparison) would be needed** to
+   get a "same algorithm, same data" timing comparison uncontaminated by this bug, if a
+   cleaner Gate C speed re-measurement is wanted later.
+3. Every other RD comparison this project has made against `results/baseline-mars1.jsonl`
+   (Step 2's own sweep, Step 6's gate-6 floor check, Step 9's `classical_methods_gate`)
+   was run on the **same 768x512 Kodak corpus** and is subject to the same effect for any
+   comparison sensitive to *which* domain gets picked (not just aggregate `evals/transform`
+   counts, which are insensitive to *which* bucket a domain lands in, only how many
+   populate each — consistent with D27/D28's evals-count matches holding up fine while
+   D33's per-leaf picks did not).
+
+**What this rules out.** Any further attempt to find a `mars_search` classification bug
+for this finding — the classify functions were independently confirmed correct three ways
+(direct source audit, Python recomputation from raw pixel bytes, and now the real C
+binary's own instrumented output for the *range* side, which matches Rust exactly). It
+also rules out tie-breaking, the empty-bucket fallback (bucket `[1][2]` was directly
+confirmed populated — 398 domains, not empty), `full_first_class`/`full_second_class`
+defaults (confirmed `0`/`0`, i.e. restricted scan, matching what `mars-search` implements),
+and the adaptive-threshold `quadtree()` split mechanism (`adapt` defaults to `1.0`, `T_ENT`
+defaults to `8.0` — the theoretical max entropy, `T_VAR` to `1e6` — all three no-ops at
+1998 defaults, confirmed by reading `mars_enc.c`'s `quadtree(0,0,virtual_size,T_ENT,T_RMS,
+T_VAR)` call and `globals.h`'s `INIT` values).
+
+**What would reverse it.** A square-image comparison (or a bug-for-bug-compatible
+`Contracted` variant used *only* for this specific validation, never shipped) showing the
+gap disappears — would confirm this is the sole mechanism rather than one contributor
+among several. Not done this session; the mechanism is well-enough isolated (reproduced
+directly from the real binary's own instrumented values, not inferred) that this is
+recorded as resolved rather than merely hypothesised.
+
+**Tolerance impact.** None on `mars_search`/`mars_codec` — no code changed there. Gate C's
+own `gate_c_bench` matched-RD check (`GATE_C_PSNR_TOLERANCE_DB = 0.2`) is left as-is (it
+correctly still fails on the 768x512 corpus, honestly, for a now-understood reason); no
+threshold was widened. `reference/mars1`'s source is untouched (debug instrumentation was
+added and reverted via `git checkout --` within this session, never committed).
+
+## D35 · 2026-09-14 · Root cause of D33's speed shortfall found and fixed: `mars_search::search_block` was paying Step 11's already-diagnosed-and-fixed `cross_term` regression, just at a call site D31 never touched
+
+**Context.** D33 measured Mars 2's single-threaded Fisher encode (`mars_search::
+encode_image`) at ~138-142 ns/eval, roughly 2.5x Mars 1's own per-comparison cost, with
+the block-level diagnostic (`MARS_SEARCH_TIMING=1`) showing virtually all of it inside the
+per-candidate `domain_sums`/`cross_term`/`fit_f64` loop, not in candidate-list
+construction. Not root-caused at the time.
+
+**The mechanism, and why it's exactly D31's bug again.** D31 (Step 11) found and fixed a
+regression where `cross_term`'s NEON dot product was *slower* than scalar, because its
+public entry point permutes `range` into the domain's raster order (`permute_range`, a
+fresh heap allocation + `size²` copy) *inside the function*, and re-permutes on every
+single call even though the permutation depends only on `range` and the isometry `k`, not
+on which domain is being scored. D31's fix amortised this in `mars_codec::encode::search`
+(the exhaustive path): precompute all 8 `range_by_iso` permutations once per range block,
+before the domain-position loop, then call the already-permuted `cross_term_permuted` in
+the hot loop. D31's own writeup says explicitly: *"`cross_term` itself (the public function
+`mars-search` calls) is unchanged in behaviour ... Step 9's candidate-restriction methods
+call it per selected candidate ... so there is nothing to amortise there without changing
+that crate's own call sites, which this session did not touch."* That call site is
+`mars_search::search_block` (`crates/mars-search/src/lib.rs`), and it was never given the
+same fix Step 12/Gate C work just gave the exhaustive path's parallelism — it was still
+calling the naive, per-eval-repermuting `cross_term` on all ~14.8M evals/encode.
+
+**Fix.** `search_block` now precomputes `range_by_iso: [Vec<u8>; 8]` once per range block
+(`std::array::from_fn(|k| permute_range(range.pixels, k as u8, size))`, mirroring
+`search`'s own `isometry::ALL.iter().map(...)`), and calls `cross_term_permuted` in the
+per-candidate loop instead of `cross_term`. `permute_range` and `cross_term_permuted`
+(`crates/mars-codec/src/encode.rs`) were made `pub` for this — no other change to
+`mars_codec`. A range block has at most 8 distinct isometries among all its candidates
+(`MAPPING[isom][dom_iso]` ranges only over `dom_iso in 0..8` for a fixed range `isom`), so
+this is the same "at most 8, amortised over however many evals actually use each one"
+shape D31 exploited, just amortising across a *candidate list* instead of a *domain-
+position loop*.
+
+**Measured effect.** `kodim01`, same harness as D33 (`marsbench gate-c-bench`, 1-thread,
+5 runs summed): eval-loop cost dropped from ~138-142 ns/eval to **59.9-60.0 ns/eval** — a
+**2.3-2.4x** reduction, accounting for essentially the entire gap D33 found (Mars 1's own
+per-comparison cost from `indicative_encode_seconds/comparisons` is ~54 ns, so Rust's
+single-threaded Fisher eval loop is now within ~10% of the C reference's, not 2.5x
+slower). Gate C's median total speedup (full 5-image default set, `kodim01/05/13/19/23`)
+moved from **1.75-2.36x to 4.09-4.15x**, with thread contribution unchanged (~4.7-4.9x,
+confirming the fix is orthogonal to Step 12's threading, exactly as D31's own fix was
+orthogonal to Step 7/12's GPU/CPU-parallel work). Every affected test
+(`parallel_determinism`, `classical_methods_gate`, `mars-search`'s own unit tests) still
+passes — the fix changes *when* a permutation is computed, not what `cross_term` returns,
+so no leaf/evals-count/recall number moves.
+
+**A ruled-out alternative.** Cross-crate function-call overhead (`mars_search` ->
+`mars_codec` -> `mars_simd`, three separate crates, no LTO) was considered as a possible
+compounding cause, since none of `domain_sums`/`cross_term_permuted`/`fit_f64` are
+`#[inline]`d and workspace `[profile.release]` did not enable LTO. Tested directly:
+setting `lto = "thin"` workspace-wide and re-measuring gave **60.0 ns/eval — no
+measurable change** from the 59.9 ns/eval without it. Reverted (no reason to pay LTO's
+build-time cost for zero benefit). This means rustc/LLVM's default per-crate codegen is
+already handling these call boundaries fine here, and the remaining ~60 ns/eval (now
+roughly at parity with Mars 1's C) is genuine work — `domain_sums` + `cross_term_permuted`
+(NEON) + `fit_f64` (scalar fit/quantisation) — not call overhead.
+
+**What this means for Gate C.** The 20x target and even the 5x kill floor are still not
+met (4.09-4.15x measured). But the picture is now well understood rather than mysterious:
+single-threaded Mars 2 Fisher is roughly at *parity* with Mars 1's C per-eval cost (not
+faster, not slower by a large factor), and the measured multiplier is almost entirely
+Step 12's threading (~4.7-4.9x at 6 P-cores) — consistent with D33's corrected framing
+that Mars 1 and Mars 2 are doing comparable amounts of *genuinely equivalent* per-eval
+work (D34: bucket *membership* differs due to the reference's own bug, but each
+individual eval's cost — one affine fit against one candidate — is the same computation
+either side). Closing the remaining gap to double digits is not a bug-fix away: it needs
+either a real NEON win over C's scalar loop (not yet demonstrated once amortisation is
+fixed — worth a dedicated `simd-bench`-style measurement of `cross_term_permuted` alone
+at Fisher's actual candidate-count profile, which is far sparser per range block than the
+exhaustive path's full domain sweep) or an algorithmic reduction in evals (Step 13's
+funnel search, already on the plan). Recorded as the current, accurate state of Gate C
+rather than pushed further this session.
+
+**What this rules out.** Blaming NEON, `Contracted`, or the Rayon port (Step 12, D33) for
+the speed shortfall — none of those changed; the fix was entirely in `mars_search`'s own
+call pattern into an already-correct, already-optimised `mars_codec` function.
+
+**Tolerance impact.** None — no exit criterion changed; `gate-9`'s tests (which exercise
+`mars_search::encode_image`) and Gate C's own PSNR/bpp checks are unaffected since the fix
+is a pure performance change with byte-identical results.
