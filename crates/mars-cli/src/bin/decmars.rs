@@ -2,12 +2,13 @@
 //! point iterative decoder, for visual before/after inspection. Handles both grayscale
 //! and colour (Step 18) containers written by `encmars` -- see `mars_codec::color`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use mars_codec::color::{decode_color_image, decode_color_image_auto};
-use mars_core::io::{write_png, write_pnm};
+use mars_codec::color::{decode_color_image, decode_color_image_auto, decode_color_image_progression};
+use mars_core::image::Image;
+use mars_core::io::{write_png, write_pnm, ImageError};
 
 /// Decompress a `.mars` bitstream to an image.
 #[derive(Parser)]
@@ -33,6 +34,21 @@ struct Cli {
     /// with `--auto`.
     #[arg(long, default_value_t = 0)]
     threshold: u8,
+
+    /// Also write one image per iteration into this directory (created if missing), named
+    /// `iter-0001.<ext>`, `iter-0002.<ext>`, ... — for watching the fractal decode converge.
+    /// Frames use the same format as `output`. Combine with `--auto` to stop the
+    /// progression (and the final `output`) as soon as the image stabilises.
+    #[arg(long)]
+    progression: Option<PathBuf>,
+}
+
+fn image_writer(ext: &str) -> Result<fn(&Path, &Image) -> Result<(), ImageError>> {
+    match ext {
+        "png" => Ok(write_png),
+        "pgm" | "ppm" => Ok(write_pnm),
+        _ => bail!("unsupported output extension {ext:?}; use .png, .pgm or .ppm"),
+    }
 }
 
 fn main() -> Result<()> {
@@ -40,10 +56,29 @@ fn main() -> Result<()> {
 
     let bytes =
         std::fs::read(&cli.input).with_context(|| format!("reading {}", cli.input.display()))?;
-    let (image, iterations_used) = if cli.auto {
-        let (image, used) = decode_color_image_auto(&bytes, cli.threshold, cli.iterations)
-            .with_context(|| format!("parsing {} as a .mars container", cli.input.display()))?;
-        (image, used)
+    let ext = cli
+        .output
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let write = image_writer(&ext)?;
+
+    let (image, iterations_used) = if let Some(dir) = &cli.progression {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating {}", dir.display()))?;
+        let width = cli.iterations.max(1).to_string().len();
+        let stable_threshold = cli.auto.then_some(cli.threshold);
+        decode_color_image_progression(&bytes, cli.iterations, stable_threshold, |n, frame| {
+            let frame_path = dir.join(format!("iter-{n:0width$}.{ext}"));
+            if let Err(e) = write(&frame_path, frame) {
+                eprintln!("warning: failed to write {}: {e:#}", frame_path.display());
+            }
+        })
+        .with_context(|| format!("parsing {} as a .mars container", cli.input.display()))?
+    } else if cli.auto {
+        decode_color_image_auto(&bytes, cli.threshold, cli.iterations)
+            .with_context(|| format!("parsing {} as a .mars container", cli.input.display()))?
     } else {
         let image = decode_color_image(&bytes, cli.iterations)
             .with_context(|| format!("parsing {} as a .mars container", cli.input.display()))?;
@@ -51,29 +86,19 @@ fn main() -> Result<()> {
     };
     let (width, height) = (image.width(), image.height());
 
-    let ext = cli
-        .output
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "png" => write_png(&cli.output, &image),
-        "pgm" | "ppm" => write_pnm(&cli.output, &image),
-        _ => bail!(
-            "{}: unsupported output extension; use .png, .pgm or .ppm",
-            cli.output.display()
-        ),
-    }
-    .with_context(|| format!("writing {}", cli.output.display()))?;
+    write(&cli.output, &image).with_context(|| format!("writing {}", cli.output.display()))?;
 
     println!(
-        "{} -> {width}x{height} {} ({} iterations{}, {} plane(s))",
+        "{} -> {width}x{height} {} ({} iterations{}, {} plane(s)){}",
         cli.input.display(),
         cli.output.display(),
         iterations_used,
         if cli.auto { ", auto" } else { "" },
         image.planes().len(),
+        cli.progression
+            .as_ref()
+            .map(|d| format!(", {iterations_used} frame(s) in {}", d.display()))
+            .unwrap_or_default(),
     );
     Ok(())
 }

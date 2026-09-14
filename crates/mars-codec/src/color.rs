@@ -32,7 +32,7 @@ use mars_core::metrics::{rgb_from_ycbcr, ycbcr};
 use mars_core::Plane;
 
 use crate::encode::{encode_image, EncodeParams};
-use crate::ifs::{decode_iterative, decode_until_stable};
+use crate::ifs::{decode_iterative, decode_step, decode_until_stable, max_pixel_delta};
 use crate::mars_format::{self, MarsFormatError};
 
 // ---------------------------------------------------------------------------
@@ -269,6 +269,95 @@ pub fn decode_color_image_auto(
                 (cb_small, cr_small)
             };
             Ok((rgb_from_ycbcr(&y, &cb, &cr), used))
+        }
+        other => Err(ColorFormatError::UnknownMode(other)),
+    }
+}
+
+/// Decodes a colour `.mars` container one iteration at a time, calling `on_iteration` with
+/// the 1-indexed iteration number and the reconstructed [`Image`] after each step, so a
+/// caller can save a frame per iteration and watch the fractal decode converge. Planes are
+/// advanced in lock-step (unlike [`decode_color_image`], which runs each plane to
+/// completion before moving to the next) so every emitted frame is a single coherent
+/// image, not a partially-updated one.
+///
+/// Stops after `max_iterations`, or earlier once `stable_threshold` is given and every
+/// plane's worst-case pixel movement drops to that value or below — mirroring
+/// [`decode_until_stable`]'s convergence test, applied across all planes at once. Returns
+/// the final image and the iteration count actually run.
+pub fn decode_color_image_progression(
+    data: &[u8],
+    max_iterations: u32,
+    stable_threshold: Option<u8>,
+    mut on_iteration: impl FnMut(u32, &Image),
+) -> Result<(Image, u32), ColorFormatError> {
+    let (mode, streams) = read_container(data)?;
+    match mode {
+        MODE_GRAY => {
+            let (hdr, leaves) = mars_format::read(&streams[0])?;
+            let (w, h) = (hdr.width as usize, hdr.height as usize);
+            let mut img = vec![128u8; w * h];
+            let mut used = 0;
+            let mut image = Image::gray(Plane::from_vec(w, h, img.clone()));
+            for i in 0..max_iterations.max(1) {
+                let next = decode_step(&hdr, &leaves, &img);
+                let delta = max_pixel_delta(&img, &next);
+                img = next;
+                used = i + 1;
+                image = Image::gray(Plane::from_vec(w, h, img.clone()));
+                on_iteration(used, &image);
+                if stable_threshold.is_some_and(|t| delta <= t) {
+                    break;
+                }
+            }
+            Ok((image, used))
+        }
+        MODE_RGB_444 | MODE_RGB_420 => {
+            let (y_hdr, y_leaves) = mars_format::read(&streams[0])?;
+            let (cb_hdr, cb_leaves) = mars_format::read(&streams[1])?;
+            let (cr_hdr, cr_leaves) = mars_format::read(&streams[2])?;
+
+            let (yw, yh) = (y_hdr.width as usize, y_hdr.height as usize);
+            let (cw, ch) = (cb_hdr.width as usize, cb_hdr.height as usize);
+            let mut y_img = vec![128u8; yw * yh];
+            let mut cb_img = vec![128u8; cw * ch];
+            let mut cr_img = vec![128u8; cw * ch];
+            let mut used = 0;
+            let mut image = rgb_from_ycbcr(
+                &Plane::from_vec(yw, yh, y_img.clone()),
+                &Plane::from_vec(cw, ch, cb_img.clone()),
+                &Plane::from_vec(cw, ch, cr_img.clone()),
+            );
+            for i in 0..max_iterations.max(1) {
+                let y_next = decode_step(&y_hdr, &y_leaves, &y_img);
+                let cb_next = decode_step(&cb_hdr, &cb_leaves, &cb_img);
+                let cr_next = decode_step(&cr_hdr, &cr_leaves, &cr_img);
+                let delta = max_pixel_delta(&y_img, &y_next)
+                    .max(max_pixel_delta(&cb_img, &cb_next))
+                    .max(max_pixel_delta(&cr_img, &cr_next));
+                y_img = y_next;
+                cb_img = cb_next;
+                cr_img = cr_next;
+                used = i + 1;
+
+                let y_plane = Plane::from_vec(yw, yh, y_img.clone());
+                let cb_plane = Plane::from_vec(cw, ch, cb_img.clone());
+                let cr_plane = Plane::from_vec(cw, ch, cr_img.clone());
+                let (cb_up, cr_up) = if mode == MODE_RGB_420 {
+                    (
+                        upsample_nearest(&cb_plane, yw, yh),
+                        upsample_nearest(&cr_plane, yw, yh),
+                    )
+                } else {
+                    (cb_plane, cr_plane)
+                };
+                image = rgb_from_ycbcr(&y_plane, &cb_up, &cr_up);
+                on_iteration(used, &image);
+                if stable_threshold.is_some_and(|t| delta <= t) {
+                    break;
+                }
+            }
+            Ok((image, used))
         }
         other => Err(ColorFormatError::UnknownMode(other)),
     }

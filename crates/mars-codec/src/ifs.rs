@@ -255,13 +255,24 @@ pub fn decode_iterative(hdr: &Header, leaves: &[Leaf], iterations: u32) -> Plane
     let (w, h) = (hdr.width as usize, hdr.height as usize);
     let mut img = vec![128u8; w * h];
     for _ in 0..iterations {
-        let mut next = vec![0u8; w * h];
-        for leaf in leaves {
-            decode_leaf(hdr, leaf, &img, w, &mut next);
-        }
-        img = next;
+        img = decode_step(hdr, leaves, &img);
     }
     Plane::from_vec(w, h, img)
+}
+
+/// One fixed-point iteration: reads `img` (the previous iteration's pixels, or a flat grey
+/// seed for the first call) and returns the next image. This is the primitive
+/// [`decode_iterative`] and [`decode_until_stable`] both loop over; it is exposed directly
+/// for callers that need to interleave iterations across multiple planes in lock-step —
+/// e.g. `color::decode_color_image_progression`, which needs one Y/Cb/Cr frame per step
+/// rather than each plane fully decoded in turn.
+pub fn decode_step(hdr: &Header, leaves: &[Leaf], img: &[u8]) -> Vec<u8> {
+    let (w, h) = (hdr.width as usize, hdr.height as usize);
+    let mut next = vec![0u8; w * h];
+    for leaf in leaves {
+        decode_leaf(hdr, leaf, img, w, &mut next);
+    }
+    next
 }
 
 /// Same fixed-point iteration as [`decode_iterative`], but stops as soon as the image has
@@ -285,23 +296,25 @@ pub fn decode_until_stable(
     let mut img = vec![128u8; w * h];
     let mut used = 0;
     for i in 0..max_iterations.max(1) {
-        let mut next = vec![0u8; w * h];
-        for leaf in leaves {
-            decode_leaf(hdr, leaf, &img, w, &mut next);
-        }
-        let max_delta = img
-            .iter()
-            .zip(next.iter())
-            .map(|(a, b)| a.abs_diff(*b))
-            .max()
-            .unwrap_or(0);
+        let next = decode_step(hdr, leaves, &img);
+        let delta = max_pixel_delta(&img, &next);
         img = next;
         used = i + 1;
-        if max_delta <= threshold {
+        if delta <= threshold {
             break;
         }
     }
     (Plane::from_vec(w, h, img), used)
+}
+
+/// Largest per-pixel absolute difference between two same-length buffers — the convergence
+/// test both [`decode_until_stable`] and `color::decode_color_image_progression` use.
+pub(crate) fn max_pixel_delta(a: &[u8], b: &[u8]) -> u8 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| x.abs_diff(*y))
+        .max()
+        .unwrap_or(0)
 }
 
 /// §7 dequantisation and §9/§10.1 reconstruction for one leaf, reading `img` (the
