@@ -65,6 +65,8 @@ enum Cmd {
     IfsCheck(IfsCheckArgs),
     /// Step 6's exit criteria as a command that exits 0 or 1 (§A1, gate-6).
     RustEncoderCheck(RustEncoderCheckArgs),
+    /// Step 10's exit criteria as a command that exits 0 or 1 (§A1, gate-10).
+    MarsFormatCheck(MarsFormatCheckArgs),
     /// Step 7's bit-identical + speedup exit criteria as a command that exits 0 or 1
     /// (§A1, gate-7).
     GpuSearchCheck(GpuSearchCheckArgs),
@@ -159,6 +161,12 @@ struct RustEncoderCheckArgs {
     mars1_dir: PathBuf,
     #[arg(long, default_value = "target/rust-encoder-check")]
     scratch: PathBuf,
+}
+
+#[derive(Args)]
+struct MarsFormatCheckArgs {
+    #[arg(long, default_value = "corpus/fixtures.images.json")]
+    fixtures_index: PathBuf,
 }
 
 #[derive(Args)]
@@ -439,6 +447,7 @@ fn main() -> Result<()> {
         Cmd::AnchorsCheck(a) => anchors_check(a),
         Cmd::IfsCheck(a) => ifs_check(a),
         Cmd::RustEncoderCheck(a) => rust_encoder_check(a),
+        Cmd::MarsFormatCheck(a) => mars_format_check(a),
         Cmd::GpuSearchCheck(a) => gpu_search_check(a),
         Cmd::GpuSearchBench(a) => gpu_search_bench(a),
         Cmd::OracleBuild(a) => oracle_build(a),
@@ -1815,5 +1824,41 @@ fn rust_encoder_check(a: RustEncoderCheckArgs) -> Result<()> {
         bail!("gate-6: {failed} of {} checks failed", checks.len());
     }
     println!("\ngate-6: PASS ({} checks)", checks.len());
+    Ok(())
+}
+
+// -------------------------------------------------------------- `.mars` format v0 (Step 10)
+
+fn mars_format_check(a: MarsFormatCheckArgs) -> Result<()> {
+    let root = Path::new(".");
+    let (checks, rows) = mars_bench::mars_format_gate::gate(root, &a.fixtures_index)?;
+
+    let mut failed = 0;
+    for c in &checks {
+        let mark = if c.passed {
+            "PASS"
+        } else {
+            failed += 1;
+            "FAIL"
+        };
+        println!("{mark}  {}\n      {}", c.name, c.detail);
+    }
+
+    println!("\nbpp: raw .ifs vs entropy-coded .mars, at identical reconstruction:");
+    for row in &rows {
+        println!(
+            "  {:<16} r={:<5} {:>7.3} bpp -> {:>7.3} bpp  ({:>5.1}% reduction)",
+            row.image,
+            row.t_rms,
+            row.raw_bpp,
+            row.mars_bpp,
+            row.reduction_pct()
+        );
+    }
+
+    if failed > 0 {
+        bail!("gate-10: {failed} of {} checks failed", checks.len());
+    }
+    println!("\ngate-10: PASS ({} checks)", checks.len());
     Ok(())
 }

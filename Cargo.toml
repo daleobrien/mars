@@ -7,6 +7,7 @@ members = [
     "crates/mars-gpu",
     "crates/mars-bench",
     "crates/mars-cli",
+    "crates/mars-entropy",
 ]
 
 [workspace.package]
@@ -23,10 +24,12 @@ authors = ["The Mars 2 authors"]
 mars-core = { path = "crates/mars-core", version = "0.1.0" }
 mars-codec = { path = "crates/mars-codec", version = "0.1.0" }
 mars-search = { path = "crates/mars-search", version = "0.1.0" }
+mars-entropy = { path = "crates/mars-entropy", version = "0.1.0" }
 mars-gpu = { path = "crates/mars-gpu", version = "0.1.0" }
 mars-bench = { path = "crates/mars-bench", version = "0.1.0" }
 
 anyhow = "1.0"
+constriction = "0.5"
 bytemuck = { version = "1.19", features = ["derive"] }
 clap = { version = "4.5", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

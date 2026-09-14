@@ -1,0 +1,23 @@
+[package]
+name = "mars-codec-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.mars-codec]
+path = ".."
+
+[[bin]]
+name = "mars_format_read"
+path = "fuzz_targets/mars_format_read.rs"
+test = false
+doc = false
+bench = false

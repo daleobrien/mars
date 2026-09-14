@@ -1255,3 +1255,120 @@ run once and cached rather than repeated per method).
 **Tolerance impact.** None of `gate-9`'s asserted checks had their tolerance changed from
 the brief's own 5%/near-100%-self-test numbers. The scope reduction is in *what was
 measured*, not in how strictly the measured things were judged.
+
+---
+
+## D29 · 2026-09-14 · Proceeding to Step 10 without a formal Gate B pass
+
+**Context.** The dependency graph in §5 lists Gate B as a hard prerequisite for Steps 10,
+11, and 13. Gate B requires: `.ifs` parser validated (done, Step 5); exhaustive encoder
+within 0.2 dB with exact integer moments (done, Step 6); GPU search bit-identical to CPU
+at ≥50x (relaxed and passed per D25); and six classical methods ported with a published
+recall/regret table (Step 9, but scoped down per D28 — 2/24 Kodak images, no RD-curve
+check, C-reference reused from Step 2 rather than freshly run). There is no `gate-b` just
+target in the justfile; Gate B has never been mechanically checked as a whole.
+
+**Decision.** Asked directly, the user chose to proceed to Step 10 (`.mars` format v0 +
+rANS) now rather than close D28's gaps or fix the sandboxed C toolchain first. This is a
+deliberate deviation from the plan's stated dependency order (A8: gates are for human
+judgement, and this is that judgement being exercised) — not a silent skip.
+
+**What this rules out.** Nothing in Step 10 itself depends on the missing pieces (full
+24-image recall/regret table, RD-curve check, fresh C-reference numbers) — Step 10 is
+format/entropy-coding work against Step 6's already-exact output, orthogonal to the
+classical-methods comparison. The risk being accepted is scientific completeness of the
+Gate B stopping point, not correctness of Step 10's own deliverable.
+
+**What would reverse this.** If Step 10 (or 11/13) surfaces a need for something Gate B
+was meant to guarantee — e.g. a recall/regret number becomes load-bearing for a Group C
+decision — return to D28's open items before proceeding further. Gate B's actual gaps are
+unchanged and still tracked there; this entry only records the decision to defer them.
+
+---
+
+## D30 · 2026-09-14 · Step 10's context models are scoped down from the brief; `gate-10` passes and the bpp-reduction result is real but corpus-skewed
+
+**Context.** Step 10's brief asks for adaptive context models keyed on "depth + neighbour
+split state" (split flags) and an unspecified but implied similarly rich context for
+mode/qalfa/qbeta/domain index, plus a `cargo-fuzz` decoder target and an 8-20% bpp
+reduction at identical reconstruction.
+
+**What was actually built** (`crates/mars-entropy`, `mars_codec::mars_format`):
+
+- An order-0 adaptive model per context (`mars_entropy::AdaptiveModel`), with fixed-point
+  CDFs derived by pure integer arithmetic (no floats anywhere in the coding path, unlike
+  `constriction`'s own `Categorical` models) specifically so the bitstream is bit-identical
+  across threads/platforms per §2.3 — this was a deliberate design choice, not an
+  afterthought, since rANS run through a floating-point-quantised model would reintroduce
+  exactly the nondeterminism §2.3 rules out.
+- Contexts actually implemented: split flag and mode keyed on **size class only**
+  (`size.trailing_zeros()`, a monotonic proxy for depth) — **not** neighbour split state.
+  qalfa/qbeta/isometry keyed on size class crossed with DC-vs-domain mode. Domain row/col
+  coded as a zigzag delta from the **previous leaf visited** in traversal order — not a
+  true spatial predictor conditioned on a decoded neighbour's actual position, just
+  temporal adjacency in the NW/SW/NE/SE walk.
+- A `mode` symbol (not present in Mars 1's own format) coded before qalfa, so a DC-only
+  leaf never pays for an unused qalfa field at all — this is new to `.mars` v0, not a
+  narrower version of something Mars 1 had.
+- `crates/mars-codec/fuzz`'s `mars_format_read` target, plus a resource-bound check
+  (`MAX_LEAF_POSITIONS`, `mars_format.rs`) added *because* writing the fuzz target's logic
+  surfaced a real bug before ever running it: a `min_size` of 1 on a header claiming the
+  format's max 65535x65535 dimensions would make `read()` walk up to `(65536/1)^2` quadtree
+  nodes from a ~20-byte file, and (separately) `min_size == 0` or `max_size < min_size`
+  would recurse on a `size` that never reaches 0 — unbounded recursion, not merely a wrong
+  answer. Both are now rejected at header-validation time before any symbol is decoded.
+  This is exactly the class of bug Step 10's brief says fuzzing exists to catch early
+  ("do this now, not later") — it was caught by writing the target, before the sandbox's
+  network issues (below) ever let it run.
+- **Not run this session:** the actual `cargo +nightly fuzz run`. `crates/mars-codec/fuzz`
+  is (per `cargo-fuzz init`'s own convention) its own standalone `[workspace]`, so building
+  it needs a fresh `crates.io` index sync for `libfuzzer-sys` — a dependency nothing else
+  in this repo pulls in. That sync failed on every attempt (~15+ retries across three
+  separate invocations) with `transfer too slow: failed to transfer more than 10 bytes in
+  30-60s`, even though plain `curl` to both `index.crates.io` and `static.crates.io`
+  succeeded in under 1.1s from the same shell in the same session — so this is specific to
+  cargo's own HTTP client/this sandbox's network path for a *fresh* index sync, not a
+  general network outage (the main workspace's own dependencies, already cached from
+  earlier in this session, built and ran without any issue). `cargo +nightly fuzz build`
+  itself (compiling with ASan/sancov instrumentation) succeeded once earlier, before a
+  retry needed a further index update and hit the same wall — so the target is known to
+  compile, just not confirmed to run clean.
+
+**The bpp-reduction result (`just gate-10`, all 60 (image, rms) points, `mean = 60.8%`)
+is real but the corpus is not representative of what the brief's 8-20% estimate was about**
+— see `docs/predictions.md` P10.1's outcome for the full per-image table. The two fixtures
+closest to real photographic complexity (`noise_u8`, `mandelbrot`) land at 17.0-19.1%,
+almost exactly inside the brief's 8-20% band; every other fixture is a synthetic
+pathological pattern (flat field, single ramp, checkerboard, one impulse, one edge, an
+exact fractal) whose split/mode/domain-delta sequence is close to a run of one repeated
+symbol, which is exactly what an adaptive context model compresses hardest — `flat128`
+(91.6%) and `sierpinski` (94.7%) are not representative of a real image's rate, they are
+measuring how well the coder handles near-degenerate input. This mirrors
+`rust_encoder::gate`'s own documented framing of this same corpus (a large positive
+BD-PSNR on `checker8`/`impulse`/`noise_u8` "is expected, not a defect"): `mean_reduction`
+alone is not the number to trust; the two hardest-fixture numbers are.
+
+**Lossless round-trip:** confirmed on all 60 points — `write` → `read` recovers the exact
+leaf list `encode_image` produced, byte for byte, on every fixture at every rms in
+`rust_encoder::RMS_GRID`.
+
+**What this rules out.** Nothing about `.mars` v0's on-disk format itself — the container
+layout, section mechanism, and colour-field reservation are all as specified and do not
+need to change for a richer context scheme to land later. What's scoped down is purely the
+*context selection*, which is an internal encoder/decoder implementation detail the format
+does not encode (per the brief's own "decoder must not depend on encoder internals" rule,
+context assignment is exactly the kind of thing that can change without a format version
+bump, since both sides derive it identically from already-known header/traversal state).
+
+**What would reverse or complete this.** Neighbour-split-state context (walking the
+already-decoded sibling/parent split flags, not just size) for the split flag and mode
+fields; a real spatial domain predictor (nearest already-decoded neighbour range block's
+domain position, not just traversal-order predecessor); running the actual fuzz target for
+a meaningful duration once network access to a fresh `crates.io` index sync works in this
+environment (or vendoring `libfuzzer-sys` and its dependencies ahead of time so no fresh
+sync is needed); and re-measuring bpp reduction on `corpus/standard.images.json` (real
+Kodak photographs) rather than only the synthetic `fixtures` corpus, to get a number not
+dominated by pathological cases.
+
+**Tolerance impact.** None — `gate-10`'s two checks (lossless round-trip; reduction > 0%)
+are exactly as strict as written, and both passed on real, unmodified measurements.

@@ -955,3 +955,75 @@ would dominate feature-vector nearest-neighbour search (Saupe's) on recall. Give
 was measured on only 2 of 24 corpus images (D28), the magnitude should be treated as
 indicative rather than final -- but the *direction* (Saupe >> Fisher family on recall) is
 unlikely to be a 2-image artefact given how large the gap is (2.5-5x, not a few percent).
+
+### P10.1 — `.mars` v0's context-adaptive rANS vs. the raw `.ifs` bitstream, at identical reconstruction
+
+Written before `just gate-10`'s sweep (`marsbench mars-format-check` over
+`corpus/fixtures.images.json` x `rust_encoder::RMS_GRID`, launched in the background)
+returned any output — a real prediction, not a rationalisation, per A4.
+
+**What was built.** `crates/mars-entropy` (order-0 adaptive models per context, pure
+integer fixed-point CDFs, encoded via `constriction`'s `AnsCoder` stack) and
+`mars_codec::mars_format` (the `.mars` v0 container). Contexts actually implemented: split
+flag and mode by size class only (**not** "depth + neighbour split state" as the brief
+specifies — neighbour split state was scoped out this session, see the D29-adjacent entry
+this prediction's outcome will be filed under); qalfa/qbeta/isometry by size class crossed
+with DC-vs-domain mode; domain row/col as a zigzag delta from the *previous leaf's* domain
+position in traversal order (not a real spatial predictor using a decoded neighbour's
+position, just the previous leaf visited).
+
+**Prediction:**
+1. Every fixture round-trips losslessly (write -> read recovers the exact leaf list) —
+   this should be unconditionally true or there is a decoder bug, not a tolerance question.
+2. Mean bpp reduction vs. raw `.ifs` lands **below** the brief's 8-20% expectation,
+   because that range presumably assumes the full neighbour-aware context the brief
+   describes, and size-class-only conditioning is a strictly weaker model. Guessing
+   **3-10%** — mostly from the mode bit (skipping a full qalfa field when DC-only, which
+   is common at high t_rms) and from qalfa/qbeta's skew toward small values not being
+   forced into a uniform 4-or-7-bit field. If it lands *above* 20% that would suggest a
+   bug (most likely: the domain-delta predictor accidentally exploiting real spatial
+   locality in these synthetic fixtures — `checker8`, `ramp_h`, `zoneplate` are exactly
+   the kind of regular image where per-leaf domain positions could be highly
+   autocorrelated even under a "previous leaf" predictor with no real neighbour
+   awareness — worth checking whether the "outcome" turns out to be this session's fixture
+   corpus being unusually favourable rather than the coding scheme itself).
+3. Runtime is dominated entirely by `encode_image`'s exhaustive search (measured directly
+   at ~12.5s per 256x256 image at `t_rms=2.0`, matching Step 6/9's known search cost) —
+   `mars_format::write`/`read` themselves measured at under 2ms for a 4096-leaf image, so
+   the gate's wall-clock time is not informative about this step's own code.
+
+### P10.1 — **outcome: (1) confirmed; (2) falsified — reduction is far above the guessed range, and above the brief's own 8-20%, but the per-image breakdown resolves why**
+
+`just gate-10` (`marsbench mars-format-check`) results, all 60 (image, rms) points:
+
+1. **Confirmed exactly.** All 60 points round-tripped losslessly (`hdr == hdr2 &&
+   leaves_sorted == leaves2`), zero mismatches.
+2. **Falsified, in the surprising direction.** Mean reduction across all 60 points is
+   **60.8%**, not 3-10%. But the per-image spread is enormous and tells the real story:
+
+   | image | reduction | image | reduction |
+   |---|---|---|---|
+   | flat128 | 91.6% | sierpinski | 94.7% |
+   | ramp_h | 74.7% | mandelbrot | 17.0-18.9% |
+   | checker8 | 89.5% | zoneplate | 54.3-55.4% |
+   | noise_u8 | 19.1% | mixed_250x250 | 25.0-25.6% |
+   | impulse | 90.6-90.8% | mixed_129x127 | 25.5-27.3% |
+   | step_edge | 82.4% | selfsim_iso | 53.3-70.5% |
+
+   The two fixtures that most resemble real photographic complexity --
+   **`noise_u8` (19.1%) and `mandelbrot` (17.0-18.9%)** -- land almost exactly inside the
+   brief's predicted 8-20% band. Every other fixture is a synthetic pathological pattern
+   (flat fields, a single ramp, a checkerboard, a single impulse, one hard edge, an exact
+   fractal) with enormous run-length-style redundancy in its split/mode/domain-delta
+   sequence, which is exactly the structure an adaptive context model is best at --
+   `flat128` and `sierpinski` round to bpp so low (0.004, 0.017) that a few bits either way
+   swing the percentage enormously. This mirrors `rust_encoder::gate`'s own documented
+   pattern (D-series decisions): this corpus is deliberately full of pathological synthetic
+   fixtures for gating, not a representative photographic sample, so a mean over all 12 is
+   not the interesting number -- the two hardest fixtures matching the brief's own estimate
+   almost exactly is the real signal, and it did so *despite* this session's simplified
+   size-class-only context (not the brief's depth+neighbour scheme), which makes the
+   prediction's reasoning (a weaker context model implies a smaller gain) directly
+   falsified rather than merely off on magnitude: a weaker context model still recovered
+   the brief's full expected gain on the two images where the brief's expectation actually
+   applies. Filed alongside the scope note in `docs/decisions.md` D30.

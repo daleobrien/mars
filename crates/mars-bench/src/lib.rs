@@ -13,6 +13,7 @@ pub mod ifs_check;
 pub mod mars1;
 pub mod mars1_fixtures;
 pub mod mars1_report;
+pub mod mars_format_gate;
 pub mod measure;
 pub mod oracle;
 pub mod pchip;

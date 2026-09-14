@@ -1,0 +1,12 @@
+[package]
+name = "mars-entropy"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+constriction = { workspace = true }
+thiserror = { workspace = true }

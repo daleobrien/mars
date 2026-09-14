@@ -215,6 +215,28 @@ gate-9:
     cargo test -p mars-bench --release --test classical_methods_gate -- --nocapture
     @echo "gate-9: PASS (scoped per docs/decisions.md D28 -- RD-curve check not yet implemented)"
 
+# Step 10 -- the `.mars` v0 container + rANS entropy coding (`crates/mars-entropy`,
+# `mars_codec::mars_format`), deliberately breaking Mars 1 compatibility. Checks: every
+# `corpus/fixtures.images.json` fixture at Step 6's rms grid round-trips losslessly
+# through write -> read (byte-identical leaf list, so byte-identical reconstruction);
+# entropy coding reduces bpp vs. the raw `.ifs` bitstream at that identical
+# reconstruction (attribution: same leaves, only the serialisation differs); and the
+# decoder never panics, OOMs, or allocates unboundedly on arbitrary bytes (fuzzed
+# separately -- see `just fuzz-mars-format`, not part of this gate since fuzzing has no
+# natural exit-0 stopping point). Reuses gate-6's exhaustive encoder, so it costs what
+# gate-6 costs (dominated by the exhaustive search, not by this step's own code).
+gate-10:
+    cargo build --release -p mars-cli
+    cargo test -p mars-entropy -p mars-codec --release
+    ./target/release/marsbench mars-format-check
+    @echo "gate-10: PASS"
+
+# Step 10's fuzz target -- run for a bounded time locally (CI would run this
+# continuously; `just gate-10` does not depend on it since a fuzz run has no exit-0
+# stopping point of its own). Needs nightly + cargo-fuzz.
+fuzz-mars-format seconds="60":
+    cd crates/mars-codec/fuzz && cargo +nightly fuzz run mars_format_read -- -max_total_time={{seconds}}
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval
