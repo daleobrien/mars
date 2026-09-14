@@ -48,6 +48,17 @@ pub(crate) const FIELD_QBETA_DC: u8 = 4;
 pub(crate) const FIELD_ISOMETRY: u8 = 5;
 pub(crate) const FIELD_DOM_ROW: u8 = 6;
 pub(crate) const FIELD_DOM_COL: u8 = 7;
+/// Step 15: mode 1 (affine)'s quantised gradient fields. `8`/`9` -- the next free ids
+/// after Step 10's original eight; `crate::residual::FIELD_RESID_NZ`/`FIELD_RESID_MAG`
+/// (`10`/`11`) are the ones after that, kept in `residual.rs` since that module owns the
+/// whole residual event vocabulary end to end.
+pub(crate) const FIELD_GX: u8 = 8;
+pub(crate) const FIELD_GY: u8 = 9;
+
+/// Step 15: `FIELD_MODE`'s alphabet grew from 2 (flat/fractal) to 4 (flat, affine,
+/// fractal, fractal + residual) -- declared once so `emit_leaf`/`walk_read` and the rate
+/// estimator's own test never drift out of sync with each other.
+const MODE_ALPHABET: u32 = 4;
 
 /// `bits_alfa`/`bits_beta` are stored as a whole byte (unlike Mars 1's packed 4-bit
 /// fields) but are still bounded well short of 32, so that `1 << bits` and the zigzag
@@ -382,58 +393,88 @@ fn walk_write(
     Ok(())
 }
 
-fn emit_leaf(hdr: &Header, leaf: &Leaf, size_class: u32, pred: &mut Predictor, events: &mut Vec<Event>) {
-    if leaf.qalfa == 0 {
-        events.push(Event {
-            ctx: (FIELD_MODE, size_class),
-            alphabet: 2,
-            symbol: 0,
-        });
-        events.push(Event {
-            ctx: (FIELD_QBETA_DC, size_class),
-            alphabet: 1 << hdr.bits_beta,
-            symbol: leaf.qbeta,
-        });
-        return;
-    }
+/// Step 15's gradient-field alphabet, shared by encode and decode: `crate::encode`'s
+/// `AFFINE_GRAD_CLAMP` bounds `qgx`/`qgy` to `+-AFFINE_GRAD_CLAMP`, zigzag-coded.
+fn grad_alphabet() -> u32 {
+    (2 * crate::encode::AFFINE_GRAD_CLAMP as i64 + 1) as u32
+}
 
+/// Emit one leaf's event stream, keyed by `leaf.mode` (§ this module's doc, Step 15's R&D
+/// plan §4 modes 0-3; mode 4/subdivide is the `FIELD_SPLIT` bit `walk_write`/`walk_read`
+/// already emit one level up, not a leaf-mode value at all).
+fn emit_leaf(hdr: &Header, leaf: &Leaf, size_class: u32, pred: &mut Predictor, events: &mut Vec<Event>) {
     events.push(Event {
         ctx: (FIELD_MODE, size_class),
-        alphabet: 2,
-        symbol: 1,
-    });
-    events.push(Event {
-        ctx: (FIELD_QALFA, size_class),
-        alphabet: (1 << hdr.bits_alfa) - 1,
-        symbol: leaf.qalfa - 1,
-    });
-    events.push(Event {
-        ctx: (FIELD_QBETA, size_class),
-        alphabet: 1 << hdr.bits_beta,
-        symbol: leaf.qbeta,
-    });
-    events.push(Event {
-        ctx: (FIELD_ISOMETRY, size_class),
-        alphabet: 8,
-        symbol: u32::from(leaf.isometry),
+        alphabet: MODE_ALPHABET,
+        symbol: u32::from(leaf.mode),
     });
 
-    let row_units = i64::from(leaf.dom_row / hdr.shift);
-    let col_units = i64::from(leaf.dom_col / hdr.shift);
-    let row_range = 1i64 << hdr.bits_coord_row();
-    let col_range = 1i64 << hdr.bits_coord_col();
-    events.push(Event {
-        ctx: (FIELD_DOM_ROW, size_class),
-        alphabet: (2 * row_range) as u32,
-        symbol: zigzag(row_units - pred.prev_row_units),
-    });
-    events.push(Event {
-        ctx: (FIELD_DOM_COL, size_class),
-        alphabet: (2 * col_range) as u32,
-        symbol: zigzag(col_units - pred.prev_col_units),
-    });
-    pred.prev_row_units = row_units;
-    pred.prev_col_units = col_units;
+    match leaf.mode {
+        0 => {
+            events.push(Event {
+                ctx: (FIELD_QBETA_DC, size_class),
+                alphabet: 1 << hdr.bits_beta,
+                symbol: leaf.qbeta,
+            });
+        }
+        1 => {
+            events.push(Event {
+                ctx: (FIELD_QBETA_DC, size_class),
+                alphabet: 1 << hdr.bits_beta,
+                symbol: leaf.qbeta,
+            });
+            let alphabet = grad_alphabet();
+            events.push(Event {
+                ctx: (FIELD_GX, size_class),
+                alphabet,
+                symbol: zigzag(i64::from(leaf.qgx)),
+            });
+            events.push(Event {
+                ctx: (FIELD_GY, size_class),
+                alphabet,
+                symbol: zigzag(i64::from(leaf.qgy)),
+            });
+        }
+        2 | 3 => {
+            events.push(Event {
+                ctx: (FIELD_QALFA, size_class),
+                alphabet: (1 << hdr.bits_alfa) - 1,
+                symbol: leaf.qalfa - 1,
+            });
+            events.push(Event {
+                ctx: (FIELD_QBETA, size_class),
+                alphabet: 1 << hdr.bits_beta,
+                symbol: leaf.qbeta,
+            });
+            events.push(Event {
+                ctx: (FIELD_ISOMETRY, size_class),
+                alphabet: 8,
+                symbol: u32::from(leaf.isometry),
+            });
+
+            let row_units = i64::from(leaf.dom_row / hdr.shift);
+            let col_units = i64::from(leaf.dom_col / hdr.shift);
+            let row_range = 1i64 << hdr.bits_coord_row();
+            let col_range = 1i64 << hdr.bits_coord_col();
+            events.push(Event {
+                ctx: (FIELD_DOM_ROW, size_class),
+                alphabet: (2 * row_range) as u32,
+                symbol: zigzag(row_units - pred.prev_row_units),
+            });
+            events.push(Event {
+                ctx: (FIELD_DOM_COL, size_class),
+                alphabet: (2 * col_range) as u32,
+                symbol: zigzag(col_units - pred.prev_col_units),
+            });
+            pred.prev_row_units = row_units;
+            pred.prev_col_units = col_units;
+
+            if leaf.mode == 3 {
+                crate::residual::encode_events(&leaf.residual, size_class, events);
+            }
+        }
+        _ => unreachable!("Leaf::mode is only ever constructed as 0..=3"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -469,20 +510,48 @@ fn walk_read(
         return Ok(());
     }
 
-    let mode = dec.next((FIELD_MODE, size_class), 2);
-    if mode == 0 {
-        let qbeta = dec.next((FIELD_QBETA_DC, size_class), 1 << hdr.bits_beta);
-        leaves.push(Leaf {
-            row,
-            col,
-            size,
-            qalfa: 0,
-            qbeta,
-            isometry: 0,
-            dom_row: 0,
-            dom_col: 0,
-        });
-        return Ok(());
+    let mode = dec.next((FIELD_MODE, size_class), MODE_ALPHABET);
+    match mode {
+        0 => {
+            let qbeta = dec.next((FIELD_QBETA_DC, size_class), 1 << hdr.bits_beta);
+            leaves.push(Leaf {
+                row,
+                col,
+                size,
+                mode: 0,
+                qalfa: 0,
+                qbeta,
+                isometry: 0,
+                dom_row: 0,
+                dom_col: 0,
+                qgx: 0,
+                qgy: 0,
+                residual: Vec::new(),
+            });
+            return Ok(());
+        }
+        1 => {
+            let qbeta = dec.next((FIELD_QBETA_DC, size_class), 1 << hdr.bits_beta);
+            let alphabet = grad_alphabet();
+            let qgx = unzigzag(dec.next((FIELD_GX, size_class), alphabet)) as i32;
+            let qgy = unzigzag(dec.next((FIELD_GY, size_class), alphabet)) as i32;
+            leaves.push(Leaf {
+                row,
+                col,
+                size,
+                mode: 1,
+                qalfa: 0,
+                qbeta,
+                isometry: 0,
+                dom_row: 0,
+                dom_col: 0,
+                qgx,
+                qgy,
+                residual: Vec::new(),
+            });
+            return Ok(());
+        }
+        _ => {} // 2 or 3, handled below (MODE_ALPHABET == 4 rules out anything else)
     }
 
     let qalfa = dec.next((FIELD_QALFA, size_class), (1 << hdr.bits_alfa) - 1) + 1;
@@ -519,15 +588,25 @@ fn walk_read(
         });
     }
 
+    let residual = if mode == 3 {
+        crate::residual::decode_values(dec, size_class, (size * size) as usize)
+    } else {
+        Vec::new()
+    };
+
     leaves.push(Leaf {
         row,
         col,
         size,
+        mode: mode as u8,
         qalfa,
         qbeta,
         isometry,
         dom_row,
         dom_col,
+        qgx: 0,
+        qgy: 0,
+        residual,
     });
     Ok(())
 }
@@ -577,6 +656,61 @@ mod tests {
         a.sort();
         b.sort();
         assert_eq!(a, b);
+    }
+
+    /// Step 15: a real λ-driven RD encode of a textured image should exercise at least one
+    /// non-legacy mode (1 or 3) -- if it never does, either the search space or the test
+    /// image is degenerate, and the round-trip below wouldn't actually be testing the new
+    /// wire format. `docs/predictions.md`'s Step 15 prediction expects this image (a
+    /// gradient-plus-texture synthetic, not flat and not perfectly self-similar) to
+    /// realistically hit all five modes.
+    fn textured_gradient_image(w: usize, h: usize) -> Plane {
+        let mut data = vec![0u8; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                let base = (r * 255 / h.max(1)) as i32; // a vertical gradient -- mode 1's target
+                let texture = (((r / 4) * 13 + (c / 4) * 7) % 32) as i32 - 16; // local texture
+                data[r * w + c] = (base + texture).clamp(0, 255) as u8;
+            }
+        }
+        Plane::from_vec(w, h, data)
+    }
+
+    /// Step 15's own exit criterion, at the format level: every leaf mode the RD search
+    /// picks must round-trip through the real `.mars` v0 bitstream exactly -- including
+    /// mode 3's residual coefficients, which no pre-Step-15 test exercises at all.
+    #[test]
+    fn every_mode_the_rd_search_picks_round_trips_through_mars_v0() {
+        let image = textured_gradient_image(96, 96);
+        let rd_params = EncodeParams {
+            min_size: 4,
+            max_size: 16,
+            shift: 4,
+            bits_alfa: 4,
+            bits_beta: 7,
+            max_alfa: 1.0,
+            t_rms: 8.0,
+            zero_threshold: 0,
+            lambda: Some(40.0),
+        };
+        let (hdr, leaves, _evals) = encode_image(&image, &rd_params);
+        assert!(!leaves.is_empty());
+
+        let bytes = write(&hdr, &leaves).unwrap();
+        let (hdr2, leaves2) = read(&bytes).unwrap();
+        assert_eq!(hdr, hdr2);
+
+        let mut a = leaves.clone();
+        let mut b = leaves2.clone();
+        a.sort_by_key(|l| (l.row, l.col, l.size));
+        b.sort_by_key(|l| (l.row, l.col, l.size));
+        assert_eq!(a, b, "every field -- including mode 3's residual -- must round trip exactly");
+
+        let modes_used: std::collections::HashSet<u8> = leaves.iter().map(|l| l.mode).collect();
+        assert!(
+            modes_used.len() > 1,
+            "expected a genuine mix of leaf modes on a gradient+texture image, got only {modes_used:?}"
+        );
     }
 
     #[test]

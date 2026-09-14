@@ -56,21 +56,44 @@ fn ceil_log2(q: u32) -> u32 {
 
 /// One leaf of the quadtree (§5–§6): a range block, its quantised fit, and — unless it is
 /// DC-only — the domain block and isometry it references.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Step 15 (R&D plan §4): `mode` distinguishes the five candidate representations `J`
+/// competes among. Modes 0/2 are exactly this project's original Mars 1-derived
+/// constant/domain-reference leaves (`qalfa == 0` / `qalfa != 0`, unchanged); modes 1
+/// (`qgx`/`qgy`, a spatial-gradient plane fit needing no domain search at all) and 3
+/// (mode 2's fields plus `residual`, the quantised DCT coefficients of the fractal
+/// prediction's error) are new. `mode` is only ever non-0/2 on leaves `mars_codec::encode`
+/// produces with `EncodeParams::lambda` set (Step 14's bottom-up RD walk) -- the legacy
+/// `t_rms`-threshold `walk` and the raw `.ifs` writer/reader below never emit or expect
+/// modes 1/3, since Mars 1's `.ifs` format has no representation for either (`crate::ifs`
+/// stays a read/write port of the 1998 format; `crate::mars_format` is where Step 15's new
+/// modes actually round-trip -- see that module's doc). `residual` is empty on every leaf
+/// except mode 3, where it holds exactly `size*size` levels in [`crate::dct`]'s row-major
+/// order.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Leaf {
     pub row: u32,
     pub col: u32,
     pub size: u32,
+    pub mode: u8,
     pub qalfa: u32,
     pub qbeta: u32,
     /// Meaningless when `dc_only()` — always 0 in that case, per §6.
     pub isometry: u8,
     pub dom_row: u32,
     pub dom_col: u32,
+    /// Mode 1 only: quantised spatial-gradient coefficients (§ the struct doc).
+    pub qgx: i32,
+    pub qgy: i32,
+    /// Mode 3 only: `size*size` quantised DCT coefficient levels, row-major, DC first.
+    pub residual: Vec<i32>,
 }
 
 impl Leaf {
     /// §6: `qalfa == 0` means a constant-fill block with no domain reference at all.
+    /// Step 15: true for mode 0 (flat) and mode 1 (affine) leaves, both of which carry no
+    /// domain reference — kept as a `qalfa`-based check rather than `mode == 0` so every
+    /// pre-Step-15 caller (which only ever produces mode 0/2 leaves) is unaffected.
     pub fn dc_only(&self) -> bool {
         self.qalfa == 0
     }
@@ -212,11 +235,15 @@ fn walk(
         row,
         col,
         size,
+        mode: if qalfa == 0 { 0 } else { 2 },
         qalfa,
         qbeta,
         isometry,
         dom_row,
         dom_col,
+        qgx: 0,
+        qgy: 0,
+        residual: Vec::new(),
     });
     Ok(())
 }
@@ -240,7 +267,34 @@ pub fn decode_iterative(hdr: &Header, leaves: &[Leaf], iterations: u32) -> Plane
 /// §7 dequantisation and §9/§10.1 reconstruction for one leaf, reading `img` (the
 /// previous iteration) and writing `next` — the double-buffering of §10.1 is what makes
 /// leaves independent of each other and safe to iterate in any order.
+///
+/// Step 15: dispatches on `leaf.mode`. Modes 0/2 are exactly the original §9/§10.1
+/// formula (mode 0 is simply mode 2 with `alfa == 0`, so both fall through the same
+/// arithmetic below unchanged); mode 1 reconstructs the spatial-gradient plane instead of
+/// reading a domain at all; mode 3 adds mode 2's fractal prediction to the residual's
+/// inverse DCT. See [`crate::mars_format`] for where modes 1/3 are actually produced and
+/// consumed -- this function exists so [`decode_iterative`] (and hence any PSNR
+/// measurement built on it, e.g. `mars-bench`'s RD sampler) reconstructs every mode
+/// correctly, not only the two the legacy `.ifs` bitstream itself can express.
 fn decode_leaf(hdr: &Header, leaf: &Leaf, img: &[u8], stride: usize, next: &mut [u8]) {
+    let size = leaf.size as usize;
+
+    if leaf.mode == 1 {
+        // Mode 1 -- affine: `b0 + gx*u + gy*v`, no domain reference. `qgx`/`qgy` are
+        // already real-valued fixed-point gradients scaled by `crate::encode`'s
+        // `AFFINE_GRAD_SCALE` -- see that constant's doc for the quantisation.
+        let b0 = f64::from(leaf.qbeta) / f64::from((1u32 << hdr.bits_beta) - 1) * 255.0;
+        let gx = f64::from(leaf.qgx) / crate::encode::AFFINE_GRAD_SCALE;
+        let gy = f64::from(leaf.qgy) / crate::encode::AFFINE_GRAD_SCALE;
+        for u in 0..size {
+            for v in 0..size {
+                let value = (b0 + gx * u as f64 + gy * v as f64).round().clamp(0.0, 255.0) as u8;
+                next[(leaf.row as usize + u) * stride + leaf.col as usize + v] = value;
+            }
+        }
+        return;
+    }
+
     let alfa = f64::from(leaf.qalfa) / f64::from(1u32 << hdr.bits_alfa) * hdr.max_alfa();
     let mut beta = f64::from(leaf.qbeta) / f64::from((1u32 << hdr.bits_beta) - 1)
         * ((1.0 + alfa.abs()) * 255.0);
@@ -248,7 +302,23 @@ fn decode_leaf(hdr: &Header, leaf: &Leaf, img: &[u8], stride: usize, next: &mut 
         beta -= alfa * 255.0;
     }
 
-    let size = leaf.size as usize;
+    let residual = if leaf.mode == 3 && !leaf.residual.is_empty() {
+        let levels: Vec<f64> = leaf
+            .residual
+            .iter()
+            .map(|&l| {
+                crate::quant::dead_zone_dequantize(
+                    l,
+                    crate::encode::RESIDUAL_QSTEP_DEFAULT,
+                    crate::encode::RESIDUAL_DEAD_ZONE,
+                )
+            })
+            .collect();
+        Some(crate::dct::inverse_dct2d(&levels, size))
+    } else {
+        None
+    };
+
     for u in 0..size {
         for v in 0..size {
             let dr = leaf.dom_row as usize + 2 * u;
@@ -261,8 +331,12 @@ fn decode_leaf(hdr: &Header, leaf: &Leaf, img: &[u8], stride: usize, next: &mut 
             let (i, j) = crate::isometry::map(leaf.isometry, u, v, size);
             // §10.1: the 0.5 is added to the product, not to the sum — `+` is
             // left-associative in the C, and reassociating changes the truncated result.
-            let value = ((0.5 + d * alfa) + beta).clamp(0.0, 255.0) as u8;
-            next[(leaf.row as usize + i) * stride + leaf.col as usize + j] = value;
+            let mut value = (0.5 + d * alfa) + beta;
+            if let Some(res) = &residual {
+                value += res[u * size + v];
+            }
+            next[(leaf.row as usize + i) * stride + leaf.col as usize + j] =
+                value.clamp(0.0, 255.0) as u8;
         }
     }
 }

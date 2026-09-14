@@ -16,6 +16,7 @@ pub mod mars1_fixtures;
 pub mod mars1_report;
 pub mod mars_format_gate;
 pub mod measure;
+pub mod mode_gate;
 pub mod oracle;
 pub mod parallel_bench;
 pub mod pchip;

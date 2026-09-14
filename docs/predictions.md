@@ -1623,3 +1623,77 @@ down to `min_size` unconditionally; one encode takes on the order of a minute). 
 self-consistent (λ-adaptive, iterated) rate-estimation warm-up, the full corpus, and a
 finer λ sweep are the concrete next steps to close the gap to the brief's 10% target,
 per D39.
+
+---
+
+## 2026-09-14 (not yet run) · Step 15 · residual mode
+
+Written after the mode-competition implementation (`mars_codec::encode::best_mode_leaf`,
+`crate::dct`, `crate::quant`, `crate::residual`, and `mars_format`'s mode-aware
+serialisation) was built and its own unit/round-trip tests were passing, but **before**
+any BD-rate sweep or mode-usage histogram was measured — the unit tests check internal
+consistency (round trips, SSE bookkeeping, a pure gradient block fitting almost exactly)
+and say nothing about which mode actually wins on real images or what it does to the
+corpus-level rate/distortion numbers. Per A4 this counts as "before measuring", the same
+class of deviation Step 18's prediction recorded for itself (a sanity pass first, the
+actual RD sweep after this entry), not a retrofit of a result already seen.
+
+**What was built.** Modes 0 (flat, `best_beta`'s existing refit, now priced as its own
+competing candidate rather than an override), 1 (affine: a closed-form least-squares
+spatial-gradient plane fit `b0 + gx*u + gy*v`, no domain search), 2 (fractal, unchanged),
+and 3 (fractal + residual: mode 2's continuous prediction error, forward-DCT'd via a
+direct O(N^3) orthonormal DCT-II/DCT-III pair, dead-zone quantised at a **fixed**
+compile-time step/dead-zone — not λ-adaptive this step, a deliberate scope cut recorded in
+`docs/decisions.md` — and context-modelled rANS coded via a new nonzero-flag/magnitude
+event vocabulary bucketed by frequency band). All four compete under the exact same
+`J = D + λR` machinery Step 14 built, priced against the same frozen `RateModels`
+snapshot, inside `walk_rd`'s existing leaf-vs-split (mode 4) comparison.
+
+### P15.1 — fractal's share of the mode histogram will be a minority, not a majority
+
+Expect modes 2+3 (fractal, fractal+residual) combined to win **well under half** of leaf
+decisions on the `standard/` Kodak-style corpus at moderate λ, with mode 0 (flat) and
+mode 1 (affine) together taking the majority — most natural-image blocks at the leaf
+sizes this project's configs use (4-16 px) are locally smooth-with-gradient or genuinely
+flat far more often than they contain a *distinct*, better-matching self-similar region
+elsewhere in the same image, and mode 1's spatial-gradient fit is a strictly cheaper way
+to capture "smooth ramp" than a domain search plus isometry plus two coordinate fields.
+This is exactly the kind of finding the brief flags as legitimate rather than a failure:
+it would be the first quantification, under genuine competing-mode pressure, of how much
+of a fractal codec's own literature-standard test corpus actually benefits from the
+self-similarity search at all, as opposed to benefiting because nothing cheaper was ever
+offered as an alternative.
+
+### P15.2 — mode 3 (fractal + residual) rarely beats plain mode 2 at this session's fixed quantisation step
+
+Because the residual quantisation step is fixed (not λ-swept, §"what was built" above),
+expect mode 3 to win only a **small minority** of the fractal-eligible decisions (i.e.
+among blocks where mode 2 itself was competitive) — a fixed step that is well-tuned for
+one λ will be badly mismatched at the sweep's other extremes (too coarse to help at low λ
+where rate is cheap, or too fine to be worth its own coding overhead at high λ where every
+extra bit is expensive), so mode 3's win rate is expected to **vary non-monotonically
+across the λ sweep** rather than climb smoothly, which would itself be a symptom of this
+exact, already-known limitation rather than a new bug — recorded here so that pattern, if
+seen, is not mistaken for a rate-estimation error the way Step 14's P14.2 worried about.
+
+### P15.3 — BD-rate vs. Step 14 improves, but by a modest, single-digit-to-low-teens percentage
+
+Expect **BD-rate improvement in the 3-12% range** vs. Step 14 (commit `788ee5d`) at
+matched search effort — every new mode is strictly a superset of what Step 14 could
+already express (mode 2 unchanged, and `J` will simply never pick a new mode unless it is
+actually cheaper), so a regression is not expected and would indicate a bug (most likely
+in event pricing making the new modes look artificially cheap and be picked wrongly), but
+the ceiling is bounded by how much of the corpus was already well-served by flat/fractal
+alone. This is deliberately a wide, low-confidence band — unlike Step 14's brief, Step 15
+states no numeric target, so this number exists to be compared against, not graded
+against a bar.
+
+### Known gaps, stated before any measurement runs
+
+Residual quantisation is not λ-adaptive (P15.2's own premise) — a real, documented
+simplification (`docs/decisions.md`), not an oversight. The BD-rate/histogram sweep is
+expected to be scoped to `kodim01`/`kodim02` at the same 4-point λ grid Step 14 used
+(`gate-14`'s own precedent for a session-time-bounded scope cut), not the full 24-image
+`standard/` corpus — bottom-up RD search with four extra mode evaluations per node is
+strictly more expensive per encode than Step 14's own already-slow walk. `μT` (decode-cost
+term) remains out of scope, inherited unchanged from Step 14.

@@ -356,6 +356,42 @@ gate-14:
     MARS_RUN_RD_GATE=1 cargo test -p mars-bench --release --test rd_gate -- --nocapture
     @echo "gate-14: PASS (scoped to kodim01/kodim02, calibrated -5% BD-rate floor -- brief's own 10% target not yet cleared, see docs/decisions.md D39 and docs/predictions.md's Step 14 outcome)"
 
+# Step 15 -- residual mode (`mars_codec::encode`'s modes 0-4: flat, affine, fractal,
+# fractal + residual, subdivide, all competing under Step 14's `J = D + lambda*R`).
+# Checks, in order:
+#  1. `mars-codec`'s own unit/round-trip tests: `crate::dct`'s forward/inverse round trip
+#     and DC-energy property, `crate::quant`'s dead-zone requantisation idempotence,
+#     `crate::residual`'s event round trip through the real entropy coder (including
+#     level-clamp behaviour), `mars_format`'s full `.mars` v0 round trip for a real
+#     mixed-mode RD encode (every field, including mode 3's residual coefficients, must
+#     survive write/read exactly), `affine_fit`'s near-exact recovery of a pure gradient,
+#     `residual_for_candidate`'s exact-zero-residual-under-exact-prediction property, and
+#     `ModeStats`'s own internal-consistency checks (histogram total == leaf count; the
+#     legacy `lambda: None` path reports all-zero stats).
+#  2. `gate_15`'s BD-rate/mode-histogram check (`crates/mars-bench/tests/residual_gate.rs`):
+#     Step 15's full four-mode competition against a same-codebase "Step 14 equivalent"
+#     curve (modes 0/2 only, via `encode_image_rd_with_modes`'s mode mask -- see
+#     `mars_bench::mode_gate`'s doc for why this same-codebase A/B was chosen over diffing
+#     a separate git revision), on kodim01/kodim02 at the same 4-point lambda grid
+#     `rd_gate.rs` uses, plus the convexity/monotonicity diagnostic, plus an assertion that
+#     every one of the four leaf modes is reachable somewhere in the sweep (a mode that is
+#     *never* picked anywhere is far more likely a `J`-pricing wiring bug than a genuine
+#     total absence of benefit). The corpus-wide mode-usage histogram is printed -- this is
+#     the brief's own "more scientifically interesting than the BD-rate number" header
+#     finding, not merely a diagnostic. See `docs/decisions.md`'s Step 15 entry for the
+#     measured BD-rate and histogram numbers, and `docs/predictions.md`'s Step 15 entry for
+#     what was predicted beforehand.
+# Scoped to kodim01/kodim02, not the full 24-image `standard/` corpus (mirrors gate-14's
+# own scope cut exactly -- Step 15's per-node search is strictly more expensive than
+# Step 14's, since it evaluates four leaf-mode candidates instead of two). Residual
+# quantisation is a fixed compile-time step, not lambda-adaptive this step (also recorded
+# in docs/decisions.md).
+gate-15:
+    cargo build --release -p mars-cli
+    cargo test -p mars-codec --release
+    MARS_RUN_RESIDUAL_GATE=1 cargo test -p mars-bench --release --test residual_gate -- --nocapture
+    @echo "gate-15: PASS (scoped to kodim01/kodim02, mode-usage histogram is the header finding -- see docs/decisions.md and docs/predictions.md's Step 15 entries)"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval
