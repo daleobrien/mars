@@ -187,6 +187,23 @@ struct Cli {
     /// never for reproducing a different result.
     #[arg(long)]
     threads: Option<usize>,
+
+    /// Write Step 19's 4-layer progressive container (base -> partition refinement ->
+    /// fractal refinement -> residual refinement) instead of the single-layer `.mars` v0
+    /// format -- so a `decmars --layer N` can decode any prefix independently, the whole
+    /// point of a progressive stream. **Grayscale only** for this first cut: whether/how
+    /// a progressive container composes with `mars_codec::color`'s per-plane YCbCr/
+    /// subsampling wrapping (`progressive.rs` was not designed against it) is unresolved
+    /// and explicitly out of scope here -- refused on colour input rather than silently
+    /// encoding only the luma plane. Mutually exclusive with `--method` (the progressive
+    /// encoder takes an already-built `(Header, Vec<Leaf>)`, which `--progressive` gets
+    /// from the same RD/legacy partition every other `encmars` invocation uses --
+    /// composing it with `mars-search`'s own candidate-restricted partition is unattempted
+    /// and not wired). Composes with `--lambda`/`--t-rms`/`--adaptive-density`/`--modes`
+    /// normally -- those choose the partition; `--progressive` only changes how that same
+    /// partition is serialised.
+    #[arg(long)]
+    progressive: bool,
 }
 
 fn main() -> Result<()> {
@@ -214,6 +231,14 @@ fn main() -> Result<()> {
         );
     }
 
+    if cli.progressive && cli.method.is_some() {
+        bail!(
+            "--progressive and --method are mutually exclusive: --progressive serialises \
+             the same RD/legacy partition every other encmars invocation produces, not a \
+             mars-search-restricted one -- see --help for --progressive"
+        );
+    }
+
     if let Some(method_arg) = cli.method {
         if cli.lambda.is_some() {
             bail!(
@@ -231,6 +256,15 @@ fn main() -> Result<()> {
             );
         }
         return run_with_method(&cli, method_arg, &image);
+    }
+
+    if cli.progressive && image.planes().len() != 1 {
+        bail!(
+            "{}: --progressive only supports grayscale input for now (got {} planes) -- \
+             see --help for --progressive",
+            cli.input.display(),
+            image.planes().len()
+        );
     }
 
     let base = EncodeParams {
@@ -258,6 +292,10 @@ fn main() -> Result<()> {
                 None => bail!("--modes: {m} is not a valid mode (expected 0-3)"),
             }
         }
+    }
+
+    if cli.progressive {
+        return run_progressive(&cli, &base, allowed_modes, &image);
     }
 
     let params = ColorEncodeParams {
@@ -354,6 +392,45 @@ fn run_with_method(
         bytes.len(),
         method.key(),
         evals as f64 / transforms.max(1) as f64,
+    );
+    Ok(())
+}
+
+/// CLI-E's own path: run the same RD/legacy partition every other grayscale `encmars`
+/// invocation would (`encode_image_rd_with_modes_and_density`, so `--lambda`/`--t-rms`/
+/// `--adaptive-density`/`--modes` all still apply), then hand the resulting `(Header,
+/// Vec<Leaf>)` to `mars_codec::progressive::encode` instead of `mars_format::write` --
+/// the progressive container's own magic (`MPRG`) lets `decmars` tell it apart from the
+/// single-layer `MARC` container without a separate flag.
+fn run_progressive(
+    cli: &Cli,
+    base: &EncodeParams,
+    allowed_modes: [bool; 4],
+    image: &mars_core::image::Image,
+) -> Result<()> {
+    let plane = &image.planes()[0];
+    let (hdr, leaves, evals, _stats) = mars_codec::encode::encode_image_rd_with_modes_and_density(
+        plane,
+        base,
+        allowed_modes,
+        cli.adaptive_density,
+    );
+    let bytes = mars_codec::progressive::encode(plane, &hdr, &leaves)
+        .context("building the progressive container")?;
+
+    std::fs::write(&cli.output, &bytes)
+        .with_context(|| format!("writing {}", cli.output.display()))?;
+
+    let offsets = mars_codec::progressive::layer_end_offsets(&bytes)
+        .expect("bytes this call just produced are always a valid progressive stream");
+    let (width, height) = (image.width(), image.height());
+    let bpp = 8.0 * bytes.len() as f64 / (width * height) as f64;
+    println!(
+        "{width}x{height} gray -> {} ({} bytes, {bpp:.3} bpp, progressive, {evals} evals, \
+         {} leaves, layer end-offsets {offsets:?})",
+        cli.output.display(),
+        bytes.len(),
+        leaves.len(),
     );
     Ok(())
 }

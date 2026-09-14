@@ -596,3 +596,17 @@ gate-cli-d:
     cargo build --release -p mars-cli
     cargo test -p mars-cli --release --test cli_d_gate -- --nocapture
     @echo "gate-cli-d: PASS (--threads byte-identical across 1/4/8 threads and against the default; --gpu not implemented this session, see docs/decisions.md D49)"
+
+# CLI-E (encmars-decmars-cli-plan.md) -- `encmars --progressive` / `decmars --layer`,
+# exposing Step 19's 4-layer progressive bitstream (mars_codec::progressive) on the CLI.
+# Grayscale only this first cut -- composition with mars_codec::color's per-plane YCbCr/
+# subsampling wrapping is unresolved and explicitly out of scope (progressive.rs was not
+# designed against it); colour input with --progressive is refused rather than silently
+# encoding only the luma plane. mars_codec::progressive gained one small public
+# `is_progressive` sniff helper so decmars can tell a progressive stream (`MPRG` magic)
+# apart from the single-layer MARC container without a separate flag.
+gate-cli-e:
+    cargo build --release -p mars-cli
+    cargo test -p mars-codec --release --lib progressive
+    cargo test -p mars-cli --release --test cli_e_gate -- --nocapture
+    @echo "gate-cli-e: PASS (decmars --layer N is byte-identical to decoding a file truncated to that layer's own end offset, for every N -- P19.1's own property, exercised through the real binaries; --layer on a non-progressive file and --progressive on colour input are both refused)"

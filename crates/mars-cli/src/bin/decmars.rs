@@ -51,6 +51,17 @@ struct Cli {
     /// (the default) is the bitstream's native resolution.
     #[arg(short = 'z', long, default_value_t = 1.0)]
     zoom: f64,
+
+    /// Decode only the first N of a progressive stream's 4 layers (1=base, 2=+partition
+    /// refinement, 3=+fractal refinement, 4=+residual refinement -- `mars_codec::
+    /// progressive`'s own doc has the full layer semantics), instead of every layer
+    /// present. Only valid for a progressive `.mars` file (`encmars --progressive`);
+    /// refused on a single-layer container. Default (omitted): decode every layer
+    /// present, equivalent to today's output for a progressive file. `--auto`/
+    /// `--progression`/`--zoom` are not supported together with a progressive input this
+    /// first cut -- refused rather than silently ignored.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=4))]
+    layer: Option<u8>,
 }
 
 fn image_writer(ext: &str) -> Result<fn(&Path, &Image) -> Result<(), ImageError>> {
@@ -74,9 +85,19 @@ fn main() -> Result<()> {
         .to_ascii_lowercase();
     let write = image_writer(&ext)?;
 
+    if mars_codec::progressive::is_progressive(&bytes) {
+        return decode_progressive(&cli, &bytes, &write);
+    }
+    if cli.layer.is_some() {
+        bail!(
+            "{}: --layer only applies to a progressive stream (encmars --progressive) -- \
+             this is a single-layer .mars container",
+            cli.input.display()
+        );
+    }
+
     let (image, iterations_used) = if let Some(dir) = &cli.progression {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let width = cli.iterations.max(1).to_string().len();
         let stable_threshold = cli.auto.then_some(cli.threshold);
         decode_color_image_progression(
@@ -120,6 +141,56 @@ fn main() -> Result<()> {
             .as_ref()
             .map(|d| format!(", {iterations_used} frame(s) in {}", d.display()))
             .unwrap_or_default(),
+    );
+    Ok(())
+}
+
+/// CLI-E's own path: `--layer N` truncates `bytes` to that layer's own end offset
+/// (`mars_codec::progressive::layer_end_offsets`) before handing it to `progressive::
+/// decode`, which decodes "however many layers are fully present" -- the mechanism P19.1
+/// exercises internally is exposed here exactly as-is, just driven by a CLI flag instead
+/// of a test harness. `--auto`/`--progression`/`--zoom` have no progressive-stream
+/// equivalent yet (Step 19 built a fixed-iteration decode only) -- refused rather than
+/// silently ignored.
+fn decode_progressive(
+    cli: &Cli,
+    bytes: &[u8],
+    write: &fn(&Path, &Image) -> Result<(), ImageError>,
+) -> Result<()> {
+    if cli.auto || cli.progression.is_some() || cli.zoom != 1.0 {
+        bail!(
+            "{}: --auto/--progression/--zoom are not supported for a progressive stream yet \
+             -- decmars --layer only",
+            cli.input.display()
+        );
+    }
+
+    let offsets = mars_codec::progressive::layer_end_offsets(bytes).with_context(|| {
+        format!(
+            "parsing {} as a progressive .mars stream",
+            cli.input.display()
+        )
+    })?;
+    let truncated = match cli.layer {
+        Some(n) => &bytes[..offsets[usize::from(n) - 1]],
+        None => bytes,
+    };
+    let decoded = mars_codec::progressive::decode(truncated).with_context(|| {
+        format!(
+            "parsing {} as a progressive .mars stream",
+            cli.input.display()
+        )
+    })?;
+    let image = Image::gray(decoded.image);
+    let (width, height) = (image.width(), image.height());
+
+    write(&cli.output, &image).with_context(|| format!("writing {}", cli.output.display()))?;
+
+    println!(
+        "{} -> {width}x{height} {} (progressive, layer {}/4 decoded, layer end-offsets {offsets:?})",
+        cli.input.display(),
+        cli.output.display(),
+        decoded.layers,
     );
     Ok(())
 }

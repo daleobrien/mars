@@ -51,6 +51,16 @@ const HEADER_LEN: usize = 4 + 1 + 6 + 4 + 16;
 /// (`grep -rn "decode_iterative(" crates/`).
 pub const DECODE_ITERATIONS: u32 = 10;
 
+/// Whether `data` starts with this module's own magic bytes -- for a caller (CLI-E's
+/// `decmars`) that needs to dispatch between a progressive stream and `mars_codec::
+/// color`'s single-layer `MARC` container before knowing which one it has. Only checks
+/// the magic, not the full header (`decode`/`layer_end_offsets` still validate the rest
+/// and return their own error if it's malformed) -- this is a format *sniff*, not a
+/// validity check.
+pub fn is_progressive(data: &[u8]) -> bool {
+    data.len() >= MAGIC.len() && data[..MAGIC.len()] == MAGIC
+}
+
 /// Mirrors `mars_format::MAX_LEAF_POSITIONS`'s reasoning exactly: a header claiming
 /// pathological dimensions/`min_size` ratios must not make [`decode`] walk or allocate an
 /// unbounded number of positions before any symbol is even decoded.
