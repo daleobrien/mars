@@ -167,6 +167,45 @@ pub fn write_pnm(path: &Path, image: &crate::image::Image) -> Result<(), ImageEr
     })
 }
 
+/// Write an image as PNG: 8-bit gray for a one-plane image, 8-bit RGB for a three-plane
+/// one. For side-by-side visual inspection (e.g. `decmars` output), where a viewable
+/// format matters more than the colour-management neutrality `write_pnm` is for.
+pub fn write_png(path: &Path, image: &crate::image::Image) -> Result<(), ImageError> {
+    let (w, h) = (image.width() as u32, image.height() as u32);
+    let planes = image.planes();
+    let color = match planes.len() {
+        1 => image::ColorType::L8,
+        3 => image::ColorType::Rgb8,
+        n => {
+            return Err(malformed(
+                path,
+                format!("cannot write a PNG with {n} planes; expected 1 or 3"),
+            ))
+        }
+    };
+    let buf = match planes.len() {
+        1 => planes[0].as_slice().to_vec(),
+        _ => {
+            let (r, g, b) = (
+                planes[0].as_slice(),
+                planes[1].as_slice(),
+                planes[2].as_slice(),
+            );
+            let mut out = Vec::with_capacity(3 * w as usize * h as usize);
+            for i in 0..w as usize * h as usize {
+                out.push(r[i]);
+                out.push(g[i]);
+                out.push(b[i]);
+            }
+            out
+        }
+    };
+    image::save_buffer(path, &buf, w, h, color).map_err(|source| ImageError::Png {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
 /// Read a binary (P6) colour PPM.
 ///
 /// Written for the same reason `write_pnm` exists: reading back what an external tool

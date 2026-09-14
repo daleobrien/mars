@@ -23,5 +23,13 @@ serde_json = { workspace = true }
 name = "marsbench"
 path = "src/bin/marsbench.rs"
 
+[[bin]]
+name = "encmars"
+path = "src/bin/encmars.rs"
+
+[[bin]]
+name = "decmars"
+path = "src/bin/decmars.rs"
+
 [lints]
 workspace = true
