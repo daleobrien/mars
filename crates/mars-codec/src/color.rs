@@ -111,6 +111,13 @@ pub struct ColorEncodeParams {
     /// a codec-wide encode choice, not a luma/chroma-specific one like `t_rms`. `false`
     /// (the default) reproduces every pre-Step-16 caller's behaviour byte-for-byte.
     pub adaptive_density: bool,
+    /// Step 15's per-leaf mode mask (flat, affine, fractal, fractal+residual), applied to
+    /// every plane alike -- a diagnostic/comparison knob (isolating one mode's effect,
+    /// reproducing a mode-usage histogram), not a quality control. Only consulted on the
+    /// RD (`EncodeParams::lambda: Some`) path -- the legacy top-down path never reaches
+    /// mode competition at all. `[true; 4]` (the
+    /// default) reproduces every pre-existing caller's behaviour exactly.
+    pub allowed_modes: [bool; 4],
 }
 
 /// Per-plane stats from a colour encode, for measurement (bpp attribution, evals).
@@ -163,7 +170,7 @@ pub fn encode_color_image(img: &Image, params: &ColorEncodeParams) -> (Vec<u8>, 
             let (hdr, leaves, evals, _stats) = encode_image_rd_with_modes_and_density(
                 &img.planes()[0],
                 &params.y,
-                [true; 4],
+                params.allowed_modes,
                 params.adaptive_density,
             );
             let bytes = mars_format::write(&hdr, &leaves)
@@ -190,19 +197,19 @@ pub fn encode_color_image(img: &Image, params: &ColorEncodeParams) -> (Vec<u8>, 
             let (y_hdr, y_leaves, y_evals, _) = encode_image_rd_with_modes_and_density(
                 &y,
                 &params.y,
-                [true; 4],
+                params.allowed_modes,
                 params.adaptive_density,
             );
             let (cb_hdr, cb_leaves, cb_evals, _) = encode_image_rd_with_modes_and_density(
                 &cb_enc,
                 &params.chroma,
-                [true; 4],
+                params.allowed_modes,
                 params.adaptive_density,
             );
             let (cr_hdr, cr_leaves, cr_evals, _) = encode_image_rd_with_modes_and_density(
                 &cr_enc,
                 &params.chroma,
-                [true; 4],
+                params.allowed_modes,
                 params.adaptive_density,
             );
 
@@ -566,6 +573,7 @@ mod tests {
             chroma: params(1.0),
             subsampling: Subsampling::Yuv444,
             adaptive_density: false,
+            allowed_modes: [true; 4],
         };
         let (bytes, _stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -582,6 +590,7 @@ mod tests {
             chroma: params(4.0),
             subsampling: Subsampling::Yuv444,
             adaptive_density: false,
+            allowed_modes: [true; 4],
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -613,12 +622,14 @@ mod tests {
             chroma: params(4.0),
             subsampling: Subsampling::Yuv444,
             adaptive_density: false,
+            allowed_modes: [true; 4],
         };
         let cfg_420 = ColorEncodeParams {
             y: params(4.0),
             chroma: params(4.0),
             subsampling: Subsampling::Yuv420,
             adaptive_density: false,
+            allowed_modes: [true; 4],
         };
         let (bytes_444, stats_444) = encode_color_image(&img, &cfg_444);
         let (bytes_420, stats_420) = encode_color_image(&img, &cfg_420);

@@ -68,6 +68,7 @@ fn round_trip_psnr_y_and_bytes(img: &Image, subsampling: Subsampling) -> (f64, u
         chroma: params(8.0),
         subsampling,
         adaptive_density: false,
+        allowed_modes: [true; 4],
     };
     let (bytes, _stats) = encode_color_image(img, &cfg);
     let decoded = decode_color_image(&bytes, 10).expect("decode of what we just encoded");
@@ -124,6 +125,7 @@ fn gray_image_round_trips_through_the_colour_container() {
         chroma: params(8.0),
         subsampling: Subsampling::Yuv444,
         adaptive_density: false,
+        allowed_modes: [true; 4],
     };
     let (bytes, _stats) = encode_color_image(&img, &cfg);
     let decoded = decode_color_image(&bytes, 10).unwrap();

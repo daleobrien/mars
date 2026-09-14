@@ -538,3 +538,12 @@ gate-step1: test crossval
 clean:
     cargo clean
     rm -rf target/mars1 target/crossval
+
+# CLI-B (encmars-decmars-cli-plan.md) -- expose Step 15's per-leaf mode mask as
+# `encmars --modes`, a diagnostic/comparison knob (isolating a mode's effect, reproducing
+# a mode-usage histogram) rather than a quality control. Fast -- small synthetic images,
+# no corpus RD sweep.
+gate-cli-b:
+    cargo build --release -p mars-cli
+    cargo test -p mars-cli --release --test cli_b_gate -- --nocapture
+    @echo "gate-cli-b: PASS (--modes 0,1,2,3 byte-identical to omitting the flag; --modes 2 forces every leaf to mode 2, verified by parsing the real .mars leaves the CLI wrote, not just its stdout summary; out-of-range mode numbers are rejected)"

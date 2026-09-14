@@ -107,6 +107,15 @@ struct Cli {
     /// flag existed -- byte-identical output either way when omitted.
     #[arg(long, default_value_t = false)]
     adaptive_density: bool,
+
+    /// Step 15's per-leaf mode mask, a diagnostic/comparison knob: comma-separated mode
+    /// numbers to allow, from 0 (flat), 1 (affine), 2 (fractal), 3 (fractal + residual) --
+    /// e.g. `--modes 0,1,2` disables mode 3, `--modes 2` forces fractal-only. Only affects
+    /// the RD path (`--lambda`); the legacy top-down split (`--t-rms` alone) never runs
+    /// Step 15's mode competition, so this flag is a no-op without `--lambda`. Default
+    /// (omitted): all four modes allowed, today's behaviour, byte-identical either way.
+    #[arg(long, value_delimiter = ',')]
+    modes: Vec<u8>,
 }
 
 fn main() -> Result<()> {
@@ -142,11 +151,24 @@ fn main() -> Result<()> {
         t_rms: cli.chroma_t_rms.unwrap_or(cli.t_rms),
         ..base
     };
+    let mut allowed_modes = [true; 4];
+    if !cli.modes.is_empty() {
+        allowed_modes = [false; 4];
+        for &m in &cli.modes {
+            let idx = usize::from(m);
+            match allowed_modes.get_mut(idx) {
+                Some(slot) => *slot = true,
+                None => bail!("--modes: {m} is not a valid mode (expected 0-3)"),
+            }
+        }
+    }
+
     let params = ColorEncodeParams {
         y: base,
         chroma,
         subsampling: cli.subsampling.into(),
         adaptive_density: cli.adaptive_density,
+        allowed_modes,
     };
 
     let (width, height) = (image.width(), image.height());
