@@ -2607,3 +2607,91 @@ was widened — A7 does not literally apply), calibrated with real margin below/
 was actually measured, around a genuine improvement rather than a shortfall or regression.
 This is explicitly *not* a fourth instance of the D36/D39/D40 pattern, and is recorded here
 as such rather than left for a reader to infer from the number alone.
+
+---
+
+## D44 · 2026-09-15 · Gate D attribution table (Steps 9-16), built entirely from already-recorded numbers — both headline targets miss, plainly stated, not re-scoped to clear the bar
+
+**Context.** Per the Gate D checklist (`implementation-plan.md` ~line 975-982), this entry
+attributes every step's contribution in one table and states plainly whether Gate D's two
+quantitative targets — BD-rate vs. Mars 1 baseline >= 35% better (cumulative over Steps
+9-15), and `evals/transform` reduced >= 10x vs. the best classical method at matched RD —
+are actually met. **No new sweep was run for this entry.** Every number below is pulled
+directly from D28, D30, D36, D39, D40, D43 and `results/classical-methods-sample.jsonl`,
+all of which are scoped to `kodim01`/`kodim02` only (2 of the 24-image `standard/` corpus),
+never the full corpus or `extended/`. That scope limitation applies to every row below and
+is not repeated per-row.
+
+**A load-bearing gap, surfaced before the table rather than after it.** No step in this
+project has ever measured a BD-rate curve of Mars 2's actual output against Mars 1's
+actual C-reference output. D28 named this explicitly: Step 9's `gate-9` checks
+`evals/transform` within 5% of the C binaries (passed, 0.00%-4.86%) but the RD-curve-
+within-0.2dB check against the Mars 1 baseline "was not implemented this session... an
+open gap, not a silently-passed check" — and nothing in Steps 10-16 revisited it. Every
+BD-rate number recorded since (D39, D40, D43) is a **same-codebase, same-session A/B**
+between two Mars 2 configurations (e.g. Step 15 vs. a mode-masked Step-14-equivalent on
+the *current* code, not a checkout of an earlier commit), chained back only as far as
+Step 14 vs. Step 9's `Exhaustive` method. Treating Step 9 `Exhaustive` as a stand-in for
+"the Mars 1 baseline" is the best available anchor, but it is an approximation whose own
+RD-equivalence to Mars 1 was never verified — only its `evals/transform` cost was. The
+cumulative BD-rate below inherits this gap and is reported as what it is: a chain of
+verified internal deltas anchored to an unverified proxy for the actual target.
+
+**Per-step attribution table.**
+
+| Step | Deliverable | Measured contribution | Source | Note |
+|---|---|---|---|---|
+| 9 | Six classical methods + `Exhaustive`, ported and trait-unified | `evals/transform` within 5% of Mars 1 C binaries (0.00%-4.86% measured); RD-curve-vs-Mars1 (0.2dB) check **not implemented** | D28 | Anchors the chain below; RD-equivalence to Mars 1 unverified |
+| 10 | `.mars` v0 container + context-adaptive rANS | bpp reduction 60.8% mean vs. an uncompressed baseline, but corpus-skewed — real-photo-like fixtures (`noise_u8`, `mandelbrot`) land at 17.0-19.1%, in-band with the brief's 8-20% estimate; several synthetic fixtures (91-95%) are not representative | D30 | Not a BD-rate figure; the entropy coder this measures is already baked into every `.mars` v0 bpp number used by Steps 14/15/16 below, so it is not double-counted in the cumulative chain |
+| 11 | NEON SIMD kernels for moment accumulation | Speed only (bit-identical output); no BD-rate or evals effect | D31/D35 | Not part of the BD-rate chain |
+| 12 | Rayon parallelism | Speed only (bit-identical output); no BD-rate or evals effect | D32/D33 | Not part of the BD-rate chain |
+| 13 | Hierarchical funnel search (`Funnel`) | `evals/transform`: kodim01 159.03, kodim02 150.23 — **higher** (more expensive) than the cheapest classical method already measured (`saupe-fisher`: 62.08 / 58.52); mean regret 1.03/0.91 dB, second-worst of the seven methods measured | D36, `results/classical-methods-sample.jsonl` | This is Mars 2's dedicated fast-search deliverable and it does not yet reduce evals vs. classical baselines — it costs more for worse regret |
+| 14 | Rate-distortion optimisation (`J = D + λR` bottom-up pruning) | BD-rate **-8.07% mean** vs. Step 9 `Exhaustive` (kodim01 -8.61%, kodim02 -7.54%) | D39 | First real BD-rate anchor point in the chain; short of the brief's own 10% target |
+| 15 | Residual mode (modes 0-3 under RD competition) | BD-rate **+2.05% mean regression** vs. Step 14 (kodim01 +1.88%, kodim02 +2.23%) | D40 | A measured regression, root-caused to the frozen rate-model snapshot never observing modes 1/3's fields — not fixed this session, included in the chain as a genuine negative, not omitted |
+| 16 | Content-adaptive domain-pool density | BD-rate **-6.82% mean** vs. Step 15 (kodim01 -6.75%, kodim02 -6.88%), at 1.42x encode-time cost (summed) | D43 | Clean win, breaks the three-consecutive-calibrated-gate pattern D40 flagged |
+
+**Cumulative BD-rate, Step 14 through Step 16, compounded per image (not simply summed —
+BD-rate percentages compose multiplicatively), anchored to the Step 9 `Exhaustive` proxy
+named above:**
+
+- kodim01: (1 − 0.0861) × (1 + 0.0188) × (1 − 0.0675) − 1 = **−13.2%**
+- kodim02: (1 − 0.0754) × (1 + 0.0223) × (1 − 0.0688) − 1 = **−12.0%**
+- mean: **≈ −12.6%**
+
+**Criterion 1 — BD-rate vs. Mars 1 baseline >= 35% better: NOT MET.** Even granting the
+unverified Step-9-`Exhaustive`-as-Mars-1-proxy assumption the most generous possible
+reading, the cumulative measured improvement is ~12.6%, roughly a third of the 35% target,
+on 2 of 24 corpus images, with Step 15's real regression already folded in honestly (not
+skipped — skipping it would read as ~-14.6% compounding only Steps 14 and 16, still short).
+The true comparison against actual Mars 1 output was never built at all (D28's open gap),
+so even this ~12.6% figure is one step removed from what the gate actually asks for.
+
+**Criterion 2 — `evals/transform` reduced >= 10x vs. best classical method at matched RD:
+NOT MET, and not close.** The only Mars-2-native fast-search method measured against the
+classical baselines is Step 13's `Funnel`, and it is **~2.4-2.6x more expensive** than the
+cheapest classical method already measured (`saupe-fisher`), not 10x cheaper, while also
+landing at worse regret (second-worst of seven methods). No 10x-or-better reduction vs. any
+classical baseline exists anywhere in the recorded results at time of writing.
+
+**Criterion 3 — every step's contribution separately attributed in one table: MET** — see
+the table above; this is the one criterion that is a documentation exercise rather than a
+new measurement, and it is now satisfied.
+
+**Conclusion, stated plainly per this entry's own instruction not to re-scope the numbers
+to clear the bar.** Gate D's two quantitative research targets are not met by the evidence
+actually on record. This does not mean the project has produced nothing — Steps 14 and 16
+are genuine, honestly-measured BD-rate wins (-8.07%, -6.82% respectively), and D30's
+entropy coder is a real bpp reduction on realistic content — but the compounded, corpus-
+narrow result (~12.6%) falls well short of "35% better than Mars 1," and no step has yet
+delivered an evals/transform reduction vs. the classical baselines at all, let alone 10x.
+Per this project's own working agreement, this is recorded as the honest state of Gate D
+rather than smoothed into a qualified pass; Group D experiments (Step 17 onward) proceed
+per the plan's own framing of them as hypotheses independent of Gate D's pass/fail state,
+not as a step blocked on Gate D closing.
+
+**Scope cut.** All figures above are `kodim01`/`kodim02` only (2 of 24 `standard/` images),
+inherited unchanged from D28/D36/D39/D40/D43 — no new measurement was taken for this
+attribution table, per this entry's own instruction to build it from what's already
+recorded.
+
+**Tolerance impact.** None — this entry asserts nothing new and changes no gate.
