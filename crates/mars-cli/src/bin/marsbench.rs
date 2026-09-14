@@ -80,6 +80,10 @@ enum Cmd {
     /// Step 8: score a method's chosen candidates against an oracle cache file --
     /// top-1/5/32 recall and RMS regret in dB.
     Recall(RecallArgs),
+    /// Step 9: run `mars-search`'s six classical speed-up methods (+ `Exhaustive`) over
+    /// the corpus at the oracle's own configs, reporting evals/transform and recall/regret
+    /// against the Step 8 oracle cache in one table.
+    ClassicalMethods(ClassicalMethodsArgs),
 }
 
 #[derive(Args)]
@@ -236,6 +240,32 @@ struct RecallArgs {
     /// Which size in the cache to self-test against, when `--picks` is omitted.
     #[arg(long)]
     size: Option<u32>,
+}
+
+#[derive(Args)]
+struct ClassicalMethodsArgs {
+    /// The oracle suite (min/max/shift/bits_alfa/bits_beta/max_alfa per config) --
+    /// reused rather than a separate config file, so recall scoring stays against
+    /// exactly the sizes the cache covers.
+    #[arg(long, default_value = "configs/oracle.json")]
+    config: PathBuf,
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+    /// Where `marsbench oracle-build` put the cache files.
+    #[arg(long, default_value = "oracle-cache")]
+    out_dir: PathBuf,
+    #[arg(long, value_delimiter = ',')]
+    images: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    configs: Vec<String>,
+    /// `-r`/`T_RMS`, the quadtree split threshold. The oracle itself has no notion of a
+    /// partition (it scores every position independently), so this is supplied here,
+    /// not read from the oracle config.
+    #[arg(long, default_value_t = 8.0)]
+    t_rms: f64,
+    /// Optional: append one JSONL summary row per (image, config, method).
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -414,6 +444,7 @@ fn main() -> Result<()> {
         Cmd::OracleBuild(a) => oracle_build(a),
         Cmd::OracleCheck(a) => oracle_check(a),
         Cmd::Recall(a) => recall_cmd(a),
+        Cmd::ClassicalMethods(a) => classical_methods_cmd(a),
     }
 }
 
@@ -1025,6 +1056,159 @@ fn recall_cmd(a: RecallArgs) -> Result<()> {
         ),
         None => println!("  rms regret: no comparable blocks (all guarded/zero rms)"),
     }
+    Ok(())
+}
+
+/// `marsbench classical-methods` (Step 9). For every `(image, config)` pair the oracle
+/// suite names, runs `Exhaustive` plus the six classical `mars_search` methods, each
+/// producing its own quadtree encode (`mars_search::encode_image`, same partition rule
+/// `mars-codec`'s exhaustive encoder uses) and per-leaf `Pick` list. Reports evals,
+/// transforms, evals/transform (§M5), and -- scored against the matching oracle cache
+/// file, when one exists at `--out-dir` -- top-1/5/32 recall and RMS regret (§M6): the
+/// recall/regret table the Step 9 brief calls "the first genuinely novel output" of the
+/// whole project.
+fn classical_methods_cmd(a: ClassicalMethodsArgs) -> Result<()> {
+    let root = Path::new(".");
+    let suite = OracleSuite::read(&a.config).context("reading oracle config")?;
+    let (entries, configs) = oracle_scope(root, &suite, &a.corpus, &a.images, &a.configs)?;
+
+    let mut out_rows: Vec<serde_json::Value> = Vec::new();
+
+    println!(
+        "{:<10} {:<14} {:<14} {:>10} {:>10} {:>10} {:>7} {:>7} {:>7} {:>10}",
+        "image",
+        "config",
+        "method",
+        "evals",
+        "xforms",
+        "evals/x",
+        "top1%",
+        "top5%",
+        "top32%",
+        "regret_dB"
+    );
+
+    for entry in &entries {
+        let image = read_checked_image(root, entry)?;
+        let contracted = mars_codec::encode::build_contracted(&image);
+        for cfg in &configs {
+            let cache_path = cache_path(&a.out_dir, &entry.name, &cfg.label);
+            let cache = oracle::load_and_validate(&cache_path, &entry.sha256, &cfg.config).ok();
+            if cache.is_none() {
+                eprintln!(
+                    "  note: no valid oracle cache at {} -- recall/regret will be skipped for {} [{}]",
+                    cache_path.display(),
+                    entry.name,
+                    cfg.label
+                );
+            }
+
+            let params = mars_codec::encode::EncodeParams {
+                min_size: cfg.config.min_size,
+                max_size: cfg.config.max_size,
+                shift: cfg.config.shift,
+                bits_alfa: cfg.config.bits_alfa,
+                bits_beta: cfg.config.bits_beta,
+                max_alfa: cfg.config.max_alfa,
+                t_rms: a.t_rms,
+                zero_threshold: 0,
+            };
+
+            for method in mars_search::MethodName::ALL {
+                let retrievers = mars_search::SizedRetrievers::build(
+                    &contracted,
+                    image.width() as u32,
+                    image.height() as u32,
+                    params.shift,
+                    params.min_size,
+                    params.max_size,
+                    || method.new_retriever(),
+                );
+                let (_, leaves, evals, picks) =
+                    mars_search::encode_image(&image, &params, &retrievers);
+                let transforms = leaves.len() as u64;
+                let evals_per_transform = evals as f64 / transforms as f64;
+
+                let method_picks: Vec<recall::MethodPick> = picks
+                    .iter()
+                    .map(|p| recall::MethodPick {
+                        row: p.row,
+                        col: p.col,
+                        size: p.size,
+                        dom_row: p.dom_row,
+                        dom_col: p.dom_col,
+                        isometry: p.isometry,
+                        qalfa: p.qalfa,
+                        qbeta: p.qbeta,
+                        rms: p.rms,
+                    })
+                    .collect();
+
+                let (top1, top5, top32, regret) = match &cache {
+                    Some(c) => {
+                        let report = recall::score(c, &method_picks);
+                        let regret = report.regret_stats().map(|s| s.mean_db);
+                        (
+                            Some(report.top1_rate() * 100.0),
+                            Some(report.top5_rate() * 100.0),
+                            Some(report.top32_rate() * 100.0),
+                            regret,
+                        )
+                    }
+                    None => (None, None, None, None),
+                };
+
+                println!(
+                    "{:<10} {:<14} {:<14} {:>10} {:>10} {:>10.2} {:>7} {:>7} {:>7} {:>10}",
+                    entry.name,
+                    cfg.label,
+                    method.key(),
+                    evals,
+                    transforms,
+                    evals_per_transform,
+                    top1.map(|v| format!("{v:.2}"))
+                        .unwrap_or_else(|| "-".into()),
+                    top5.map(|v| format!("{v:.2}"))
+                        .unwrap_or_else(|| "-".into()),
+                    top32
+                        .map(|v| format!("{v:.2}"))
+                        .unwrap_or_else(|| "-".into()),
+                    regret
+                        .map(|v| format!("{v:.4}"))
+                        .unwrap_or_else(|| "-".into()),
+                );
+
+                if a.out.is_some() {
+                    out_rows.push(serde_json::json!({
+                        "image": entry.name,
+                        "config": cfg.label,
+                        "method": method.key(),
+                        "t_rms": a.t_rms,
+                        "evals": evals,
+                        "transforms": transforms,
+                        "evals_per_transform": evals_per_transform,
+                        "top1_pct": top1,
+                        "top5_pct": top5,
+                        "top32_pct": top32,
+                        "mean_regret_db": regret,
+                    }));
+                }
+            }
+        }
+    }
+
+    if let Some(out) = &a.out {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(out)
+            .with_context(|| format!("opening {}", out.display()))?;
+        for row in &out_rows {
+            writeln!(f, "{row}").with_context(|| format!("writing {}", out.display()))?;
+        }
+    }
+
     Ok(())
 }
 

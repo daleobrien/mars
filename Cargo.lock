@@ -498,6 +498,7 @@ dependencies = [
  "mars-codec",
  "mars-core",
  "mars-gpu",
+ "mars-search",
  "rayon",
  "serde",
  "serde_json",
@@ -516,6 +517,7 @@ dependencies = [
  "mars-codec",
  "mars-core",
  "mars-gpu",
+ "mars-search",
  "rayon",
  "serde_json",
 ]
@@ -547,6 +549,14 @@ dependencies = [
  "pollster",
  "thiserror",
  "wgpu",
+]
+
+[[package]]
+name = "mars-search"
+version = "0.1.0"
+dependencies = [
+ "mars-codec",
+ "mars-core",
 ]
 
 [[package]]

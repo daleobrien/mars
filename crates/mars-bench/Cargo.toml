@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 mars-codec = { workspace = true }
 mars-core = { workspace = true }
+mars-search = { workspace = true }
 mars-gpu = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }

@@ -201,8 +201,21 @@ impl Contracted {
         Self { data, stride }
     }
 
-    fn at(&self, row: usize, col: usize) -> i32 {
+    /// The 2:1 box-sum `D(row, col)` at one contracted-image position. `pub` (Step 9):
+    /// `mars-search`'s candidate-restriction methods need direct access to the same
+    /// contracted plane the exhaustive search uses, rather than recomputing it.
+    pub fn at(&self, row: usize, col: usize) -> i32 {
         self.data[row * self.stride + col]
+    }
+
+    /// Contracted-plane dimensions (`image width/height / 2`), for callers that need to
+    /// bound-check domain positions without re-deriving them from the original `Plane`.
+    pub fn width(&self) -> usize {
+        self.stride
+    }
+
+    pub fn height(&self) -> usize {
+        self.data.len().checked_div(self.stride).unwrap_or(0)
     }
 }
 
@@ -312,7 +325,11 @@ fn search(
 
 /// `(ΣD, ΣD²)` over one domain position's `size x size` samples — independent of isometry,
 /// since summing is invariant under any permutation of the terms.
-fn domain_sums(contracted: &Contracted, dr: usize, dc: usize, size: usize) -> (i64, i64) {
+///
+/// `pub` (Step 9): every `mars-search` candidate-restriction method needs exactly this
+/// quantity for whatever domain positions its own indexing restricts the search to; it is
+/// not specific to the exhaustive walk in this module.
+pub fn domain_sums(contracted: &Contracted, dr: usize, dc: usize, size: usize) -> (i64, i64) {
     let (mut s1, mut s2) = (0i64, 0i64);
     for u in 0..size {
         for v in 0..size {
@@ -327,7 +344,9 @@ fn domain_sums(contracted: &Contracted, dr: usize, dc: usize, size: usize) -> (i
 /// `Σ r·D` for one domain position under isometry `k` — the one quantity that genuinely
 /// depends on the isometry, since it pairs each domain sample with the range pixel it
 /// would land on.
-fn cross_term(
+///
+/// `pub` (Step 9): shared with `mars-search`, same reasoning as [`domain_sums`].
+pub fn cross_term(
     contracted: &Contracted,
     dr: usize,
     dc: usize,

@@ -1,0 +1,16 @@
+[package]
+name = "mars-search"
+description = "Mars 1's six classical fractal-search speed-up methods, behind one CandidateRetriever trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+mars-core = { workspace = true }
+mars-codec = { workspace = true }
+
+[lints]
+workspace = true

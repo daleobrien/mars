@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/mars-core",
     "crates/mars-codec",
+    "crates/mars-search",
     "crates/mars-gpu",
     "crates/mars-bench",
     "crates/mars-cli",
@@ -21,6 +22,7 @@ authors = ["The Mars 2 authors"]
 # them as wildcards; a wildcard dependency is denied outright.
 mars-core = { path = "crates/mars-core", version = "0.1.0" }
 mars-codec = { path = "crates/mars-codec", version = "0.1.0" }
+mars-search = { path = "crates/mars-search", version = "0.1.0" }
 mars-gpu = { path = "crates/mars-gpu", version = "0.1.0" }
 mars-bench = { path = "crates/mars-bench", version = "0.1.0" }
 

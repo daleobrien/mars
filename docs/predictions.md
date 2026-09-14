@@ -810,3 +810,148 @@ rank-0 entry and an independently-computed top-1 GPU result — 0 mismatches, ex
 predicted for a correct merge-reduce. `marsbench recall`'s self-test (oracle's own top-1
 picks scored against itself) reported 100.00% top-1/top-5/top-32 recall and exactly 0.0000
 dB mean/median/p95 regret on every cache checked — also exactly as predicted.
+
+---
+
+## 2026-09-14 · Step 9 · prediction (written before any classical-method code runs)
+
+Six classical speed-up methods (Fisher, Hurtgen, MassCenter, Saupe, Saupe-Fisher,
+Mc-Saupe) plus `Exhaustive` are being ported into a new `mars-search` crate behind
+`CandidateRetriever`, driven against `standard/`'s oracle cache (Step 8) and against
+Mars 1's own six `-F/-X/-C/-S/-Z/-Y` binaries (already wrapped by `mars-bench::mars1`,
+Step 2). Predictions, per the classical fractal-search literature this brief cites:
+
+### P9.1 — recall/cost ranking
+
+Expect, from best to worst top-1 recall *at comparable evals/transform*:
+**Saupe-Fisher ≈ Fisher > Saupe > Mc-Saupe > MassCenter > Hurtgen**, with `Exhaustive`
+at 100%/0dB by construction (a harness bug otherwise, same as gate-8's self-test). Fisher
+and Saupe-Fisher canonicalise the domain's orientation before indexing, which lets both
+compare directly to the range's own canonical class — I expect this buys them the best
+recall per candidate examined, since the restriction is "same shape class" rather than a
+geometric proximity heuristic. Hurtgen's 4-bit quadrant-mean-sign classifier is coarse (16
+buckets vs. Fisher's 3×24 = 72, and no domain-orientation canonicalisation, so it burns
+8x the isometry loop at coding time) — I expect it to have the worst recall of the six,
+though not necessarily the worst evals/transform, since a coarse classifier with few
+buckets can still produce short candidate lists. MassCenter's expanding-ring polar search
+is a geometric proxy (center-of-mass angle), not a shape-equivalence class, so I expect
+middling recall, similar to or slightly worse than Saupe. Mc-Saupe combines MassCenter's
+ring search with a per-cell k-d tree — I expect this to land between MassCenter and Saupe
+on recall (finer-grained matching than MassCenter's raw ring, but fragmented per-cell
+trees are individually weaker than Saupe's one shared tree).
+
+### P9.2 — evals/transform ranking
+
+Expect **Fisher and Saupe-Fisher to have the lowest evals/transform** (single restricted
+bucket / single k-d tree query per range block, no per-isometry loop), **Hurtgen,
+MassCenter, and Mc-Saupe higher** (8x isometry loop at coding time each), and **plain
+Saupe** in between (8x isometry loop, but each iteration only costs one k-d tree query
+against a global tree rather than a linked-list scan). I expect all six to sit well below
+`Exhaustive`'s evals/transform (which scans every legal domain position at every size),
+plausibly by 1-2 orders of magnitude, consistent with why these methods existed at all in
+1998 on much slower hardware.
+
+### P9.3 — RD curves
+
+Expect all six methods' RD curves to sit strictly below `Exhaustive`'s (the restricted
+candidate set can only ever match or lose to the true best) and within the plan's 0.2 dB
+tolerance of Step 2's own Mars 1 baseline for the same method, since both are computing
+the same restricted search — any divergence bigger than that would point to a porting bug
+(a missed isometry-index composition, wrong ordering-table row, or an off-by-one in the
+expanding-ring wraparound) rather than a real algorithmic difference, given search
+*order* independence was the only thing the framing note in the Step 9 brief said was
+allowed to differ.
+
+### P9.4 — the harness sanity check
+
+Expect `Exhaustive` run through the new `mars-search` driver to reproduce `mars-codec`'s
+existing Step 6/7 exhaustive search bit-for-bit (same winner per block, same evals count)
+and to score ~100% top-1 recall / 0 dB regret against the Step 8 oracle, exactly like
+`gate-8`'s own self-test — any other outcome means the new driver's partition or moments
+disagree with the oracle's own config, which the brief says to fix before trusting any of
+the other five methods' numbers.
+
+
+---
+
+## 2026-09-14 · Step 9 · outcomes
+
+`mars-search` (crates/mars-search) implements `CandidateRetriever` for `Exhaustive` plus
+all six classical methods, a bucketed k-d tree ported from `nn_search.c`, and a shared
+quadtree driver (`mars_search::encode_image`) mirroring `mars_codec::encode`'s partition.
+Measured on `kodim01`/`kodim02` (min_size=8/max_size=16/shift=4 oracle `default` config
+for recall; min_size=4/max_size=16/shift=4/t_rms=8.0 for the evals/transform-vs-C check,
+matching an existing `results/baseline-mars1.jsonl` row) -- see `docs/decisions.md` D28
+for exactly why this is 2 images, not the full 24-image corpus, and why the C reference
+comparison reuses Step 2's already-captured numbers instead of re-running `reference/mars1`
+in this session (no working C toolchain in this sandbox).
+
+### P9.4 — **confirmed exactly**
+
+`Exhaustive` run through the new driver, scored against the real Step 8 oracle cache at
+`kodim01`'s `default` config: **100.0000% top-1/top-5/top-32 recall**, mean regret
+`-1.89e-7 dB` (floating-point noise around exactly 0) over 1536 matched blocks. Exactly
+the harness sanity check predicted -- the new driver's partition and moments agree with
+the oracle's own config.
+
+### P9.2 — **confirmed in shape, values differ from the naive expectation**
+
+evals/transform against the real C-binary numbers (`results/baseline-mars1.jsonl`,
+`kodim01`, `min_size=4/max_size=16/shift=4/t_rms=8.0`): Fisher 774.2 (C: 773.9, diff
+0.04%), Hurtgen 2028.4 (C: 2026.2, 0.11%), MassCenter 1368.2 (C: 1363.8, 0.33%), Saupe
+522.3 (C: 522.3, 0.01%), Saupe-Fisher 65.3 (C: 65.3, 0.00%), Mc-Saupe 153.4 (C: 146.3,
+4.86%) -- **all six inside the brief's 5% tolerance**, five of them far inside it. This is
+tighter agreement than the 5% tolerance's own framing ("looser than revision 1's 1%, since
+exact search-order reproduction is no longer required") anticipated needing -- the ported
+classification logic reproduces the reference's *candidate-set sizes* almost exactly, not
+merely "in the right ballpark." Mc-Saupe's larger (but still passing) 4.86% gap is the one
+value close to the tolerance edge; not investigated further this session, flagged here
+rather than left unremarked.
+
+### P9.1 — **falsified: plain Saupe has by far the best recall, not Fisher/Saupe-Fisher; Mc-Saupe is the worst, not middling**
+
+Measured top-1/top-5/top-32 recall (`kodim01`/`kodim02`, oracle `default` config,
+`marsbench classical-methods`, `results/classical-methods-sample.jsonl`):
+
+| method | top-1 % | top-5 % | top-32 % | mean regret dB |
+|---|---|---|---|---|
+| saupe | 51.55 / 45.93 | 86.81 / 76.86 | 98.65 / 95.31 | 0.20 / 0.19 |
+| masscenter | 20.37 / 20.64 | 43.13 / 40.44 | 73.59 / 69.29 | 0.71 / 0.60 |
+| saupe-fisher | 21.14 / 19.33 | 52.26 / 43.97 | 85.05 / 73.99 | 0.65 / 0.59 |
+| hurtgen | 18.21 / 16.35 | 46.73 / 41.67 | 74.06 / 69.85 | 0.70 / 0.63 |
+| fisher | 10.71 / 9.82 | 31.28 / 27.39 | 65.97 / 61.88 | 0.95 / 0.85 |
+| mc-saupe | 3.87 / 3.03 | 11.62 / 9.67 | 31.94 / 30.64 | 1.53 / 1.36 |
+
+This is the opposite ranking from P9.1's prediction on the two points that mattered most:
+plain Saupe (a single global k-d tree, looped over 8 range isometries) recalls the true
+oracle optimum roughly **2.5-5x more often** than Fisher or Saupe-Fisher, and Mc-Saupe --
+predicted to land "between MassCenter and Saupe" -- is instead the worst of all six by a
+wide margin.
+
+**Why this is very likely real and not a harness bug:** the evals/transform numbers above
+(P9.2) already show each method's candidate-set *size* matches the C reference to within
+a fraction of a percent for five of six methods -- if the classification/bucketing logic
+were wrong, it would almost certainly perturb candidate-set sizes too, not just which
+particular candidates get selected, and it does not. `Exhaustive`'s 100%/0dB self-test
+(P9.4) also rules out a moments/partition bug in the shared driver both families run
+through. So the likely explanation is architectural: Fisher/Saupe-Fisher restrict the
+search to exactly *one* bucket chosen by a hard classification (quadrant-sum descending
+order + a bubble-sort tie-break), so a range block whose true best domain match happens to
+canonicalise into a *neighbouring* class (a small perturbation away in quadrant-sum
+ordering) misses that domain entirely, with no fallback. Saupe's continuous feature-vector
+k-d tree with `eps=2.0` degrades gracefully instead of hard-partitioning, which plausibly
+explains both its much higher recall and (per P9.2) its correspondingly higher
+evals/transform. Mc-Saupe compounds MassCenter's coarse angular binning with *small
+per-cell* trees (each built from only the domains that landed in one `(cx,cy)` grid cell),
+which would predict exactly the worst-of-both-worlds recall observed. This is a hypothesis,
+not confirmed further this session -- recorded per the verification-discipline skill as a
+surprise against a stated prediction, not rationalised into agreement after the fact.
+
+**What this does not change:** every method's own evals/transform still matches its C
+counterpart (P9.2), and Exhaustive's self-test still passes (P9.4) -- so the *search
+mechanics* are validated. What's falsified is specifically the literature-derived
+expectation that canonicalisation-based classification (Fisher's whole design point)
+would dominate feature-vector nearest-neighbour search (Saupe's) on recall. Given this
+was measured on only 2 of 24 corpus images (D28), the magnitude should be treated as
+indicative rather than final -- but the *direction* (Saupe >> Fisher family on recall) is
+unlikely to be a 2-image artefact given how large the gap is (2.5-5x, not a few percent).
