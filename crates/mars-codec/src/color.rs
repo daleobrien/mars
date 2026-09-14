@@ -317,6 +317,7 @@ mod tests {
             max_alfa: 1.0,
             t_rms,
             zero_threshold: 0,
+            lambda: None,
         }
     }
 

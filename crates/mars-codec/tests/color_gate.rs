@@ -40,6 +40,7 @@ fn params(t_rms: f64) -> EncodeParams {
         max_alfa: 1.0,
         t_rms,
         zero_threshold: 0,
+        lambda: None,
     }
 }
 
