@@ -1106,3 +1106,59 @@ after a tolerance was widened -> stop and audit") — this is the first such wid
 project to date (D20's floor-not-band redesign was a measurement-precondition fix, not a
 tolerance widening), so no audit is triggered by that rule yet, but it is the one to watch
 if a future step's gate is also loosened.
+
+---
+
+## D26 · 2026-09-14 · Step 8's three oracle configs use `min_size=8`, not the project's
+usual `min_size=4` default — measured necessary in scope, unnecessary in magnitude
+
+**Context.** §M6's config tuple is `(image, min_size, max_size, SHIFT, bits_alfa,
+bits_beta, max_alfa)`, and building "the oracle" for a config means an exhaustive top-32
+sweep at every power-of-two block size in `[min_size, max_size]`, not one. `docs/
+predictions.md` P8.1 predicted that the smallest configured size dominates total cost by
+roughly an order of magnitude (the domain-position count shrinks only mildly as the
+`2*size` domain window grows), and that `min_size=4` — the value every other gate in this
+project uses (Step 6's `BASE`, Step 7's differential test) — would make a full
+24-image x 3-config build impractical in one session.
+
+**Decision.** `configs/oracle.json`'s three variants (`default`, `max32`, `coarse-shift`)
+all use `min_size=8` instead of `4`, varying `max_size` and `shift` across the other two
+axes M6 names. This was decided *before* measuring the actual build cost (per the plan-step
+skill's ordering: write the config, then measure), on the strength of P8.1's back-of-
+envelope reasoning alone.
+
+**Finding.** The reasoning behind the decision was directionally sound but overstated the
+actual cost by roughly two orders of magnitude in absolute terms. The realised
+`min_size=8` build (69 `(image, config)` pairs, every size per config) took **197.5
+seconds** total, not the "hours" the brief's own M6 text estimates for a single config on
+a 512-ish-pixel image, nor even the "low single-digit hours" this project's own Step 7
+prediction (P7.3) projected for a full-corpus oracle build. `oracle-check`'s independent
+re-verification of all 562,176 resulting blocks took a further ~156s. See
+`docs/predictions.md`'s Step 8 outcomes section for the full numbers.
+
+**What this means.** The `min_size=8` choice remains the right one to have shipped (it did
+not cost anything, and picking it before measuring was a reasonable way to avoid gambling a
+session on an unmeasured `min_size=4` run) — but the premise that motivated it (D24's
+11-23x GPU speedup would leave the *smallest* configured size as the one thing still too
+slow to afford) turned out not to bind in practice: on this hardware, at this corpus size,
+even `min_size=4`'s order-of-magnitude-larger cost is plausibly still a matter of minutes,
+not hours. This was not tested here — `configs/oracle.json` still ships `min_size=8` and no
+`min_size=4` oracle exists — so it is recorded as an open question for whoever next touches
+this suite, not silently assumed either way.
+
+**What this rules out.** Treating "the oracle only covers `min_size=8` and up" as a
+permanent, load-bearing limitation of this project's methodology — Step 9's recall
+comparisons (which need oracle coverage at whatever sizes the classical methods' own
+partitions produce, likely including `min_size=4`) should not assume that gap is expensive
+to close.
+
+**What would reverse it.** Actually measuring a `min_size=4` oracle build on this corpus;
+if it also finishes in low-single-digit minutes, `configs/oracle.json` should grow a
+fourth variant (or the existing three should be revised) at `min_size=4` before Step 9
+needs recall numbers at that size, rather than carrying this gap forward on an
+unverified, now-known-to-be-overcautious assumption.
+
+**Tolerance impact.** None. No exit criterion changed; `gate-8` still requires 100% of
+`oracle-check`'s comparisons to agree (measured: 562,176/562,176) and no threshold was
+adjusted to make the build tractable — the build was never actually intractable at the
+scope shipped.

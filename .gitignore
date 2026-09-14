@@ -8,3 +8,9 @@
 
 # The pinned cross-validation reference venv. Recreate with `just crossval-setup`.
 /.venv-crossval/
+
+# Step 8's oracle cache (`marsbench oracle-build`, configs/oracle.json): a large,
+# regenerable derived artifact keyed by a manifest hash (crates/mars-bench/src/oracle.rs)
+# of the source image + config, same reasoning as /corpus/images/ above -- not something
+# to commit, and never silently reused if stale (the hash check refuses that).
+/oracle-cache/

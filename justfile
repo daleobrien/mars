@@ -183,6 +183,22 @@ gate-7:
     ./target/release/marsbench gpu-search-check
     @echo "gate-7: PASS"
 
+# Step 8 — the oracle cache + recall harness (§M6). Builds the top-32 exhaustive-search
+# cache for `standard/` (Kodak) at the three `configs/oracle.json` variants (min_size=8 in
+# all three -- docs/decisions.md D26), skipping any (image, config) pair whose cache
+# already validates against the current image+config so a rerun after a partial build
+# doesn't redo finished work. Then runs the exhaustive self-test (`oracle-check`): every
+# cached block's rank-0 candidate must equal an *independently* GPU-computed top-1 winner
+# (a different kernel/workgroup topology, not just "trust rank 0") -- exit criterion is
+# 100% agreement, "anything else is a harness bug" (a merge-reduce dropping the true
+# minimum), never a tolerance. Needs a real GPU adapter, run in the foreground.
+gate-8:
+    cargo build --release -p mars-cli
+    cargo test -p mars-gpu -p mars-bench --release
+    ./target/release/marsbench oracle-build
+    ./target/release/marsbench oracle-check
+    @echo "gate-8: PASS"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval

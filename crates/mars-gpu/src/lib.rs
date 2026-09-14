@@ -87,6 +87,15 @@ pub struct GpuSearcher {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
+    /// Step 8's top-32 entry point (`main_top32` in `search.wgsl`), a separate pipeline
+    /// from the top-1 `pipeline` above rather than `search()` delegating to
+    /// `search_top32()` and taking entry 0 -- the top-32 kernel's workgroup size (32, vs.
+    /// `pipeline`'s 256) and per-thread bookkeeping is real extra work (see
+    /// `docs/predictions.md` P8.2), and `search()` backs `gate-7`'s own speed floor
+    /// (D25's >= 8x). Keeping the two kernels independent means Step 8's additions
+    /// cannot regress a gate that already passed. See `search.wgsl`'s module doc for the
+    /// kernel design.
+    pipeline_top32: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
@@ -213,11 +222,20 @@ impl GpuSearcher {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
+        let pipeline_top32 = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mars-gpu search-top32 pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main_top32"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
 
         Ok(Self {
             device,
             queue,
             pipeline,
+            pipeline_top32,
             bind_group_layout,
         })
     }
@@ -260,6 +278,83 @@ impl GpuSearcher {
     /// If `size` is 0 or exceeds 32 (this project's `max_size` in every config; the
     /// shader's workgroup-shared `range_block` array is sized for exactly that bound).
     pub fn search(&self, image: &Plane, params: &GpuSearchParams) -> Vec<Option<GpuCandidate>> {
+        let raw = self.dispatch(image, params, &self.pipeline, 1);
+        raw.into_iter()
+            .map(|slot| {
+                slot.into_iter().next().and_then(|c| {
+                    if c.valid == 0 {
+                        None
+                    } else {
+                        Some(GpuCandidate {
+                            dom_row: c.dom_row,
+                            dom_col: c.dom_col,
+                            isometry: c.isometry as u8,
+                            qalfa: c.qalfa,
+                            qbeta: c.qbeta,
+                            rms: f32::from_bits(c.rms_bits),
+                        })
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Step 8's oracle primitive: the same exhaustive sweep as [`Self::search`], but
+    /// every range block keeps its top-32 candidates by `rms` (ascending), not just the
+    /// winner — computed in one GPU pass via `search.wgsl`'s `main_top32` entry point
+    /// (see that module's doc for the in-kernel per-thread-bounded-list +
+    /// merge-reduce design). `None` means the block has no legal domain position at all
+    /// (same underflow case as `search`'s `None`); a `Some` block's `Vec` is ascending by
+    /// `rms` and has length `min(32, total candidate count)` — shorter than 32 only when
+    /// the domain-position pool itself has fewer than 32 `(domain, isometry)` pairs,
+    /// which does not happen for this project's configs (`min_size >= 4`, `shift <= 8` on
+    /// images >= 64x64 all give domain-position counts in the thousands).
+    ///
+    /// # Panics
+    /// Same as [`Self::search`]: `size` must be in `1..=32`.
+    pub fn search_top32(
+        &self,
+        image: &Plane,
+        params: &GpuSearchParams,
+    ) -> Vec<Option<Vec<GpuCandidate>>> {
+        let raw = self.dispatch(image, params, &self.pipeline_top32, 32);
+        raw.into_iter()
+            .map(|slots| {
+                let valid: Vec<GpuCandidate> = slots
+                    .into_iter()
+                    .filter(|c| c.valid != 0)
+                    .map(|c| GpuCandidate {
+                        dom_row: c.dom_row,
+                        dom_col: c.dom_col,
+                        isometry: c.isometry as u8,
+                        qalfa: c.qalfa,
+                        qbeta: c.qbeta,
+                        rms: f32::from_bits(c.rms_bits),
+                    })
+                    .collect();
+                if valid.is_empty() {
+                    None
+                } else {
+                    Some(valid)
+                }
+            })
+            .collect()
+    }
+
+    /// Shared buffer setup/dispatch/readback for [`Self::search`] and
+    /// [`Self::search_top32`] — identical apart from which pipeline runs and how many
+    /// `CandidateGpu` slots each range block occupies in the results buffer
+    /// (`slots_per_block`: 1 for the top-1 kernel, 32 for the top-32 kernel — both
+    /// kernels share the same output buffer *type*, just at different strides, per
+    /// `search.wgsl`'s module doc). Returns one `Vec<CandidateGpu>` of length
+    /// `slots_per_block` per grid block, in row-major grid order.
+    fn dispatch(
+        &self,
+        image: &Plane,
+        params: &GpuSearchParams,
+        pipeline: &wgpu::ComputePipeline,
+        slots_per_block: u32,
+    ) -> Vec<Vec<CandidateGpu>> {
         assert!(
             params.size > 0 && params.size <= 32,
             "size must be in 1..=32"
@@ -329,7 +424,8 @@ impl GpuSearcher {
                 contents: bytemuck::cast_slice(&contracted),
                 usage: wgpu::BufferUsages::STORAGE,
             });
-        let results_size = (num_blocks * std::mem::size_of::<CandidateGpu>()) as u64;
+        let results_size =
+            (num_blocks * slots_per_block as usize * std::mem::size_of::<CandidateGpu>()) as u64;
         let results_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mars-gpu results"),
             size: results_size,
@@ -380,7 +476,7 @@ impl GpuSearcher {
                 label: Some("mars-gpu search pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(num_blocks_x, num_blocks_y, 1);
         }
@@ -418,22 +514,9 @@ impl GpuSearcher {
             eprintln!("  [gpu timing] TOTAL search(): {:?}", t_start.elapsed());
         }
         let raw: &[CandidateGpu] = bytemuck::cast_slice(&data);
-        let out = raw
-            .iter()
-            .map(|c| {
-                if c.valid == 0 {
-                    None
-                } else {
-                    Some(GpuCandidate {
-                        dom_row: c.dom_row,
-                        dom_col: c.dom_col,
-                        isometry: c.isometry as u8,
-                        qalfa: c.qalfa,
-                        qbeta: c.qbeta,
-                        rms: f32::from_bits(c.rms_bits),
-                    })
-                }
-            })
+        let out: Vec<Vec<CandidateGpu>> = raw
+            .chunks_exact(slots_per_block as usize)
+            .map(<[CandidateGpu]>::to_vec)
             .collect();
         drop(data);
         readback_buf.unmap();
@@ -503,5 +586,99 @@ mod tests {
         };
         let results = gpu.search(&image, &params);
         assert_eq!(results, vec![None]);
+    }
+
+    /// Step 8's own correctness bar (P8.3 / gate-8's self-test, exercised here at unit
+    /// scale rather than across a whole oracle build): the top-32 kernel's rank-0 entry
+    /// must exactly equal the top-1 kernel's independently-computed winner for every
+    /// block, for both the flat (degenerate, `det==0`) and a non-degenerate synthetic
+    /// image. A mismatch here would mean the merge-reduce tree can lose the true minimum
+    /// -- see `search.wgsl`'s module doc.
+    #[test]
+    fn top32_rank0_matches_top1_on_flat_image() {
+        let Some(gpu) = searcher_or_skip() else {
+            return;
+        };
+        let image = Plane::filled(64, 64, 128);
+        let params = GpuSearchParams {
+            size: 8,
+            shift: 4,
+            bits_alfa: 4,
+            bits_beta: 7,
+            max_alfa: 1.0,
+        };
+        let top1 = gpu.search(&image, &params);
+        let top32 = gpu.search_top32(&image, &params);
+        assert_eq!(top1.len(), top32.len());
+        for (t1, t32) in top1.iter().zip(top32.iter()) {
+            match (t1, t32) {
+                (None, None) => {}
+                (Some(a), Some(list)) => {
+                    let best = list.first().expect("Some(list) is never empty");
+                    assert_eq!(*a, *best, "top-32 rank-0 must equal the top-1 winner");
+                    // Ascending by rms, and self-consistent length bound.
+                    assert!(list.len() <= 32);
+                    for w in list.windows(2) {
+                        assert!(w[0].rms <= w[1].rms, "top-32 list must be rms-ascending");
+                    }
+                }
+                _ => panic!("top-1 and top-32 disagree on whether this block has candidates"),
+            }
+        }
+    }
+
+    #[test]
+    fn top32_rank0_matches_top1_on_synthetic_image() {
+        let Some(gpu) = searcher_or_skip() else {
+            return;
+        };
+        // Same small xorshift PRNG pattern `mars-bench`'s gpu_search differential test
+        // uses, so this is a non-degenerate image (a flat/constant image can hide a
+        // broken fit behind `alfa == 0` short-circuits).
+        struct Rng(u64);
+        impl Rng {
+            fn next_u64(&mut self) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0
+            }
+            fn byte(&mut self) -> u8 {
+                (self.next_u64() & 0xff) as u8
+            }
+        }
+        let (w, h) = (64usize, 64usize);
+        let mut rng = Rng(0xC0FFEE);
+        let data: Vec<u8> = (0..w * h).map(|_| rng.byte()).collect();
+        let image = Plane::from_vec(w, h, data);
+
+        for &size in &[4u32, 8, 16] {
+            let params = GpuSearchParams {
+                size,
+                shift: 4,
+                bits_alfa: 4,
+                bits_beta: 7,
+                max_alfa: 1.0,
+            };
+            let top1 = gpu.search(&image, &params);
+            let top32 = gpu.search_top32(&image, &params);
+            assert_eq!(top1.len(), top32.len());
+            for (t1, t32) in top1.iter().zip(top32.iter()) {
+                match (t1, t32) {
+                    (None, None) => {}
+                    (Some(a), Some(list)) => {
+                        let best = list.first().unwrap();
+                        assert_eq!(
+                            *a, *best,
+                            "size={size}: top-32 rank-0 must equal the top-1 winner"
+                        );
+                        for w in list.windows(2) {
+                            assert!(w[0].rms <= w[1].rms, "size={size}: not rms-ascending");
+                        }
+                    }
+                    _ => panic!("size={size}: top-1/top-32 disagree on candidate presence"),
+                }
+            }
+        }
     }
 }

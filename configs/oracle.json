@@ -1,0 +1,39 @@
+{
+  "name": "oracle",
+  "description": "Step 8's three oracle configurations (implementation-plan.md M6 + Step 8 brief). min_size is raised to 8 in every config, not the 1998 default of 4 -- docs/predictions.md P8.1 predicted (and docs/decisions.md D26 records, once measured) that size=4 dominates build cost by roughly an order of magnitude over size=16, making a full 24-image x 3-config build at min_size=4 impractical in one session. 'default' matches this project's other gates' BASE params with that one change; 'max32' exercises the larger max_size (and P7.1's u32-headroom worst case); 'coarse-shift' exercises a sparser domain pool at SHIFT=8, the one M6 config axis no other gate varies.",
+
+  "indexes": ["corpus/standard.images.json"],
+
+  "configs": [
+    {
+      "label": "default",
+      "description": "min_size=8, max_size=16, shift=4, bits_alfa=4, bits_beta=7, max_alfa=1.0 -- this project's other gates' BASE params with min_size raised from 4 to 8 (P8.1/D26).",
+      "min_size": 8,
+      "max_size": 16,
+      "shift": 4,
+      "bits_alfa": 4,
+      "bits_beta": 7,
+      "max_alfa": 1.0
+    },
+    {
+      "label": "max32",
+      "description": "Same as 'default' but max_size=32 -- exercises the larger block size and P7.1's u32-accumulator worst case.",
+      "min_size": 8,
+      "max_size": 32,
+      "shift": 4,
+      "bits_alfa": 4,
+      "bits_beta": 7,
+      "max_alfa": 1.0
+    },
+    {
+      "label": "coarse-shift",
+      "description": "Same as 'default' but shift=8 -- a sparser domain pool; SHIFT is one of M6's named config axes and had not been exercised at a different value anywhere before Step 8.",
+      "min_size": 8,
+      "max_size": 16,
+      "shift": 8,
+      "bits_alfa": 4,
+      "bits_beta": 7,
+      "max_alfa": 1.0
+    }
+  ]
+}

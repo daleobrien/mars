@@ -297,3 +297,229 @@ fn main(
         results[block_index] = out;
     }
 }
+
+// ---------------------------------------------------------------------------------
+// Step 8: top-32 kernel (`main_top32`). Shares Params/Candidate/isometry_map/fit/quantise
+// with the top-1 kernel above; `main` (top-1, WG_SIZE=256) is left completely unchanged
+// so gate-7's bit-identical-modulo-D25 comparison and its speed floor are unaffected --
+// see mars-gpu/src/lib.rs's module doc for why these are two separate pipelines rather
+// than one delegating to the other.
+//
+// Design (implementation-plan.md Step 8 brief + docs/predictions.md P8.2/P8.3):
+//   1. Each of WG32_SIZE=32 threads keeps its own bounded top-32 list in *function-scope*
+//      (thread-private) memory -- `array<PackedCand, 32>`, ascending by (rms, key), via
+//      insertion against the current worst (index 31). Zero-initialisation gives every
+//      slot `valid=0` for free, so "array not yet full" and "array full" are the same
+//      code path: an invalid entry always compares worse than a real candidate.
+//   2. A workgroup-shared array of WG32_SIZE such lists is pairwise merge-reduced
+//      (mergesort's merge step, keeping the smallest 32 of each union) via
+//      `workgroupBarrier()`-separated halving rounds, down to one list at
+//      `shared_top32[0]`. Because the merge step always keeps the true 32 smallest of
+//      whatever it is given, no level of the tree can lose the true global minimum --
+//      that is gate-8's whole self-test.
+//   3. `PackedCand` (16 bytes: two packed coordinate/field words + rms bits + tie-break
+//      key) keeps the per-thread/per-workgroup memory footprint small enough for
+//      workgroup-shared storage at WG32_SIZE=32 (`32 * 32 * 16B = 16KiB`, comfortably
+//      under Apple GPUs' threadgroup memory budget) -- the *output* buffer still uses the
+//      full unpacked `Candidate` layout (see below), so this packing is purely an
+//      in-kernel space optimisation, invisible to the Rust side.
+//   4. WG32_SIZE=32 was chosen so the final unpack-and-write step parallelises one lane
+//      per output slot (`results[block_index*32 + lidx] = unpack(shared_top32[0][lidx])`)
+//      instead of a serial loop by thread 0. The output buffer for this entry point is
+//      the *same* `array<Candidate>` binding as the top-1 kernel, just allocated 32x
+//      larger by the caller and indexed `block_index * 32 + slot` instead of
+//      `block_index` -- no new binding, no new buffer type.
+
+const WG32_SIZE: u32 = 32u;
+
+struct PackedCand {
+    ab: u32,       // (dom_row << 16) | dom_col -- both < 2^16 for every image this
+                    // project's corpora use (Kodak is 768x512)
+    cd: u32,       // (isometry << 24) | (qalfa << 16) | (qbeta << 8) | valid
+    rms_bits: u32, // bitcast<u32>(rms); rms is always >= 0 (clamped before sqrt in
+                    // `fit`), so this compares in the same order as the float itself
+                    // (an IEEE-754 property for non-negative finite floats).
+    key: u32,      // dom_idx * 8 + isometry -- the CPU's canonical enumeration order,
+                    // used only to break an exact rms tie deterministically (§2.3: no
+                    // unordered-iteration-dependent output).
+};
+
+var<workgroup> shared_top32: array<array<PackedCand, 32>, WG32_SIZE>;
+var<workgroup> shared_t0_32: u32;
+var<workgroup> shared_t2_32: u32;
+var<workgroup> range_block_32: array<u32, MAX_SIZE2>;
+
+// Strict total order on (valid, rms, key): an invalid slot is worse than any valid one;
+// among two valid slots, smaller rms wins, ties broken by the smaller (earlier-enumerated)
+// key. Same relation as top-1's `better()`, restated over the packed representation.
+fn better_packed(a: PackedCand, b: PackedCand) -> bool {
+    let av = (a.cd & 1u) != 0u;
+    let bv = (b.cd & 1u) != 0u;
+    if (!av) {
+        return false;
+    }
+    if (!bv) {
+        return true;
+    }
+    if (a.rms_bits != b.rms_bits) {
+        return a.rms_bits < b.rms_bits;
+    }
+    return a.key < b.key;
+}
+
+// Bounded insertion into a 32-element ascending array: O(1) amortised once the array
+// fills, since only a candidate better than the current worst (index 31) does any work
+// beyond the one comparison (implementation-plan.md's Step 8 brief, point 1).
+fn insert_top32(cand: PackedCand, arr: ptr<function, array<PackedCand, 32>>) {
+    if (!better_packed(cand, (*arr)[31u])) {
+        return;
+    }
+    var i: i32 = 30;
+    loop {
+        if (i < 0) {
+            break;
+        }
+        if (better_packed(cand, (*arr)[u32(i)])) {
+            (*arr)[u32(i) + 1u] = (*arr)[u32(i)];
+            i = i - 1;
+        } else {
+            break;
+        }
+    }
+    (*arr)[u32(i + 1)] = cand;
+}
+
+// Mergesort's merge step: `a` and `b` are each ascending (by `better_packed`) 32-element
+// lists (invalid entries sort last), `out` receives the 32 smallest of their union --
+// exactly the property the workgroup-level tree reduction needs at every level (point 2
+// of the design note above: a reduction that always keeps the true 32 smallest can never
+// lose the true minimum partway through the tree, which is gate-8's whole point).
+fn merge_top32(a: array<PackedCand, 32>, b: array<PackedCand, 32>, out: ptr<function, array<PackedCand, 32>>) {
+    var i: u32 = 0u;
+    var j: u32 = 0u;
+    for (var k: u32 = 0u; k < 32u; k = k + 1u) {
+        let take_a = (i < 32u) && (j >= 32u || better_packed(a[i], b[j]));
+        if (take_a) {
+            (*out)[k] = a[i];
+            i = i + 1u;
+        } else {
+            (*out)[k] = b[j];
+            j = j + 1u;
+        }
+    }
+}
+
+@compute @workgroup_size(WG32_SIZE)
+fn main_top32(
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(local_invocation_index) lidx: u32,
+) {
+    let bx = wg_id.x;
+    let by = wg_id.y;
+    let size = params.size;
+    let row0 = by * size;
+    let col0 = bx * size;
+    let block_index = by * params.num_blocks_x + bx;
+
+    let size2 = size * size;
+    if (lidx == 0u) {
+        var t0: u32 = 0u;
+        var t2: u32 = 0u;
+        for (var i: u32 = 0u; i < size; i = i + 1u) {
+            let src = (row0 + i) * params.width + col0;
+            for (var j: u32 = 0u; j < size; j = j + 1u) {
+                let r = image_px[src + j];
+                range_block_32[i * size + j] = r;
+                t0 = t0 + r;
+                t2 = t2 + r * r;
+            }
+        }
+        shared_t0_32 = t0;
+        shared_t2_32 = t2;
+    }
+    workgroupBarrier();
+
+    let s0 = f32(size2);
+    let t0f = f32(shared_t0_32);
+    let t2f = f32(shared_t2_32);
+
+    var my_top: array<PackedCand, 32>;
+
+    let total_dom = params.num_dom_rows * params.num_dom_cols;
+    var dom_idx = lidx;
+    loop {
+        if (dom_idx >= total_dom) {
+            break;
+        }
+        let dom_row_idx = dom_idx / params.num_dom_cols;
+        let dom_col_idx = dom_idx % params.num_dom_cols;
+        let dom_row = dom_row_idx * params.shift;
+        let dom_col = dom_col_idx * params.shift;
+        let dr = dom_row / 2u;
+        let dc = dom_col / 2u;
+
+        var s1: u32 = 0u;
+        var s2: u32 = 0u;
+        for (var u: u32 = 0u; u < size; u = u + 1u) {
+            let base = (dr + u) * params.contracted_stride + dc;
+            for (var v: u32 = 0u; v < size; v = v + 1u) {
+                let d = contracted[base + v];
+                s1 = s1 + d;
+                s2 = s2 + d * d;
+            }
+        }
+        let s1f = f32(s1);
+        let s2f = f32(s2);
+
+        for (var k: u32 = 0u; k < 8u; k = k + 1u) {
+            var t1: u32 = 0u;
+            for (var u: u32 = 0u; u < size; u = u + 1u) {
+                let base = (dr + u) * params.contracted_stride + dc;
+                for (var v: u32 = 0u; v < size; v = v + 1u) {
+                    let d = contracted[base + v];
+                    let ij = isometry_map(k, u, v, size);
+                    t1 = t1 + range_block_32[ij.x * size + ij.y] * d;
+                }
+            }
+            let fitted = fit(s0, s1f, s2f, t0f, f32(t1), t2f);
+            let key = dom_idx * 8u + k;
+            var cand: PackedCand;
+            cand.ab = (dom_row << 16u) | (dom_col & 0xFFFFu);
+            cand.cd = (k << 24u) | (u32(fitted.x) << 16u) | (u32(fitted.y) << 8u) | 1u;
+            cand.rms_bits = bitcast<u32>(fitted.z);
+            cand.key = key;
+            insert_top32(cand, &my_top);
+        }
+        dom_idx = dom_idx + WG32_SIZE;
+    }
+
+    shared_top32[lidx] = my_top;
+    workgroupBarrier();
+
+    var stride = WG32_SIZE / 2u;
+    loop {
+        if (stride == 0u) {
+            break;
+        }
+        if (lidx < stride) {
+            var merged: array<PackedCand, 32>;
+            merge_top32(shared_top32[lidx], shared_top32[lidx + stride], &merged);
+            shared_top32[lidx] = merged;
+        }
+        workgroupBarrier();
+        stride = stride / 2u;
+    }
+
+    // shared_top32[0] now holds the block's true top-32, ascending. One lane per slot.
+    let slot = shared_top32[0][lidx];
+    var out: Candidate;
+    out.dom_row = slot.ab >> 16u;
+    out.dom_col = slot.ab & 0xFFFFu;
+    out.isometry = (slot.cd >> 24u) & 0xFFu;
+    out.qalfa = (slot.cd >> 16u) & 0xFFu;
+    out.qbeta = (slot.cd >> 8u) & 0xFFu;
+    out.valid = slot.cd & 1u;
+    out.rms_bits = slot.rms_bits;
+    out._pad = 0u;
+    results[block_index * 32u + lidx] = out;
+}

@@ -7,6 +7,7 @@
 //!   `report`   curves -> Markdown and HTML with RD plots.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -17,11 +18,15 @@ use mars_bench::mars1::Mars1Binaries;
 use mars_bench::mars1_fixtures::{self, FixtureConfig, FIXTURE_DIR};
 use mars_bench::mars1_report::{self, Mars1Report};
 use mars_bench::measure::{file_size, measure, MeasureRequest};
-use mars_bench::provenance::Provenance;
+use mars_bench::oracle::{self, CacheError, OracleCache, OracleSuite};
+use mars_bench::provenance::{sha256_hex, Provenance};
+use mars_bench::recall::{self, oracle_top1_as_picks};
 use mars_bench::report::Report;
 use mars_bench::store::{read_rows, ResultStore, Row};
-use mars_bench::sweep::{plan, run, ImageSet, Job, RunContext, SweepConfig};
+use mars_bench::sweep::{plan, run, ImageEntry, ImageSet, Job, RunContext, SweepConfig};
+use mars_core::io::read_raw;
 use mars_core::metrics::Downsample;
+use mars_gpu::GpuSearcher;
 
 #[derive(Parser)]
 #[command(
@@ -66,6 +71,15 @@ enum Cmd {
     /// Step 7's A/B-interleaved GPU-vs-Rayon-CPU speed comparison, reported only (not
     /// gated on its own -- `gpu-search-check` folds the speedup threshold into gate-7).
     GpuSearchBench(GpuSearchBenchArgs),
+    /// Step 8: build (or skip, if already valid) the oracle cache for every
+    /// (image, config) pair a suite names.
+    OracleBuild(OracleBuildArgs),
+    /// Step 8's exit criterion as a command that exits 0 or 1 (§A1, gate-8): every
+    /// cached block's rank-0 entry must equal an independently-computed top-1 winner.
+    OracleCheck(OracleCheckArgs),
+    /// Step 8: score a method's chosen candidates against an oracle cache file --
+    /// top-1/5/32 recall and RMS regret in dB.
+    Recall(RecallArgs),
 }
 
 #[derive(Args)]
@@ -171,6 +185,57 @@ struct GpuSearchBenchArgs {
     sizes: Vec<u32>,
     #[arg(long, default_value_t = 5)]
     runs: usize,
+}
+
+#[derive(Args)]
+struct OracleBuildArgs {
+    /// The suite of labelled configs to build. §2.3: every experiment is a config file.
+    #[arg(long, default_value = "configs/oracle.json")]
+    config: PathBuf,
+    /// Falls back to `config`'s own `indexes` list when not given.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+    #[arg(long, default_value = "oracle-cache")]
+    out_dir: PathBuf,
+    /// Build only these image names (comma-separated). Defaults to every image in the
+    /// corpus index(es) -- for a scoped or resumed build, not for the recorded result.
+    #[arg(long, value_delimiter = ',')]
+    images: Vec<String>,
+    /// Build only these config labels (comma-separated). Defaults to every config in
+    /// the suite.
+    #[arg(long, value_delimiter = ',')]
+    configs: Vec<String>,
+}
+
+#[derive(Args)]
+struct OracleCheckArgs {
+    #[arg(long, default_value = "configs/oracle.json")]
+    config: PathBuf,
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+    #[arg(long, default_value = "oracle-cache")]
+    out_dir: PathBuf,
+    #[arg(long, value_delimiter = ',')]
+    images: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    configs: Vec<String>,
+}
+
+#[derive(Args)]
+struct RecallArgs {
+    /// The oracle cache file to score against (one image x config, from
+    /// `marsbench oracle-build`'s `out_dir`).
+    #[arg(long)]
+    cache: PathBuf,
+    /// A JSONL file of `MethodPick` rows (see `mars_bench::recall`'s module doc). If
+    /// omitted, scores the oracle's own top-1 picks against itself -- a harness
+    /// self-test (should always report 100%/100%/100% recall, 0 dB regret) and a worked
+    /// example of the input format.
+    #[arg(long)]
+    picks: Option<PathBuf>,
+    /// Which size in the cache to self-test against, when `--picks` is omitted.
+    #[arg(long)]
+    size: Option<u32>,
 }
 
 #[derive(Args)]
@@ -346,6 +411,9 @@ fn main() -> Result<()> {
         Cmd::RustEncoderCheck(a) => rust_encoder_check(a),
         Cmd::GpuSearchCheck(a) => gpu_search_check(a),
         Cmd::GpuSearchBench(a) => gpu_search_bench(a),
+        Cmd::OracleBuild(a) => oracle_build(a),
+        Cmd::OracleCheck(a) => oracle_check(a),
+        Cmd::Recall(a) => recall_cmd(a),
     }
 }
 
@@ -668,6 +736,296 @@ fn gpu_search_bench(a: GpuSearchBenchArgs) -> Result<()> {
 #[allow(dead_code)]
 fn _doc_anchor(p: RdPoint) -> f64 {
     p.bpp
+}
+
+// ------------------------------------------------------------------ Oracle cache (Step 8)
+
+/// Reads and hash-verifies one image entry, matching `gpu_search::gate`'s own
+/// `read_checked` (kept as a separate copy here since that one is private to
+/// `mars_bench::gpu_search`, and this crate's own `mars_core::io::read_raw` +
+/// `sha256_hex` are already public building blocks, not worth threading a new `pub`
+/// through another module for).
+fn read_checked_image(root: &Path, entry: &ImageEntry) -> Result<mars_core::Plane> {
+    let bytes = std::fs::read(root.join(&entry.file))
+        .with_context(|| format!("reading {}", entry.file.display()))?;
+    let got = sha256_hex(&bytes);
+    if got != entry.sha256 {
+        bail!(
+            "{}: expected sha256 {}, found {got}",
+            entry.file.display(),
+            entry.sha256
+        );
+    }
+    Ok(read_raw(
+        &root.join(&entry.file),
+        entry.width as usize,
+        entry.height as usize,
+    )?)
+}
+
+/// Collects the `(ImageEntry, OracleConfigEntry)` pairs a build/check run should cover,
+/// applying `--images`/`--configs` filters if given. Shared by `oracle_build` and
+/// `oracle_check` so the two commands can never silently disagree about scope.
+fn oracle_scope(
+    root: &Path,
+    suite: &OracleSuite,
+    corpus_override: &Option<PathBuf>,
+    image_filter: &[String],
+    config_filter: &[String],
+) -> Result<(Vec<ImageEntry>, Vec<mars_bench::oracle::OracleConfigEntry>)> {
+    let indexes: Vec<PathBuf> = match corpus_override {
+        Some(p) => vec![p.clone()],
+        None => suite.indexes.clone(),
+    };
+    let mut entries = Vec::new();
+    for idx in &indexes {
+        entries.extend(ImageSet::read(&root.join(idx))?.images);
+    }
+    if !image_filter.is_empty() {
+        entries.retain(|e| image_filter.contains(&e.name));
+    }
+    let configs: Vec<_> = suite
+        .configs
+        .iter()
+        .filter(|c| config_filter.is_empty() || config_filter.contains(&c.label))
+        .cloned()
+        .collect();
+    Ok((entries, configs))
+}
+
+fn cache_path(out_dir: &Path, image_name: &str, config_label: &str) -> PathBuf {
+    out_dir.join(format!("{image_name}__{config_label}.bin"))
+}
+
+/// `marsbench oracle-build`: build (or skip, if an existing file already validates
+/// against the current image + config) every `(image, config)` pair the suite names.
+/// Never silently reuses a stale file (`oracle::load_and_validate`'s whole point) and
+/// never silently truncates scope -- what actually ran is exactly `--images`/`--configs`
+/// (defaulting to everything), printed up front.
+fn oracle_build(a: OracleBuildArgs) -> Result<()> {
+    let root = Path::new(".");
+    let suite = OracleSuite::read(&a.config).context("reading oracle config")?;
+    let (entries, configs) = oracle_scope(root, &suite, &a.corpus, &a.images, &a.configs)?;
+    std::fs::create_dir_all(&a.out_dir)
+        .with_context(|| format!("creating {}", a.out_dir.display()))?;
+
+    eprintln!(
+        "oracle-build: {} image(s) x {} config(s) = {} pair(s) -> {}",
+        entries.len(),
+        configs.len(),
+        entries.len() * configs.len(),
+        a.out_dir.display()
+    );
+
+    let gpu = GpuSearcher::new().context("initialising GPU searcher")?;
+    let build_start = Instant::now();
+
+    for entry in &entries {
+        let image = read_checked_image(root, entry)?;
+        for cfg in &configs {
+            let path = cache_path(&a.out_dir, &entry.name, &cfg.label);
+            match oracle::load_and_validate(&path, &entry.sha256, &cfg.config) {
+                Ok(_) => {
+                    eprintln!(
+                        "  skip {} [{}]: existing cache at {} is valid",
+                        entry.name,
+                        cfg.label,
+                        path.display()
+                    );
+                    continue;
+                }
+                Err(CacheError::Io { .. }) => {
+                    // Doesn't exist yet (or unreadable for an unrelated IO reason,
+                    // which the build attempt below will surface again clearly).
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  rebuilding {} [{}]: existing cache at {} did not validate: {e}",
+                        entry.name,
+                        cfg.label,
+                        path.display()
+                    );
+                }
+            }
+            eprintln!(
+                "  building {} [{}] sizes={:?} shift={} bits_alfa={} bits_beta={} max_alfa={}",
+                entry.name,
+                cfg.label,
+                cfg.config.sizes(),
+                cfg.config.shift,
+                cfg.config.bits_alfa,
+                cfg.config.bits_beta,
+                cfg.config.max_alfa
+            );
+            let t0 = Instant::now();
+            let cache = oracle::build(
+                &gpu,
+                &entry.name,
+                &entry.sha256,
+                &image,
+                cfg.config,
+                |size, blocks, elapsed| {
+                    eprintln!("    size={size:<3} {blocks:>6} blocks  ({elapsed:.1?})");
+                },
+            );
+            oracle::save(&cache, &path).with_context(|| format!("writing {}", path.display()))?;
+            eprintln!(
+                "  wrote {} ({:.1?} total, {} bytes)",
+                path.display(),
+                t0.elapsed(),
+                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            );
+        }
+    }
+    eprintln!("oracle-build: done in {:.1?}", build_start.elapsed());
+    Ok(())
+}
+
+/// `marsbench oracle-check` (`gate-8`'s exit criterion): for every cached block, verify
+/// the top-32 list's rank-0 entry equals an **independently computed** top-1 winner --
+/// `GpuSearcher::search` (`search.wgsl`'s `main` entry point, WG_SIZE=256, a wholly
+/// separate pipeline from the top-32 kernel's `main_top32`, WG_SIZE=32 -- see that
+/// module's doc). This is not "trust rank 0": it reruns the exhaustive sweep through a
+/// completely different kernel and workgroup topology and demands bit-for-bit agreement
+/// on `(dom_row, dom_col, isometry, qalfa, qbeta, rms)`. Per the brief, the only
+/// legitimate outcome is 100% agreement -- "anything else is a harness bug" (a
+/// merge-reduce that can lose the true minimum), never a tolerance to widen.
+fn oracle_check(a: OracleCheckArgs) -> Result<()> {
+    let root = Path::new(".");
+    let suite = OracleSuite::read(&a.config).context("reading oracle config")?;
+    let (entries, configs) = oracle_scope(root, &suite, &a.corpus, &a.images, &a.configs)?;
+
+    let gpu = GpuSearcher::new().context("initialising GPU searcher")?;
+
+    let mut blocks_checked = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for entry in &entries {
+        let image = read_checked_image(root, entry)?;
+        for cfg in &configs {
+            let path = cache_path(&a.out_dir, &entry.name, &cfg.label);
+            let cache = match oracle::load_and_validate(&path, &entry.sha256, &cfg.config) {
+                Ok(c) => c,
+                Err(e) => {
+                    bail!(
+                        "oracle-check: cannot check {} [{}]: {e}",
+                        entry.name,
+                        cfg.label
+                    );
+                }
+            };
+            for size in cfg.config.sizes() {
+                let sc = cache.size(size).with_context(|| {
+                    format!("{} [{}]: no size={size} in cache", entry.name, cfg.label)
+                })?;
+                let params = mars_gpu::GpuSearchParams {
+                    size,
+                    shift: cfg.config.shift,
+                    bits_alfa: cfg.config.bits_alfa,
+                    bits_beta: cfg.config.bits_beta,
+                    max_alfa: cfg.config.max_alfa as f32,
+                };
+                let t0 = Instant::now();
+                let independent_top1 = gpu.search(&image, &params);
+                eprintln!(
+                    "  oracle-check {} [{}] size={size}: {} blocks ({:.1?})",
+                    entry.name,
+                    cfg.label,
+                    independent_top1.len(),
+                    t0.elapsed()
+                );
+                for (i, indep) in independent_top1.iter().enumerate() {
+                    let by = (i as u32) / sc.num_blocks_x;
+                    let bx = (i as u32) % sc.num_blocks_x;
+                    let cached_rank0 = sc.blocks[i][0];
+                    blocks_checked += 1;
+                    let agree = match indep {
+                        None => !cached_rank0.valid,
+                        Some(g) => {
+                            cached_rank0.valid
+                                && cached_rank0.dom_row == g.dom_row
+                                && cached_rank0.dom_col == g.dom_col
+                                && cached_rank0.isometry == g.isometry
+                                && cached_rank0.qalfa == g.qalfa
+                                && cached_rank0.qbeta == g.qbeta
+                                && cached_rank0.rms.to_bits() == g.rms.to_bits()
+                        }
+                    };
+                    if !agree {
+                        mismatches.push(format!(
+                            "{} [{}] size={size} block=({},{}): cached rank0 {:?} vs \
+                             independent top1 {:?}",
+                            entry.name,
+                            cfg.label,
+                            by * size,
+                            bx * size,
+                            cached_rank0,
+                            indep
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let pass = mismatches.is_empty() && blocks_checked > 0;
+    println!(
+        "{}  oracle-check: {} block(s) checked, {} mismatch(es)",
+        if pass { "PASS" } else { "FAIL" },
+        blocks_checked,
+        mismatches.len()
+    );
+    for m in mismatches.iter().take(50) {
+        println!("  {m}");
+    }
+    if !pass {
+        bail!("oracle-check FAILED -- a merge-reduce bug, not a tolerance to widen");
+    }
+    Ok(())
+}
+
+/// `marsbench recall`: score a `MethodPick` JSONL file (or, with `--picks` omitted, the
+/// oracle's own top-1 picks -- a harness self-test) against one oracle cache file.
+fn recall_cmd(a: RecallArgs) -> Result<()> {
+    let cache: OracleCache =
+        oracle::load(&a.cache).with_context(|| format!("loading {}", a.cache.display()))?;
+
+    let (picks, source) = match &a.picks {
+        Some(p) => (
+            recall::read_picks(p).with_context(|| format!("reading {}", p.display()))?,
+            p.display().to_string(),
+        ),
+        None => {
+            let size = a.size.unwrap_or(cache.config.min_size);
+            let picks = oracle_top1_as_picks(&cache, size);
+            eprintln!(
+                "--picks omitted: self-testing against the oracle's own top-1 picks at \
+                 size={size} ({} block(s))",
+                picks.len()
+            );
+            (picks, format!("<oracle top-1 self-test, size={size}>"))
+        }
+    };
+
+    let report = recall::score(&cache, &picks);
+    println!("recall  cache={}  picks={source}", a.cache.display());
+    println!(
+        "  matched={} unmatched={}  top1={:.2}%  top5={:.2}%  top32={:.2}%",
+        report.matched,
+        report.unmatched,
+        report.top1_rate() * 100.0,
+        report.top5_rate() * 100.0,
+        report.top32_rate() * 100.0,
+    );
+    match report.regret_stats() {
+        Some(s) => println!(
+            "  rms regret (dB, psnr_oracle_best - psnr_method): mean={:.4} median={:.4} \
+             p95={:.4}  (n={})",
+            s.mean_db, s.median_db, s.p95_db, s.n
+        ),
+        None => println!("  rms regret: no comparable blocks (all guarded/zero rms)"),
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------- Mars 1 baseline (Step 2)

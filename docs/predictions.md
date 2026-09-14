@@ -715,3 +715,98 @@ against the Rayon CPU exhaustive path, transfer included, to clear the 50x floor
 margin (not land just above it), and a full Kodak oracle build (24 images, the sizes/rates
 Step 8 needs) to complete in low single-digit hours rather than needing the full "hours"
 budget the exit criterion allows.
+
+---
+
+## 2026-09-14 · Step 8 (not yet run) · Oracle cache + recall harness
+
+### P8.1 — the smallest block size dominates oracle-build cost by an order of magnitude,
+not evenly across sizes
+
+M6's config tuple is `(image, min_size, max_size, SHIFT, ...)`, and the actual encoder
+partition can emit leaves at every power-of-two size in `[min_size, max_size]`, so "build
+the oracle for a config" means an exhaustive sweep at every such size, not one. Per-size
+work is roughly `domain_positions(size) x image_area` (range-block count and per-candidate
+`size^2` cost cancel), and `domain_positions(size)` shrinks only mildly as `size` grows
+(the domain window is `2*size`, so a larger window rules out proportionally fewer positions
+than the drop in candidate count from having a coarser grid would suggest) — meaning the
+*smallest* configured size dominates total cost by roughly the ratio of domain-position
+counts between the smallest and largest size in the range, which back-of-envelope math on
+Kodak's 768x512 puts at roughly an order of magnitude between `size=4` and `size=16`. I
+therefore expect min_size=4 to make a full-corpus, three-config oracle build impractical
+within this session, and the practical choice (to be recorded as a decision if adopted) is
+to fix `min_size=8` across all three configs, trading away the smallest size's oracle
+coverage for a build that actually finishes.
+
+### P8.2 — the top-32 kernel costs meaningfully more than Step 7's top-1 kernel, but not
+proportionally to 32x
+
+Per-thread bounded insertion into a 32-element sorted array, plus a workgroup-level
+pairwise merge-reduce, is more register/shared-memory pressure than Step 7's single
+running-best comparison, and could reduce occupancy further on top of D24's already-below-
+peak throughput. But the dominant per-candidate cost (the moment accumulation and fit) is
+unchanged, and insertion into an already-sorted-descending array is O(1) amortised once
+the array fills with any reasonably selective early candidates (only candidates better
+than the current worst-of-32 do any work beyond a single comparison). I expect the top-32
+kernel to run 1.5-3x slower than Step 7's top-1 kernel at the same image/size, not 32x
+slower and not within noise of Step 7's numbers.
+
+### P8.3 — the self-test passes trivially, because it has no external ground truth to
+diverge from
+
+Unlike Step 7's differential test (GPU vs. an independently-computed CPU reference),
+gate-8's "exhaustive self-test" checks the GPU oracle's own top-32 list against its own
+separately-reported top-1 winner (candidate at merge-reduce rank 0 equals the
+independently tracked global-best winner) — there is no second, independent computation in
+this check. I expect this to pass at exactly 100% top-1 recall and 0 dB regret by
+construction *unless* the top-32 merge-reduce itself has a bug (e.g. losing the true
+minimum during a pairwise merge step), in which case I'd expect a very small number of
+blocks to fail outright (rank-0 not matching the tracked global best) rather than a
+graded/partial regret — a merge-reduce topology bug is a binary "the true best survived the
+tree or it didn't" failure mode, not a numerical near-miss like D23's.
+
+---
+
+## 2026-09-14 · Step 8 · outcomes
+
+`marsbench oracle-build` ran the full `standard/` corpus (24 Kodak images) at all three
+`configs/oracle.json` variants; `marsbench oracle-check` re-ran an independent top-1 GPU
+computation (a different kernel entry point/workgroup topology, `main` vs. `main_top32`)
+against every cached block's rank-0 entry; `marsbench recall`'s self-test scored the
+oracle's own top-1 picks against itself.
+
+### P8.1 — **confirmed on the mechanism (min_size=8 was the right call), wrong on the
+magnitude of "impractical"**
+
+`min_size=8` across all three configs was adopted as predicted (`configs/oracle.json`,
+D26 below). But the actual cost was nowhere near the "hours per config" the brief's own
+estimate suggested, or even the "low-to-mid single-digit hours" framing this document
+used for Step 7's oracle-build projection: **the full 24-image x 3-config build (69
+`(image, config)` pairs, every size in each config's range) completed in 197.5 seconds** —
+under 3.5 minutes wall-clock, on the same M3 Pro. `oracle-check`'s independent
+re-verification of all 562,176 cached blocks took a further ~156s. The 481MB cache is well
+within reason. I did not test whether `min_size=4` would in fact have been "impractical" —
+that remains untested — but the specific claim "the full-corpus 3-config build needs
+scope-narrowing to finish in a session" was true only in the weak sense that *some*
+narrowing (min_size=8, already the plan) sufficed; the "practical" build is fast enough
+that a future step revisiting `min_size=4` should just measure it rather than assume it is
+still out of reach — D24's 11-23x GPU speedup is doing more work here than this document
+gave it credit for.
+
+### P8.2 — **directionally confirmed, at the low end of the predicted range**
+
+Comparing `oracle-build`'s per-size top-32 timings against `gate-7`'s own top-1 numbers on
+the same machine: at `size=16`, top-32 took ~1.4-1.5s vs. top-1's ~1.1-1.2s (~1.2-1.4x, just
+under the predicted 1.5x floor); at `size=32`, top-32 took ~1.4s (in the `max32` config)
+vs. top-1's ~1.0s (~1.4x, also just under 1.5x). Neither point reached the predicted
+1.5-3x band, but both are close to its lower edge and clearly not "32x" or "within noise" —
+the prediction's *shape* (meaningfully slower, not proportionally-to-32 slower) held; its
+specific numeric floor was set a little high.
+
+### P8.3 — **confirmed exactly**
+
+`oracle-check`: **562,176 of 562,176 blocks (100%) agree** between the cached top-32
+rank-0 entry and an independently-computed top-1 GPU result — 0 mismatches, exactly as
+predicted for a correct merge-reduce. `marsbench recall`'s self-test (oracle's own top-1
+picks scored against itself) reported 100.00% top-1/top-5/top-32 recall and exactly 0.0000
+dB mean/median/p95 regret on every cache checked — also exactly as predicted.
