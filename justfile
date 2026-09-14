@@ -286,6 +286,24 @@ parallel-bench:
     cargo build --release -p mars-cli
     ./target/release/marsbench parallel-bench
 
+# Step 13 -- hierarchical funnel search (`mars_search::funnel`), behind the same
+# `CandidateRetriever` trait Step 9 built. Checks: the harness sanity check (`Funnel` with
+# narrowing disabled must reproduce `Exhaustive`'s ~100% top-1 recall / ~0dB regret against
+# the Step 8 oracle -- a harness bug otherwise), and a first real recall/evals/transform
+# data point at the default scaled survivor counts on `kodim01`, checked against a floor
+# calibrated to Step 9's own measured recall numbers, not the withdrawn 80-95% guess
+# (`docs/predictions.md`'s Step 13 prediction and outcome). Needs `corpus-gray` and a real
+# GPU adapter (`oracle-build --images kodim01 --configs default`) once.
+# Does NOT check the full survival/recall tradeoff curve or the Pareto frontier against all
+# six classical methods across the 24-image corpus -- open gaps, recorded in
+# `docs/predictions.md`, mirroring D28's Step 9 scope cut.
+gate-13:
+    cargo build --release -p mars-cli
+    cargo test -p mars-search -p mars-bench --release
+    ./target/release/marsbench oracle-build --images kodim01 --configs default
+    cargo test -p mars-bench --release --test funnel_gate -- --nocapture
+    @echo "gate-13: PASS (scoped to kodim01 -- see docs/predictions.md's Step 13 outcome)"
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval

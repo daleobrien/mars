@@ -1851,3 +1851,77 @@ call pattern into an already-correct, already-optimised `mars_codec` function.
 **Tolerance impact.** None — no exit criterion changed; `gate-9`'s tests (which exercise
 `mars_search::encode_image`) and Gate C's own PSNR/bpp checks are unaffected since the fix
 is a pure performance change with byte-identical results.
+
+---
+
+## D36 · 2026-09-14 · Step 13's funnel is implemented and mechanism-validated, but its exit criteria (full survival/recall curve, Pareto frontier) are scoped down the same way D28 scoped Step 9, and its first real numbers don't yet beat the pack
+
+**Context.** The Step 13 brief asks for a four-stage funnel (R&D plan §6:
+`10,000 -> 1,000 -> 100 -> 16 -> 1`), with each stage's survivor count configurable and
+logged per block, and exit criteria of (a) the recall/survival tradeoff curve at each
+stage against the Step 8 oracle, (b) `evals/transform` vs. all six classical methods at
+matched RD, and (c) a Pareto frontier of `evals/transform` against BD-rate across the full
+corpus.
+
+**What was built.** `mars_search::funnel::Funnel` (`crates/mars-search/src/funnel.rs`), a
+`CandidateRetriever` with Stage 1 (six contrast-normalised cheap scalars: normalised
+min/max/range, horizontal/vertical/combined gradient energy), Stage 2 (contrast-normalised
+quadrant mean/variance + three low-frequency 2D-DCT coefficients + gradient orientation),
+Stage 3 (`classify::compute_saupe_vector`-based 4x4/8x8 thumbnail L2 distance), and Stage 4
+(the existing shared `search_block` exact fit). `FunnelConfig::scaled` rescales the R&D
+plan's illustrative 10%/10%-of-that/16 ratios to this project's actual (far smaller than
+10,000) domain-pool sizes; `FunnelConfig::disabled` turns every stage's narrowing off for
+the harness-sanity check. Per-block survivor counts are logged via `MARS_FUNNEL_LOG`
+(opt-in, JSONL, one line per range block) — implemented but not exercised at corpus scale
+this session (see below). `Funnel` was added to `MethodName`/`MethodName::ALL`, so it
+appears for free in `marsbench classical-methods`'s existing recall/regret/evals table
+alongside all six Step 9 methods.
+
+**Isometry and affine-invariance simplifications (documented up front in the module doc,
+not discovered after the fact).** Stages 1-3 filter *domain positions* only, not
+`(domain, isometry)` pairs — `mean`/`variance`/`min`/`max`/`range` are isometry-invariant
+for a square block, so this is exact for those; the R&D plan's gradient/edge-energy and
+orientation features are instead treated as a rotation-agnostic magnitude/angle rather
+than eight per-orientation variants, which is a real simplification (an isometry-aware
+version could discriminate better). Every feature is computed on each block's own
+zero-mean, contrast-normalised statistics (not raw pixel values), since a domain only
+reaches the range after Stage 4's own affine remap — matching raw brightness/contrast
+would filter out good candidates for the wrong reason. This mirrors the invariance
+reasoning `classify.rs`'s own module doc already established for the six classical
+methods' features.
+
+**Exit criteria (a)/(b)/(c) are scoped down, mirroring D28's Step 9 precedent exactly.**
+Only `kodim01`/`kodim02` at the oracle's `default` config were measured (not the full
+24-image `standard/` corpus), and only `FunnelConfig::scaled`'s single default survivor
+configuration was run (not a sweep producing the full survival/recall tradeoff curve (a)
+or the Pareto frontier (c)) — pure session time budget, the same constraint D28 named for
+Step 9. `gate-13` (justfile) checks only what was actually run: the harness-sanity check
+(`FunnelMode::Disabled` vs. `Exhaustive`, both scoring 100%/~0dB against the oracle) and a
+first real recall/evals data point on `kodim01`, asserted against a floor calibrated to
+Step 9's own already-measured recall numbers (not the withdrawn 80-95% guess — see
+`docs/predictions.md`'s Step 13 prediction/outcome for why that guess was wrong and how it
+was corrected without silently loosening an assertion that had been load-bearing).
+
+**The measured result is not yet a win.** `docs/predictions.md`'s Step 13 outcome has the
+full numbers: on the default partitioned encode (`t_rms=8`, matching Step 9's own table),
+`Funnel` lands at 159.03/150.23 evals/transform (kodim01/kodim02) — inside the classical
+methods' range, clustered near Mc-Saupe — but with mean regret 1.03/0.91 dB, the
+**second-worst of the seven methods**, ahead of only Mc-Saupe. Top-1 recall (10.03/11.23%)
+is comparable to Fisher's own measured recall on this oracle, not collapsed, but recall
+alone doesn't justify the regret gap. This is recorded plainly as a first-cut result, not
+reframed as a success — per A7, the anomaly (a new method landing at the *worse* end of an
+existing comparison) is recorded, not smoothed over.
+
+**What would reverse/complete this.** Per `docs/predictions.md`'s own "what this means"
+section: the most promising unexplored lever is adding a canonicalisation step (Fisher/
+Saupe-Fisher's `newclass`) before Stage 1/2's shape statistics, since P9.1's own analysis
+already attributes much of the recall spread among the six classical methods to exactly
+this (canonicalised vs. raw shape comparison). Beyond that, the same full-corpus,
+multi-config, multi-survivor-count sweep D28 asked for Step 9 — `MARS_FUNNEL_LOG`'s
+per-block logging exists specifically so that sweep can reconstruct the survival/recall
+tradeoff curve offline without re-running the funnel once it happens.
+
+**Tolerance impact.** None of `gate-13`'s own assertions were loosened after being set —
+the harness-sanity check uses the same ~100%/~0dB bar P9.4 established, and the scaled-
+config recall floor was set once, using Step 9's already-recorded numbers as the
+calibration source, before being asserted (not adjusted after a first failing run).

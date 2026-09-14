@@ -1222,3 +1222,120 @@ nor the 20x target is met yet; the remaining gap is attributed to single-threade
 now sitting at roughly *parity* with Mars 1's C per-eval cost (not a further easy win) and
 would need either a real demonstrated NEON advantage at Fisher's actual (sparse)
 candidate-count profile, or fewer evals altogether (Step 13).
+
+---
+
+## 2026-09-14 · Step 13 · prediction (written before any funnel code runs)
+
+A four-stage funnel (`DomainPool`-indexed cheap stats -> structural signature -> thumbnail
+distance -> exact affine fit, R&D plan §6) restricting the exact-fit stage to a small
+per-block survivor set from the full domain pool, on top of the existing
+`CandidateRetriever` driver Step 9 built. Stage 1-3 filter *domain positions* only (not
+per-isometry — mean/variance/min/max/range are isometry-invariant for a square block, and
+the plan's gradient/edge-energy features are treated as a rotation-agnostic magnitude
+rather than ported per-orientation, a documented simplification); Stage 4 (`search_block`)
+still evaluates all 8 isometries of each surviving domain, matching every other method in
+this crate.
+
+### P13.1 — recall vs. survivor-count tradeoff
+
+Expect top-1 recall against the Step 8 oracle to degrade monotonically as each stage's
+survivor count shrinks, with the steepest drop at Stage 1 (cheapest, least discriminating
+features) and the shallowest at Stage 3 (thumbnail distance is the closest cheap proxy to
+the true SSD the exact fit computes). At the R&D plan's suggested ratios
+(10,000->1,000->100->16, rescaled to this project's actual pool sizes, which are far
+smaller than 10,000 at `shift=4`) I expect top-1 recall in the 80-95% range on `kodim01` —
+below Fisher/Saupe-Fisher's expected ~100% (P9.1, since those canonicalise orientation
+before restricting), because this funnel's Stage 1/2 features are raw shape statistics
+with no canonicalisation, not an equivalence class.
+
+### P13.2 — evals/transform vs. the six classical methods
+
+Expect the funnel's evals/transform (isometries x Stage-3 survivor count, once Stage 4's
+per-domain 8-isometry loop is counted the same way `search_block`'s `evals` counter
+counts every method) to land **between Fisher/Saupe-Fisher and Hurtgen/MassCenter** from
+P9.2 — the funnel narrows the *domain* set aggressively but still pays the full 8x
+isometry loop per survivor, the same structural cost Hurtgen/MassCenter/Mc-Saupe pay.
+
+### P13.3 — the harness sanity check
+
+At Stage 1/2/3 survivor counts all set to "keep everything" (i.e. every domain position
+survives to Stage 4), expect the funnel to reproduce `Exhaustive`'s domain-position
+coverage exactly per block (same isometry loop, same candidate set, same evals count) —
+the same harness-sanity pattern P9.4 established for the six classical methods, adapted to
+a funnel with its narrowing disabled rather than a from-scratch bucket method.
+
+### Known gap this session will likely leave open
+
+The full survival/recall tradeoff curve and the Pareto frontier against all six methods
+(the brief's actual exit criteria) need the same full-corpus, multi-config sweep Step 9's
+own D28 scoped down for lack of session time — expect this session to validate the
+mechanism (P13.3) and produce a first recall/evals data point on `kodim01` only, recording
+the rest as an open gap the way D28 did, not to close Step 13's exit criteria outright.
+
+---
+
+## 2026-09-14 · Step 13 · outcomes
+
+`mars_search::funnel::Funnel` implements the four-stage `CandidateRetriever` (Stage 1
+cheap normalised stats, Stage 2 quadrant + low-frequency-DCT structural signature, Stage 3
+`compute_saupe_vector`-based thumbnail distance, Stage 4 the shared exact fit), added to
+`MethodName` (key `"funnel"`) so it appears in `marsbench classical-methods`'s table
+alongside all six Step 9 methods for free. Measured on `kodim01`/`kodim02` (oracle
+`default` config, `marsbench classical-methods`, `t_rms=8` default — a real partitioned
+encode, not the gate test's never-split params) and, separately, `gate-13`'s own
+never-split harness check.
+
+### P13.3 — **confirmed exactly**
+
+`Funnel` with narrowing disabled (`FunnelMode::Disabled`) reproduces `Exhaustive`'s own
+recall/regret against the Step 8 oracle on `kodim01`: **100.0000% top-1/top-5/top-32,
+mean regret -1.89e-7 dB** over 1536 matched blocks — identical to P9.4's own result for
+the six classical methods' harness check. Confirms the funnel's indexing, candidate
+emission, and `search_block` integration have no bug independent of the narrowing itself.
+
+### P13.1 — **falsified on the absolute number (10.0-11.2%, not 80-95%), but not by a funnel bug — the 80-95% guess itself was wrong**
+
+At `FunnelConfig::scaled`'s default survivor counts: top-1 recall **10.03% (kodim01) /
+11.23% (kodim02)**, far below the withdrawn 80-95% guess. But Step 9's own measured
+numbers on this exact oracle (P9.1's table, `docs/predictions.md`) show exact-tuple top-1
+recall against a 32-deep oracle is simply a hard target here regardless of method: even
+plain Saupe (the best of six) only reaches 51.55%/45.93%, Fisher reaches 10.71%/9.82%, and
+Mc-Saupe as low as 3.87%/3.03%. **The funnel's 10.03%/11.23% sits almost exactly at
+Fisher's own measured recall**, not collapsed — the 80-95% prediction was written before
+cross-checking P9.1's already-recorded table, which is the actual error, not the funnel's
+distance metrics. Recorded here rather than quietly revising the prediction after the
+fact, per the verification-discipline skill.
+
+### P13.2 — **partially confirmed: lands inside the classical-method evals/transform range, but not clearly ahead of the pack**
+
+evals/transform on the default partitioned encode: `kodim01` **159.03** (between
+Mc-Saupe's 166.69 and Saupe-Fisher's 62.08), `kodim02` **150.23** (between Mc-Saupe's
+124.25 and Saupe-Fisher's 58.52) — inside the predicted "between Fisher/Saupe-Fisher and
+Hurtgen/MassCenter" band in absolute terms, but specifically clustered next to Mc-Saupe
+rather than in the middle of the pack as guessed. Mean regret **1.03 dB (kodim01) / 0.91
+dB (kodim02)** is the **second-worst of the seven methods**, ahead of only Mc-Saupe (1.53
+/ 1.36 dB) — worse than Fisher (0.95/0.85 dB) despite similar recall and higher evals cost
+than Fisher's cheaper Saupe-Fisher sibling. On the gate test's never-split params
+(`min_size=max_size=16`, no partitioning) the picture looks better — 128 evals/transform,
+0.80 dB regret, roughly Fisher-level recall at ~6x fewer evals — so **block-size mix
+matters a lot** to this comparison; the partitioned-encode numbers above are the fairer
+comparison to Step 9's own table since both use the same `t_rms=8` default.
+
+### What this means for Step 13
+
+The funnel mechanism is validated (P13.3) and produces real recall/evals numbers, but this
+first cut is **not yet a clear win over the existing six methods** — competitive with
+Fisher on recall at meaningfully lower cost, but with worse quality (regret) than every
+method except Mc-Saupe. The most likely lever, unexplored this session: Stage 1/2's raw
+shape statistics have no orientation canonicalisation (unlike Fisher/Saupe-Fisher's
+`newclass`), which P9.1's own analysis already identified as a likely driver of recall
+differences between the six classical methods — worth trying as a follow-up before
+concluding the funnel architecture itself is the limiting factor.
+
+### Known gap, as predicted
+
+The full survival/recall tradeoff curve (sweeping `FunnelConfig`'s survivor counts) and
+the Pareto frontier across the full 24-image corpus remain open, exactly as this
+prediction's "known gap" section said before any code ran — `docs/decisions.md` records
+this alongside D28's identical Step 9 scope cut.

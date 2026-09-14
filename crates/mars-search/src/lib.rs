@@ -16,6 +16,7 @@
 pub mod classify;
 pub mod exhaustive;
 pub mod fisher;
+pub mod funnel;
 pub mod hurtgen;
 pub mod kdtree;
 pub mod masscenter;
@@ -296,9 +297,11 @@ pub mod diag {
     }
 }
 
-/// The seven methods this crate provides, `Exhaustive` included as the sanity baseline
-/// (Step 9 brief). Naming matches `mars_bench::mars1::Method::key()` so a result row can
-/// be joined against the Mars 1 baseline by string key without a translation table.
+/// The methods this crate provides: Step 9's six classical ports plus `Exhaustive` as the
+/// sanity baseline, and Step 13's `Funnel`. Naming matches `mars_bench::mars1::Method::key()`
+/// for the seven Step 9 names, so a result row can be joined against the Mars 1 baseline by
+/// string key without a translation table — `Funnel` has no Mars 1 counterpart (it is a
+/// novel Step 13 method, not a 1998 port) and simply has no matching baseline row to join.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodName {
     Exhaustive,
@@ -308,10 +311,11 @@ pub enum MethodName {
     Saupe,
     SaupeFisher,
     McSaupe,
+    Funnel,
 }
 
 impl MethodName {
-    pub const ALL: [MethodName; 7] = [
+    pub const ALL: [MethodName; 8] = [
         MethodName::Exhaustive,
         MethodName::Fisher,
         MethodName::Hurtgen,
@@ -319,6 +323,7 @@ impl MethodName {
         MethodName::Saupe,
         MethodName::SaupeFisher,
         MethodName::McSaupe,
+        MethodName::Funnel,
     ];
 
     pub fn key(self) -> &'static str {
@@ -330,6 +335,7 @@ impl MethodName {
             MethodName::Saupe => "saupe",
             MethodName::SaupeFisher => "saupe-fisher",
             MethodName::McSaupe => "mc-saupe",
+            MethodName::Funnel => "funnel",
         }
     }
 
@@ -343,6 +349,7 @@ impl MethodName {
             MethodName::Saupe => Box::new(saupe::Saupe::default()),
             MethodName::SaupeFisher => Box::new(saupe_fisher::SaupeFisher::default()),
             MethodName::McSaupe => Box::new(mc_saupe::McSaupe::default()),
+            MethodName::Funnel => Box::new(funnel::Funnel::default()),
         }
     }
 }
