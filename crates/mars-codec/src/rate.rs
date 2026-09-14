@@ -117,11 +117,15 @@ mod tests {
                 row,
                 col,
                 size: 8,
+                mode: 0,
                 qalfa: 0,
                 qbeta: 64,
                 isometry: 0,
                 dom_row: 0,
                 dom_col: 0,
+                qgx: 0,
+                qgy: 0,
+                residual: Vec::new(),
             });
         }
         let snapshot = RateModels::from_leaves(&h, &leaves).unwrap();

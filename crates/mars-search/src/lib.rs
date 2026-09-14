@@ -497,11 +497,15 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64, Vec<Pick>)
             row,
             col,
             size,
+            mode: 0,
             qalfa: 0,
             qbeta: pixel & ((1 << hdr.bits_beta) - 1),
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
+            qgx: 0,
+            qgy: 0,
+            residual: Vec::new(),
         };
         return (vec![leaf], 0, Vec::new());
     }
@@ -542,21 +546,29 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64, Vec<Pick>)
             row,
             col,
             size,
+            mode: 0,
             qalfa: 0,
             qbeta: 0,
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
+            qgx: 0,
+            qgy: 0,
+            residual: Vec::new(),
         },
         |(c, qalfa, qbeta, _)| Leaf {
             row,
             col,
             size,
+            mode: if qalfa == 0 { 0 } else { 2 },
             qalfa,
             qbeta,
             isometry: c.isometry,
             dom_row: c.dom_row,
             dom_col: c.dom_col,
+            qgx: 0,
+            qgy: 0,
+            residual: Vec::new(),
         },
     );
 
@@ -587,6 +599,7 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64, Vec<Pick>)
         let max_qbeta = (1u32 << ctx.params.bits_beta) - 1;
         leaf.qbeta = quantise(mean / 255.0 * f64::from(max_qbeta), max_qbeta);
         leaf.qalfa = 0;
+        leaf.mode = 0;
         leaf.isometry = 0;
         leaf.dom_row = 0;
         leaf.dom_col = 0;

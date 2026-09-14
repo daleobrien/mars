@@ -166,6 +166,41 @@ pub fn fit_f32(m: RawMoments, max_alfa: f32, bits_alfa: u32, bits_beta: u32) -> 
     (qalfa, qbeta, rms)
 }
 
+// ------------------------------------------------------------------ Step 15: mode constants
+//
+// Modes 1 (affine) and 3 (fractal + residual) need a couple of quantisation parameters
+// that have no header field of their own (`docs/decisions.md`'s Step 15 entry records the
+// scope decision): rather than growing `.mars` v0's fixed header to carry a per-image
+// residual quantisation step (which would also mean threading it through every
+// `mars_format`/`ifs` call site that touches a `Header`), Step 15 fixes these as compile-
+// time constants shared by encoder and decoder alike, the same way `crate::residual`'s own
+// `LEVEL_CLAMP` is fixed. This means residual quantisation is not λ-adaptive this step —
+// a real, documented simplification, not a silent one — but the RD search still decides,
+// per block and per λ, whether paying for a mode-3 residual actually beats every other
+// mode's `J` at this fixed step, which is exactly the brief's "let J report honestly
+// whether residuals earn their bits".
+
+/// Mode 1's gradient fixed-point scale: `qgx`/`qgy` store `round(gradient * SCALE)`, so a
+/// gradient of e.g. 2.0 (steep contrast across even a 16-wide leaf) round-trips to a
+/// non-degenerate integer instead of being crushed by too coarse a scale.
+pub(crate) const AFFINE_GRAD_SCALE: f64 = 64.0;
+/// Generous enough that no plane fit this project's fixtures produce is ever clamped
+/// (`+-2048/64 = +-32` intensity units per pixel step, far beyond any real image's local
+/// gradient) — the clamp exists only to bound the bitstream alphabet, not to bite in
+/// practice.
+pub(crate) const AFFINE_GRAD_CLAMP: i32 = 2048;
+
+/// Mode 3's fixed dead-zone quantisation step for DCT coefficients (`crate::quant`). `8.0`
+/// is a mid-range choice on an 8-bit pixel scale: large enough that most AC coefficients of
+/// a well-predicted fractal residual quantise to zero (residual coding should cost little
+/// when the fractal prediction is already good), small enough that a genuinely bad fractal
+/// match still has room to correct itself.
+pub(crate) const RESIDUAL_QSTEP_DEFAULT: f64 = 8.0;
+/// Standard JPEG-style dead-zone width (half the step) — mode 3's coefficient quantiser
+/// deliberately biases small values to exactly zero rather than +-1 (see `crate::quant`'s
+/// module doc).
+pub(crate) const RESIDUAL_DEAD_ZONE: f64 = 0.5;
+
 /// `int(0.5 + x)` (C truncation toward zero, `x >= 0` here since `alfa`/`beta` are
 /// pre-clamped to be non-negative before this point) then clamped to `[0, max]`.
 fn quantise_f64(x: f64, max: u32) -> u32 {
@@ -499,6 +534,31 @@ pub fn f32_f64_divergence(
 /// [`walk_rd`]/`crate::rate`'s module doc for the rate-estimation approximation this
 /// requires.
 pub fn encode_image(image: &Plane, params: &EncodeParams) -> (Header, Vec<Leaf>, u64) {
+    let (hdr, leaves, evals, _stats) = encode_image_rd(image, params);
+    (hdr, leaves, evals)
+}
+
+/// [`encode_image`]'s superset: also returns Step 15's [`ModeStats`] mode-usage histogram
+/// (all zero on the legacy `lambda: None` path, which never runs [`walk_rd`] and so never
+/// makes a mode decision to count). Additive-only -- [`encode_image`] itself is unchanged
+/// and every pre-existing caller keeps compiling against its original three-tuple return.
+pub fn encode_image_rd(image: &Plane, params: &EncodeParams) -> (Header, Vec<Leaf>, u64, ModeStats) {
+    encode_image_rd_with_modes(image, params, [true; 4])
+}
+
+/// [`encode_image_rd`] with an explicit mode mask -- Step 15's own comparison tool.
+/// `[true, false, true, false]` restricts `walk_rd`'s leaf decision to modes 0 (flat) and
+/// 2 (fractal) only, exactly reproducing Step 14's decision rule (flat-refit-or-fractal,
+/// whichever has the smaller `J`) on the *current* codebase, so `mars-bench`'s Step-15-vs-
+/// Step-14 BD-rate comparison is a true "modes added, nothing else changed" A/B rather
+/// than a diff against a separate git revision (see [`Ctx::allowed_modes`]'s doc for why
+/// that is the fairer comparison). Every ordinary caller goes through [`encode_image_rd`]
+/// / [`encode_image`], which always pass `[true; 4]`.
+pub fn encode_image_rd_with_modes(
+    image: &Plane,
+    params: &EncodeParams,
+    allowed_modes: [bool; 4],
+) -> (Header, Vec<Leaf>, u64, ModeStats) {
     let hdr = Header {
         bits_alfa: params.bits_alfa,
         bits_beta: params.bits_beta,
@@ -519,9 +579,10 @@ pub fn encode_image(image: &Plane, params: &EncodeParams) -> (Header, Vec<Leaf>,
             hdr: &hdr,
             params,
             rate: Some(&rate),
+            allowed_modes,
         };
         let result = walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda);
-        return (hdr, result.leaves, result.evals);
+        return (hdr, result.leaves, result.evals, result.stats);
     }
 
     let ctx = Ctx {
@@ -530,9 +591,10 @@ pub fn encode_image(image: &Plane, params: &EncodeParams) -> (Header, Vec<Leaf>,
         hdr: &hdr,
         params,
         rate: None,
+        allowed_modes,
     };
     let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
-    (hdr, leaves, evals)
+    (hdr, leaves, evals, ModeStats::default())
 }
 
 /// Step 14's fixed warm-up threshold, deliberately independent of the run's own `lambda`
@@ -563,6 +625,7 @@ fn build_rate_snapshot(
         hdr,
         params: &warmup_params,
         rate: None,
+        allowed_modes: [true; 4],
     };
     let (leaves, _evals) = walk(&warmup_ctx, 0, 0, hdr.virtual_size());
     RateModels::from_leaves(hdr, &leaves)
@@ -583,6 +646,15 @@ struct Ctx<'a> {
     hdr: &'a Header,
     params: &'a EncodeParams,
     rate: Option<&'a RateModels>,
+    /// Step 15: which of modes 0/1/2/3 [`best_mode_leaf`] is allowed to consider, indexed
+    /// by mode number. Always `[true; 4]` on every ordinary encode path; the only other
+    /// caller is `mars-bench`'s Step-15-vs-Step-14 comparison (`encode_image_rd_with_modes`
+    /// below), which sets it to `[true, false, true, false]` to reproduce Step 14's
+    /// flat-or-fractal-only decision using the exact same rate-estimation and search
+    /// machinery, differing *only* in which modes may compete -- a fairer, more honest A/B
+    /// than diffing against a separate git revision would be (no risk of an incidental,
+    /// unrelated code difference between commits leaking into the comparison).
+    allowed_modes: [bool; 4],
 }
 
 /// Step 12: below this block size, a `rayon::join`'s task-spawn/steal overhead costs more
@@ -621,11 +693,15 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64) {
             row,
             col,
             size,
+            mode: 0,
             qalfa: 0,
             qbeta: pixel & ((1 << hdr.bits_beta) - 1),
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
+            qgx: 0,
+            qgy: 0,
+            residual: Vec::new(),
         };
         return (vec![leaf], 0);
     }
@@ -644,21 +720,29 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64) {
             row,
             col,
             size,
+            mode: 0,
             qalfa: 0,
             qbeta: 0,
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
+            qgx: 0,
+            qgy: 0,
+            residual: Vec::new(),
         },
         |c| Leaf {
             row,
             col,
             size,
+            mode: 2,
             qalfa: c.qalfa,
             qbeta: c.qbeta,
             isometry: c.isometry,
             dom_row: c.dom_row,
             dom_col: c.dom_col,
+            qgx: 0,
+            qgy: 0,
+            residual: Vec::new(),
         },
     );
     // §8.1: discard the searched qbeta and refit DC-only whenever qalfa lands within
@@ -676,6 +760,7 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64) {
         }
         leaf.qbeta = best_beta(range_sum, i64::from(size) * i64::from(size), hdr.bits_beta);
         leaf.qalfa = 0;
+        leaf.mode = 0;
         leaf.isometry = 0;
         leaf.dom_row = 0;
         leaf.dom_col = 0;
@@ -730,6 +815,32 @@ struct RdResult {
     evals: u64,
     d: f64,
     r: f64,
+    stats: ModeStats,
+}
+
+/// Step 15's mode-usage histogram (the brief's own header finding, more scientifically
+/// interesting than the BD-rate number): how often each leaf mode wins the `J`
+/// competition, plus how often "subdivide" (mode 4) wins over coding this block as any
+/// single leaf at all. `leaf_modes[m]` counts leaves whose final `mode == m`;
+/// `split_decisions`/`leaf_decisions` count every point in the walk where a leaf-vs-split
+/// choice was actually made (i.e. every non-forced, `size > min_size` node) -- their sum
+/// is the total number of such decision points, and `split_decisions as f64 / total` is
+/// the mode-4 share.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModeStats {
+    pub leaf_modes: [u64; 4],
+    pub split_decisions: u64,
+    pub leaf_decisions: u64,
+}
+
+impl ModeStats {
+    fn merge(&mut self, other: ModeStats) {
+        for i in 0..4 {
+            self.leaf_modes[i] += other.leaf_modes[i];
+        }
+        self.split_decisions += other.split_decisions;
+        self.leaf_decisions += other.leaf_decisions;
+    }
 }
 
 /// Sum of [`RateModels::bits_for`] over every event a candidate leaf would emit.
@@ -737,71 +848,298 @@ fn event_bits(rate: &RateModels, events: &[mars_entropy::Event]) -> f64 {
     events.iter().map(|e| rate.bits_for(e.ctx, e.alphabet, e.symbol)).sum()
 }
 
-/// The §8.1 zero-alfa override, factored out of [`walk`] so [`walk_rd`] can reuse it while
-/// also recovering the resulting leaf's own SSE (needed for `D`, which the legacy
-/// RMS-threshold `walk` never had to compute in closed form). Returns `(leaf, sse)`.
-fn build_leaf_and_sse(
+/// Step 15's five-way mode competition, per-leaf half (`docs/predictions.md`'s Step 15
+/// prediction; R&D plan §4). Evaluates modes 0 (flat), 1 (affine), 2 (fractal), and 3
+/// (fractal + residual) for this block, prices each under `rate` via the exact same
+/// [`crate::mars_format::leaf_events`] event stream the real entropy coder would emit, and
+/// returns whichever has the smallest `J = D + lambda*R`. The remaining mode, 4
+/// (subdivide), is decided by [`walk_rd`]'s existing leaf-vs-split comparison one level up
+/// -- this function only ever returns a leaf, never a split decision.
+///
+/// Replaces the legacy `walk`/[`walk`]'s §8.1 zero-alfa override on the RD path only. The
+/// legacy top-down path keeps that override unchanged (`lambda: None` never reaches this
+/// function), since modes 1/3 have no representation in the raw `.ifs` bitstream that path
+/// still targets (`crate::ifs::Leaf`'s doc).
+#[allow(clippy::too_many_arguments)]
+fn best_mode_leaf(
     ctx: &Ctx,
     row: u32,
     col: u32,
     size: u32,
     candidate: Option<Candidate>,
-) -> (Leaf, f64) {
+    rate: &RateModels,
+    lambda: f64,
+    size_class: u32,
+) -> (Leaf, f64, f64) {
     let hdr = ctx.hdr;
-    let mut leaf = candidate.map_or(
-        Leaf {
+    let px = ctx.image.as_slice();
+    let stride = ctx.image.width();
+    let size_u = size as usize;
+
+    let mut block = vec![0.0f64; size_u * size_u];
+    let mut range_sum = 0i64;
+    for i in 0..size_u {
+        let src = (row as usize + i) * stride + col as usize;
+        for j in 0..size_u {
+            let v = px[src + j];
+            block[i * size_u + j] = f64::from(v);
+            range_sum += i64::from(v);
+        }
+    }
+    let s0 = i64::from(size) * i64::from(size);
+
+    let mut candidates: Vec<(Leaf, f64, f64)> = Vec::with_capacity(4);
+    let allowed = ctx.allowed_modes;
+
+    // Mode 0 -- flat: exactly §8.1's `best_beta` refit, priced as its own competing mode
+    // rather than an override forced onto mode 2's result.
+    if allowed[0] {
+        let qbeta = best_beta(range_sum, s0, hdr.bits_beta);
+        let leaf = Leaf {
             row,
             col,
             size,
+            mode: 0,
             qalfa: 0,
-            qbeta: 0,
+            qbeta,
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
-        },
-        |c| Leaf {
+            qgx: 0,
+            qgy: 0,
+            residual: Vec::new(),
+        };
+        let max_qbeta = (1u32 << hdr.bits_beta) - 1;
+        let beta2 = f64::from(qbeta) / f64::from(max_qbeta) * 255.0;
+        let sse: f64 = block.iter().map(|&p| (p - beta2).powi(2)).sum();
+        let r = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf, size_class));
+        candidates.push((leaf, sse, r));
+    }
+
+    // Mode 1 -- affine: a spatial-gradient plane fit, no domain search at all.
+    if allowed[1] {
+        let (qbeta, qgx, qgy, sse) = affine_fit(&block, size_u, hdr.bits_beta);
+        let leaf = Leaf {
             row,
             col,
             size,
-            qalfa: c.qalfa,
-            qbeta: c.qbeta,
-            isometry: c.isometry,
-            dom_row: c.dom_row,
-            dom_col: c.dom_col,
-        },
-    );
-    let mut sse = candidate.map_or(0.0, |c| c.rms * c.rms * f64::from(size) * f64::from(size));
-
-    if leaf.qalfa.abs_diff(0) <= ctx.params.zero_threshold {
-        let px = ctx.image.as_slice();
-        let stride = ctx.image.width();
-        let size_u = size as usize;
-        let mut range_sum = 0i64;
-        let mut t2 = 0i64;
-        for i in 0..size_u {
-            let src = (row as usize + i) * stride + col as usize;
-            for j in 0..size_u {
-                let v = i64::from(px[src + j]);
-                range_sum += v;
-                t2 += v * v;
-            }
-        }
-        let s0 = i64::from(size) * i64::from(size);
-        leaf.qbeta = best_beta(range_sum, s0, hdr.bits_beta);
-        leaf.qalfa = 0;
-        leaf.isometry = 0;
-        leaf.dom_row = 0;
-        leaf.dom_col = 0;
-
-        // alfa2 == 0 here, so `fit_f64`'s own `sum` formula collapses to
-        // t2 - 2*beta2*t0 + s0*beta2^2, with beta2 the real-valued beta the quantised
-        // qbeta represents (mirrors fit_f64's alfa2 == 0 branch exactly).
-        let max_qbeta = (1u32 << hdr.bits_beta) - 1;
-        let beta2 = f64::from(leaf.qbeta) / f64::from(max_qbeta) * 255.0;
-        let sum = t2 as f64 - 2.0 * beta2 * range_sum as f64 + s0 as f64 * beta2 * beta2;
-        sse = sum.max(0.0);
+            mode: 1,
+            qalfa: 0,
+            qbeta,
+            isometry: 0,
+            dom_row: 0,
+            dom_col: 0,
+            qgx,
+            qgy,
+            residual: Vec::new(),
+        };
+        let r = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf, size_class));
+        candidates.push((leaf, sse, r));
     }
-    (leaf, sse)
+
+    // Modes 2/3 -- fractal, and fractal + residual -- only when the search actually found
+    // a legal domain candidate whose fit did not collapse to alfa == 0 (a genuinely
+    // domain-independent block, which mode 0/1 already cover with no domain fields to
+    // code at all).
+    if let Some(c) = candidate {
+        if c.qalfa >= 1 && allowed[2] {
+            let leaf2 = Leaf {
+                row,
+                col,
+                size,
+                mode: 2,
+                qalfa: c.qalfa,
+                qbeta: c.qbeta,
+                isometry: c.isometry,
+                dom_row: c.dom_row,
+                dom_col: c.dom_col,
+                qgx: 0,
+                qgy: 0,
+                residual: Vec::new(),
+            };
+            let sse2 = c.rms * c.rms * f64::from(size) * f64::from(size);
+            let r2 = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf2, size_class));
+            candidates.push((leaf2, sse2, r2));
+        }
+        if c.qalfa >= 1 && allowed[3] {
+            let (levels, sse3) = residual_for_candidate(&block, px, stride, size_u, &c, ctx.params, hdr);
+            let leaf3 = Leaf {
+                row,
+                col,
+                size,
+                mode: 3,
+                qalfa: c.qalfa,
+                qbeta: c.qbeta,
+                isometry: c.isometry,
+                dom_row: c.dom_row,
+                dom_col: c.dom_col,
+                qgx: 0,
+                qgy: 0,
+                residual: levels,
+            };
+            let r3 = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf3, size_class));
+            candidates.push((leaf3, sse3, r3));
+        }
+    }
+
+    if candidates.is_empty() {
+        // Defensive fallback only -- unreachable with every mask this project actually
+        // uses (mode 0 is always allowed), but cheaper to guarantee here than to let a
+        // pathological all-`false` mask panic deep in `min_by`.
+        let qbeta = best_beta(range_sum, s0, hdr.bits_beta);
+        let leaf = Leaf {
+            row,
+            col,
+            size,
+            mode: 0,
+            qalfa: 0,
+            qbeta,
+            isometry: 0,
+            dom_row: 0,
+            dom_col: 0,
+            qgx: 0,
+            qgy: 0,
+            residual: Vec::new(),
+        };
+        let max_qbeta = (1u32 << hdr.bits_beta) - 1;
+        let beta2 = f64::from(qbeta) / f64::from(max_qbeta) * 255.0;
+        let sse: f64 = block.iter().map(|&p| (p - beta2).powi(2)).sum();
+        let r = event_bits(rate, &crate::mars_format::leaf_events(hdr, &leaf, size_class));
+        candidates.push((leaf, sse, r));
+    }
+
+    let (best_leaf, best_d, best_r) = candidates
+        .into_iter()
+        .min_by(|a, b| {
+            let ja = a.1 + lambda * a.2;
+            let jb = b.1 + lambda * b.2;
+            ja.partial_cmp(&jb).expect("D and R are always finite")
+        })
+        .expect("candidates is never empty: either a mode was allowed, or the fallback ran");
+    (best_leaf, best_d, best_r)
+}
+
+/// Mode 1's least-squares plane fit `b0 + gx*u + gy*v` over a `size x size` block, solved
+/// in closed form: the design matrix depends only on `size` (the sample positions are a
+/// fixed regular grid), so its normal-equation coefficients are plain sums over `0..size`,
+/// independent of the pixel data, and only the right-hand side (`Σp`, `Σp·u`, `Σp·v`)
+/// varies per block. Returns `(qbeta, qgx, qgy, sse)`, `sse` computed against the
+/// *quantised* plane (matching this module's convention elsewhere of pricing distortion
+/// against what the decoder will actually reconstruct's continuous value, before the
+/// final per-pixel round/clamp -- see [`fit_f64`]'s own `sum` formula for the precedent).
+fn affine_fit(block: &[f64], size: usize, bits_beta: u32) -> (u32, i32, i32, f64) {
+    let n = size as f64 * size as f64;
+    let (mut t0, mut tu, mut tv) = (0.0, 0.0, 0.0);
+    for u in 0..size {
+        for v in 0..size {
+            let p = block[u * size + v];
+            t0 += p;
+            tu += p * u as f64;
+            tv += p * v as f64;
+        }
+    }
+    let su: f64 = (0..size).map(|u| u as f64).sum();
+    let suu: f64 = (0..size).map(|u| (u as f64).powi(2)).sum();
+    let s0 = n;
+    let s_u = size as f64 * su;
+    let s_v = s_u;
+    let s_uu = size as f64 * suu;
+    let s_vv = s_uu;
+    let s_uv = su * su;
+
+    fn det3(m: [[f64; 3]; 3]) -> f64 {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    }
+    let a = [[s0, s_u, s_v], [s_u, s_uu, s_uv], [s_v, s_uv, s_vv]];
+    let det_a = det3(a);
+    let (b0, gx, gy) = if det_a.abs() < 1e-9 {
+        (t0 / s0, 0.0, 0.0)
+    } else {
+        let a_b0 = [[t0, s_u, s_v], [tu, s_uu, s_uv], [tv, s_uv, s_vv]];
+        let a_gx = [[s0, t0, s_v], [s_u, tu, s_uv], [s_v, tv, s_vv]];
+        let a_gy = [[s0, s_u, t0], [s_u, s_uu, tu], [s_v, s_uv, tv]];
+        (det3(a_b0) / det_a, det3(a_gx) / det_a, det3(a_gy) / det_a)
+    };
+
+    let max_qbeta = (1u32 << bits_beta) - 1;
+    let qbeta = quantise_f64((b0 / 255.0 * f64::from(max_qbeta)).max(0.0), max_qbeta);
+    let qgx = (gx * AFFINE_GRAD_SCALE)
+        .round()
+        .clamp(-f64::from(AFFINE_GRAD_CLAMP), f64::from(AFFINE_GRAD_CLAMP)) as i32;
+    let qgy = (gy * AFFINE_GRAD_SCALE)
+        .round()
+        .clamp(-f64::from(AFFINE_GRAD_CLAMP), f64::from(AFFINE_GRAD_CLAMP)) as i32;
+
+    let b0q = f64::from(qbeta) / f64::from(max_qbeta) * 255.0;
+    let gxq = f64::from(qgx) / AFFINE_GRAD_SCALE;
+    let gyq = f64::from(qgy) / AFFINE_GRAD_SCALE;
+    let mut sse = 0.0;
+    for u in 0..size {
+        for v in 0..size {
+            let pred = b0q + gxq * u as f64 + gyq * v as f64;
+            let diff = block[u * size + v] - pred;
+            sse += diff * diff;
+        }
+    }
+    (qbeta, qgx, qgy, sse)
+}
+
+/// Mode 3's residual: the mode-2 fractal prediction's continuous reconstruction error,
+/// forward-DCT'd, dead-zone quantised (`crate::quant`, at the fixed
+/// [`RESIDUAL_QSTEP_DEFAULT`]/[`RESIDUAL_DEAD_ZONE`]), and inverse-transformed back so the
+/// exact SSE the decoder will actually see can be priced -- the same "price the quantised
+/// reconstruction, not the ideal one" discipline [`affine_fit`] and [`fit_f64`] both
+/// follow. Returns `(levels, sse)`; `levels` are the clamped integer coefficients
+/// [`crate::residual::encode_events`] will code.
+#[allow(clippy::too_many_arguments)]
+fn residual_for_candidate(
+    block: &[f64],
+    px: &[u8],
+    stride: usize,
+    size: usize,
+    c: &Candidate,
+    params: &EncodeParams,
+    hdr: &Header,
+) -> (Vec<i32>, f64) {
+    let alfa = f64::from(c.qalfa) / f64::from(1u32 << params.bits_alfa) * params.max_alfa;
+    let mut beta = f64::from(c.qbeta) / f64::from((1u32 << hdr.bits_beta) - 1) * ((1.0 + alfa.abs()) * 255.0);
+    if alfa > 0.0 {
+        beta -= alfa * 255.0;
+    }
+
+    let mut resid = vec![0.0f64; size * size];
+    for u in 0..size {
+        for v in 0..size {
+            let dr = c.dom_row as usize + 2 * u;
+            let dc = c.dom_col as usize + 2 * v;
+            let d = (f64::from(px[dr * stride + dc])
+                + f64::from(px[(dr + 1) * stride + dc])
+                + f64::from(px[dr * stride + dc + 1])
+                + f64::from(px[(dr + 1) * stride + dc + 1]))
+                / 4.0;
+            let (i, j) = isometry::map(c.isometry, u, v, size);
+            let pred = 0.5 + d * alfa + beta;
+            resid[i * size + j] = block[i * size + j] - pred;
+        }
+    }
+
+    let coeffs = crate::dct::forward_dct2d(&resid, size);
+    let levels: Vec<i32> = coeffs
+        .iter()
+        .map(|&x| {
+            crate::quant::dead_zone_quantize(x, RESIDUAL_QSTEP_DEFAULT, RESIDUAL_DEAD_ZONE)
+                .clamp(-crate::residual::LEVEL_CLAMP, crate::residual::LEVEL_CLAMP)
+        })
+        .collect();
+    let deq: Vec<f64> = levels
+        .iter()
+        .map(|&l| crate::quant::dead_zone_dequantize(l, RESIDUAL_QSTEP_DEFAULT, RESIDUAL_DEAD_ZONE))
+        .collect();
+    let recon_resid = crate::dct::inverse_dct2d(&deq, size);
+    let sse: f64 = (0..size * size).map(|k| (resid[k] - recon_resid[k]).powi(2)).sum();
+    (levels, sse)
 }
 
 /// Step 14's bottom-up `J = D + λR` walk: search this block, then recursively resolve its
@@ -820,6 +1158,7 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
             evals: 0,
             d: 0.0,
             r: 0.0,
+            stats: ModeStats::default(),
         };
     }
     let forced = size > hdr.max_size || row + size > hdr.height || col + size > hdr.width;
@@ -843,32 +1182,41 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
             row,
             col,
             size,
+            mode: 0,
             qalfa: 0,
             qbeta: pixel & ((1 << hdr.bits_beta) - 1),
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
+            qgx: 0,
+            qgy: 0,
+            residual: Vec::new(),
         };
         let r = event_bits(rate, &leaf_events(hdr, &leaf, size_class));
+        let mut stats = ModeStats::default();
+        stats.leaf_modes[0] += 1;
         return RdResult {
             leaves: vec![leaf],
             evals: 0,
             d: 0.0,
             r,
+            stats,
         };
     }
 
     let (candidate, block_evals) = search(ctx.image, ctx.contracted, row, col, size, ctx.params);
-    let (leaf, leaf_d) = build_leaf_and_sse(ctx, row, col, size, candidate);
-    let leaf_r = event_bits(rate, &leaf_events(hdr, &leaf, size_class));
+    let (leaf, leaf_d, leaf_r) = best_mode_leaf(ctx, row, col, size, candidate, rate, lambda, size_class);
 
     if size <= hdr.min_size {
         // Never split below min_size -- mars_format never emits a split flag here either.
+        let mut stats = ModeStats::default();
+        stats.leaf_modes[leaf.mode as usize] += 1;
         return RdResult {
             leaves: vec![leaf],
             evals: block_evals,
             d: leaf_d,
             r: leaf_r,
+            stats,
         };
     }
 
@@ -881,18 +1229,25 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
     let split_j = children.d + lambda * (children.r + split_flag_bits(1));
 
     if leaf_j <= split_j {
+        let mut stats = ModeStats::default();
+        stats.leaf_modes[leaf.mode as usize] += 1;
+        stats.leaf_decisions += 1;
         RdResult {
             leaves: vec![leaf],
             evals: total_evals,
             d: leaf_d,
             r: leaf_r + split_flag_bits(0),
+            stats,
         }
     } else {
+        let mut stats = children.stats;
+        stats.split_decisions += 1;
         RdResult {
             leaves: children.leaves,
             evals: total_evals,
             d: children.d,
             r: children.r + split_flag_bits(1),
+            stats,
         }
     }
 }
@@ -924,13 +1279,15 @@ fn split_rd(ctx: &Ctx, row: u32, col: u32, half: u32, lambda: f64) -> RdResult {
     let mut evals = 0u64;
     let mut d = 0.0;
     let mut r = 0.0;
+    let mut stats = ModeStats::default();
     for q in quadrants {
         leaves.extend(q.leaves);
         evals += q.evals;
         d += q.d;
         r += q.r;
+        stats.merge(q.stats);
     }
-    RdResult { leaves, evals, d, r }
+    RdResult { leaves, evals, d, r, stats }
 }
 
 #[cfg(test)]
@@ -1222,5 +1579,232 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------------ Step 15
+
+    /// [`ModeStats`]'s own internal-consistency oracle: the number of leaves reported by
+    /// [`encode_image_rd`] must equal the sum of its mode histogram, and every leaf-vs-
+    /// split decision point counted must be non-negative and actually add up over a real
+    /// image -- cheap, exact-equality checks that would catch a bookkeeping bug in
+    /// [`walk_rd`]'s stats threading long before it showed up as a wrong BD-rate number.
+    #[test]
+    fn mode_stats_leaf_count_matches_the_actual_leaf_count() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let (_hdr, leaves, _evals, stats) = encode_image_rd(&image, &rd_params(200.0));
+        let histogram_total: u64 = stats.leaf_modes.iter().sum();
+        assert_eq!(
+            histogram_total,
+            leaves.len() as u64,
+            "mode histogram total must equal leaf count"
+        );
+        assert!(
+            stats.split_decisions + stats.leaf_decisions > 0,
+            "a 64x64 image with min_size 4 must visit at least one leaf-vs-split decision point"
+        );
+    }
+
+    /// The legacy `lambda: None` path never runs [`walk_rd`] and so never makes a mode
+    /// decision -- [`encode_image_rd`]'s stats must reflect that honestly (all zero)
+    /// rather than reporting misleading nonzero counts for a path that has no modes.
+    #[test]
+    fn legacy_path_reports_all_zero_mode_stats() {
+        let image = textured_image(64, 64);
+        let params = EncodeParams {
+            min_size: 4,
+            max_size: 16,
+            shift: 4,
+            bits_alfa: 4,
+            bits_beta: 7,
+            max_alfa: 1.0,
+            t_rms: 8.0,
+            zero_threshold: 0,
+            lambda: None,
+        };
+        let (_hdr, _leaves, _evals, stats) = encode_image_rd(&image, &params);
+        assert_eq!(stats, ModeStats::default());
+    }
+
+    /// A block that is genuinely just a linear intensity ramp (no texture at all) should
+    /// have mode 1 (affine) available and competitive -- not necessarily always winning
+    /// (mode 2/3 can still win if a matching domain happens to exist), but present in the
+    /// candidate set with a near-zero SSE, which is what [`affine_fit`] exists to capture
+    /// that mode 0 (flat) structurally cannot.
+    #[test]
+    fn affine_fit_recovers_a_pure_gradient_almost_exactly() {
+        let size = 8usize;
+        let mut block = vec![0.0f64; size * size];
+        for u in 0..size {
+            for v in 0..size {
+                block[u * size + v] = 10.0 + 3.0 * u as f64 + 1.5 * v as f64;
+            }
+        }
+        let (_qbeta, qgx, qgy, sse) = affine_fit(&block, size, 7);
+        assert!(sse < 5.0, "a pure ramp should fit almost exactly, got sse={sse}");
+        assert!(qgx > 0, "positive u-gradient should quantise to a positive qgx, got {qgx}");
+        assert!(qgy > 0, "positive v-gradient should quantise to a positive qgy, got {qgy}");
+    }
+
+    /// A DCT residual's own round trip (encode-time quantise/dequantise, matching
+    /// [`crate::dct`]/[`crate::quant`]'s own unit tests but exercised through
+    /// [`residual_for_candidate`]'s actual call shape): coding the *same* prediction as
+    /// the true pixels should drive every residual coefficient toward zero, since a
+    /// perfect prediction has nothing left to correct.
+    #[test]
+    fn zero_residual_when_prediction_is_exact() {
+        let size = 8usize;
+        // qalfa == 0 collapses mode 2's fractal prediction to a flat `beta` (§8's own
+        // alfa2 == 0 branch) -- picking `qbeta` and the block's constant value to be the
+        // *exact* same real number (rather than an independently chosen pixel value)
+        // means the prediction error is exactly 0.0 in every pixel, not merely close,
+        // which is what makes this an equality assertion rather than a tolerance.
+        let qbeta = 50u32;
+        let max_qbeta = 127.0;
+        let beta = f64::from(qbeta) / max_qbeta * 255.0;
+        // `residual_for_candidate`'s prediction is `0.5 + d*alfa + beta` unconditionally
+        // (§10.1's own convention, alfa == 0 here just zeroes the domain term) -- so the
+        // block value that makes the residual exactly 0.0 is `beta + 0.5`, not `beta`.
+        let block = vec![beta + 0.5; size * size];
+        let px = vec![0u8; 32 * 32]; // unused: qalfa == 0 means no domain read happens.
+        let c = Candidate {
+            dom_row: 0,
+            dom_col: 0,
+            isometry: 0,
+            qalfa: 0,
+            qbeta,
+            rms: 0.0,
+            moments: RawMoments { s0: 1, s1_x4: 0, s2_x16: 0, t0: 0, t1_x4: 0, t2: 0 },
+        };
+        let hdr = Header {
+            bits_alfa: 4,
+            bits_beta: 7,
+            min_size: 4,
+            max_size: 16,
+            shift: 4,
+            width: 32,
+            height: 32,
+            int_max_alfa: 32,
+        };
+        let (levels, sse) = residual_for_candidate(&block, &px, 32, size, &c, &rd_params(1.0), &hdr);
+        assert!(sse < 1e-6, "an exact prediction should leave ~zero residual SSE, got {sse}");
+        assert!(
+            levels.iter().all(|&l| l == 0),
+            "an exact prediction's residual should quantise entirely to zero, got {levels:?}"
+        );
+    }
+
+    /// **Decisive diagnostic for the gate-15 BD-rate regression investigation
+    /// (`docs/decisions.md`'s D40).** The coordinator's hypothesis was that the
+    /// step14-equivalent and step15 mode-mask arms might be priced against *different*
+    /// frozen `RateModels` snapshots (an apples-to-oranges comparison) -- ruled out by
+    /// inspection ([`build_rate_snapshot`] calls the legacy [`walk`], which never reads
+    /// `ctx.allowed_modes` at all, so both arms' snapshots are constructed identically).
+    ///
+    /// This test checks the *provable* mathematical property directly, reading
+    /// [`walk_rd`]'s own internal `RdResult.r`/`.d` -- the exact quantity `best_mode_leaf`/
+    /// `walk_rd` minimise, in the exact fresh-predictor-per-leaf convention they use
+    /// internally (an externally-reconstructed estimate via `events_for_leaves`'s *real*
+    /// sequential-predictor convention is a **different** quantity -- `crate::rate`'s own
+    /// module doc already documents this fresh-vs-sequential predictor mismatch as a
+    /// distinct, narrower approximation, and conflating the two is a test-methodology bug,
+    /// not a codec bug; an earlier version of this test made exactly that mistake). Under
+    /// the identical frozen snapshot, allowing strictly more leaf-mode candidates at every
+    /// node can only ever produce an internal aggregate estimate `<=` the more restricted
+    /// mask's -- per-node superset minimisation, summed bottom-up by induction. If the
+    /// *real* entropy-coded bpp diverges from that ordering, the divergence is proof that
+    /// the estimate itself -- not the mode-competition minimisation -- is where reality and
+    /// the frozen snapshot disagree, exactly the already-documented Step 14 rate-estimation
+    /// gap (`crate::rate`'s own module doc), not a new Step 15 defect.
+    #[test]
+    fn aggregate_estimated_cost_is_provably_no_worse_under_more_modes_even_though_real_bpp_can_be() {
+        let image = textured_image(96, 96);
+        let params = EncodeParams {
+            min_size: 4,
+            max_size: 16,
+            shift: 4,
+            bits_alfa: 4,
+            bits_beta: 7,
+            max_alfa: 1.0,
+            t_rms: 8.0,
+            zero_threshold: 0,
+            lambda: Some(200.0),
+        };
+
+        let hdr = Header {
+            bits_alfa: params.bits_alfa,
+            bits_beta: params.bits_beta,
+            min_size: params.min_size,
+            max_size: params.max_size,
+            shift: params.shift,
+            width: image.width() as u32,
+            height: image.height() as u32,
+            int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
+        };
+        let contracted = Contracted::build(&image);
+        // The exact same snapshot-construction call both mode-mask arms use internally
+        // (`encode_image_rd_with_modes`) -- built once, shared explicitly here so there is
+        // no possibility of the two arms below seeing different snapshots.
+        let rate = build_rate_snapshot(&image, &hdr, &contracted, &params);
+        let lambda = params.lambda.unwrap();
+
+        let run = |allowed_modes: [bool; 4]| -> RdResult {
+            let ctx = Ctx {
+                image: &image,
+                contracted: &contracted,
+                hdr: &hdr,
+                params: &params,
+                rate: Some(&rate),
+                allowed_modes,
+            };
+            walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda)
+        };
+        let real_bytes = |leaves: &[Leaf]| -> usize {
+            crate::mars_format::write(&hdr, leaves)
+                .expect("a valid partition always writes")
+                .len()
+        };
+
+        let result_2mode = run([true, false, true, false]);
+        let result_4mode = run([true; 4]);
+        let real_2mode = real_bytes(&result_2mode.leaves) * 8;
+        let real_4mode = real_bytes(&result_4mode.leaves) * 8;
+
+        eprintln!(
+            "2-mode: internal d={:.1} r={:.1} bits, real={real_2mode} bits ({} leaves)\n\
+             4-mode: internal d={:.1} r={:.1} bits, real={real_4mode} bits ({} leaves)",
+            result_2mode.d,
+            result_2mode.r,
+            result_2mode.leaves.len(),
+            result_4mode.d,
+            result_4mode.r,
+            result_4mode.leaves.len(),
+        );
+
+        // The provable half: allowing more modes under the *same* frozen snapshot can
+        // only lower (or tie) the internal aggregate J = D + lambda*R -- every node's own
+        // candidate set is a strict superset, and `min_by` over a superset (summed
+        // bottom-up by induction across the whole tree) is never worse.
+        let j_2mode = result_2mode.d + lambda * result_2mode.r;
+        let j_4mode = result_4mode.d + lambda * result_4mode.r;
+        assert!(
+            j_4mode <= j_2mode + 1e-6,
+            "4-mode internal J ({j_4mode:.1}) must never exceed the 2-mode internal J \
+             ({j_2mode:.1}) under the identical frozen snapshot -- if this fails, the bug \
+             is in best_mode_leaf's/walk_rd's minimisation itself, not the estimate"
+        );
+
+        // The diagnostic half, reported (not a hard pass/fail -- it is the *expected*
+        // signature of the known rate-estimation gap, not a new assertion this test
+        // exists to enforce): the internal estimate can be more optimistic, relative to
+        // what the real entropy coder actually charges, for the 4-mode arm than for the
+        // 2-mode arm -- exactly what "the frozen snapshot never observed modes 1/3's
+        // fields at all" predicts, and the mechanism `docs/decisions.md`'s D40 names as
+        // the BD-rate regression's root cause.
+        let gap_2mode = real_2mode as f64 - result_2mode.r;
+        let gap_4mode = real_4mode as f64 - result_4mode.r;
+        eprintln!(
+            "estimate-vs-real gap (real bits - internal r estimate): 2-mode={gap_2mode:.1}, \
+             4-mode={gap_4mode:.1} (4-mode's larger gap is the expected signature)"
+        );
     }
 }
