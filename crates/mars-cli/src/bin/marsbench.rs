@@ -67,6 +67,9 @@ enum Cmd {
     RustEncoderCheck(RustEncoderCheckArgs),
     /// Step 10's exit criteria as a command that exits 0 or 1 (§A1, gate-10).
     MarsFormatCheck(MarsFormatCheckArgs),
+    /// Step 11's A/B-interleaved NEON-vs-scalar speed comparison, reported only (not
+    /// gated -- `just gate-11` is the exact-equality differential tests instead).
+    SimdBench(SimdBenchArgs),
     /// Step 7's bit-identical + speedup exit criteria as a command that exits 0 or 1
     /// (§A1, gate-7).
     GpuSearchCheck(GpuSearchCheckArgs),
@@ -194,6 +197,20 @@ struct GpuSearchBenchArgs {
     #[arg(long, value_delimiter = ',')]
     images: Vec<String>,
     #[arg(long, value_delimiter = ',', default_value = "16,32")]
+    sizes: Vec<u32>,
+    #[arg(long, default_value_t = 5)]
+    runs: usize,
+}
+
+#[derive(Args)]
+struct SimdBenchArgs {
+    #[arg(long, default_value = "corpus/fixtures.images.json")]
+    fixtures_index: PathBuf,
+    /// Image names to benchmark. Defaults to a spread from flat/regular to noisy/complex,
+    /// since kernel speedup can depend on how often the 4-lane/8-lane tail fires.
+    #[arg(long, value_delimiter = ',')]
+    images: Vec<String>,
+    #[arg(long, value_delimiter = ',', default_value = "4,8,16,32")]
     sizes: Vec<u32>,
     #[arg(long, default_value_t = 5)]
     runs: usize,
@@ -448,6 +465,7 @@ fn main() -> Result<()> {
         Cmd::IfsCheck(a) => ifs_check(a),
         Cmd::RustEncoderCheck(a) => rust_encoder_check(a),
         Cmd::MarsFormatCheck(a) => mars_format_check(a),
+        Cmd::SimdBench(a) => simd_bench(a),
         Cmd::GpuSearchCheck(a) => gpu_search_check(a),
         Cmd::GpuSearchBench(a) => gpu_search_bench(a),
         Cmd::OracleBuild(a) => oracle_build(a),
@@ -1860,5 +1878,54 @@ fn mars_format_check(a: MarsFormatCheckArgs) -> Result<()> {
         bail!("gate-10: {failed} of {} checks failed", checks.len());
     }
     println!("\ngate-10: PASS ({} checks)", checks.len());
+    Ok(())
+}
+
+// ------------------------------------------------------------------- NEON kernels (Step 11)
+
+fn simd_bench(a: SimdBenchArgs) -> Result<()> {
+    eprintln!("{}", mars_bench::simd_bench::machine_fingerprint_line());
+    let root = Path::new(".");
+    let images = mars_bench::sweep::ImageSet::read(&root.join(&a.fixtures_index))?.images;
+    let want: Vec<&str> = if a.images.is_empty() {
+        vec!["flat128", "checker8", "noise_u8", "mandelbrot"]
+    } else {
+        a.images.iter().map(String::as_str).collect()
+    };
+
+    println!(
+        "{:<12} {:<5} {:<22} {:>8} {:>12} {:>12} {:>7}",
+        "image", "size", "kernel", "positions", "scalar (ms)", "neon (ms)", "speedup"
+    );
+    for image in &images {
+        if !want.contains(&image.name.as_str()) {
+            continue;
+        }
+        let ground_truth = mars_core::io::read_raw(
+            &root.join(&image.file),
+            image.width as usize,
+            image.height as usize,
+        )?;
+        let contracted = mars_codec::encode::build_contracted(&ground_truth);
+        for &size in &a.sizes {
+            for r in [
+                mars_bench::simd_bench::ab_domain_sums(&contracted, size, a.runs),
+                mars_bench::simd_bench::ab_cross_term(&contracted, size, a.runs),
+            ] {
+                println!(
+                    "{:<12} {:<5} {:<22} {:>8} {:>9.3}±{:<5.3} {:>9.3}±{:<5.3} {:>6.2}x",
+                    image.name,
+                    size,
+                    r.name,
+                    r.positions,
+                    r.scalar_median.as_secs_f64() * 1e3,
+                    r.scalar_mad.as_secs_f64() * 1e3,
+                    r.neon_median.as_secs_f64() * 1e3,
+                    r.neon_mad.as_secs_f64() * 1e3,
+                    r.speedup
+                );
+            }
+        }
+    }
     Ok(())
 }

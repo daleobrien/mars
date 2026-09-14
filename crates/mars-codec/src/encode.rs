@@ -217,6 +217,14 @@ impl Contracted {
     pub fn height(&self) -> usize {
         self.data.len().checked_div(self.stride).unwrap_or(0)
     }
+
+    /// The raw `(plane, stride)` pair backing `.at` -- `pub` (Step 11): `mars-bench`'s
+    /// SIMD speedup report needs to hand the same strided plane [`domain_sums`]/
+    /// [`cross_term`] already use to `mars_simd` kernels directly, rather than rebuilding
+    /// one element-by-element through `.at` just to time it.
+    pub fn raw(&self) -> (&[i32], usize) {
+        (&self.data, self.stride)
+    }
 }
 
 /// Public entry point for [`search`], for callers outside this crate that need the
@@ -275,6 +283,15 @@ fn search(
     }
     let s0 = i64::from(size) * i64::from(size);
 
+    // Permuted once per isometry here, not once per `(domain position, isometry)` pair
+    // inside the loop below — the NEON dot product `cross_term_permuted` calls only pays
+    // off once this cost is amortised across every domain position, not repeated for
+    // each one (docs/decisions.md's Step 11 entry has the measured before/after).
+    let range_by_iso: Vec<Vec<u8>> = isometry::ALL
+        .iter()
+        .map(|&k| permute_range(&range, k, size_u))
+        .collect();
+
     let Some(max_dom_row) = height.checked_sub(2 * size) else {
         return (None, 0);
     };
@@ -292,7 +309,8 @@ fn search(
             let (s1_x4, s2_x16) = domain_sums(contracted, dr_half, dc_half, size_u);
 
             for &k in &isometry::ALL {
-                let t1_x4 = cross_term(contracted, dr_half, dc_half, size_u, k, &range);
+                let t1_x4 =
+                    cross_term_permuted(contracted, dr_half, dc_half, size_u, &range_by_iso[k as usize]);
                 let moments = RawMoments {
                     s0,
                     s1_x4,
@@ -329,16 +347,12 @@ fn search(
 /// `pub` (Step 9): every `mars-search` candidate-restriction method needs exactly this
 /// quantity for whatever domain positions its own indexing restricts the search to; it is
 /// not specific to the exhaustive walk in this module.
+/// Step 11: delegates to `mars_simd::moments::domain_sums`, exact-equal by construction
+/// (that kernel's own differential test) to the strided scalar double-loop this used to
+/// be — a NEON win with no risk to `search`'s output, since `Contracted::data`/`stride`
+/// are exactly the `(plane, stride)` that kernel expects.
 pub fn domain_sums(contracted: &Contracted, dr: usize, dc: usize, size: usize) -> (i64, i64) {
-    let (mut s1, mut s2) = (0i64, 0i64);
-    for u in 0..size {
-        for v in 0..size {
-            let d = i64::from(contracted.at(dr + u, dc + v));
-            s1 += d;
-            s2 += d * d;
-        }
-    }
-    (s1, s2)
+    mars_simd::moments::domain_sums(&contracted.data, contracted.stride, dr, dc, size)
 }
 
 /// `Σ r·D` for one domain position under isometry `k` — the one quantity that genuinely
@@ -346,6 +360,12 @@ pub fn domain_sums(contracted: &Contracted, dr: usize, dc: usize, size: usize) -
 /// would land on.
 ///
 /// `pub` (Step 9): shared with `mars-search`, same reasoning as [`domain_sums`].
+///
+/// Step 11: permutes `range` into the domain's raster order once (`range_k`), then hands
+/// both `range_k` and `Contracted`'s own strided plane to
+/// `mars_simd::moments::dot_u8_i32_window`, so the accumulation itself is NEON rather than
+/// a scalar loop indexing through `isometry::map` on every element — the permutation cost
+/// is unchanged (the scalar version paid it too, just inline), only the dot product is new.
 pub fn cross_term(
     contracted: &Contracted,
     dr: usize,
@@ -354,15 +374,32 @@ pub fn cross_term(
     k: u8,
     range: &[u8],
 ) -> i64 {
-    let mut t1 = 0i64;
+    cross_term_permuted(contracted, dr, dc, size, &permute_range(range, k, size))
+}
+
+/// `range` permuted into `(u, v)` raster order under isometry `k` -- what [`cross_term`]
+/// used to compute inline, element by element, on every call. Split out because
+/// `search`'s hot loop calls all 8 isometries against the *same* domain position's
+/// `range`: permuting once per isometry per range block, outside the domain-position
+/// loop, instead of once per `(domain position, isometry)` pair, is what actually made
+/// the NEON dot product in [`cross_term_permuted`] a net win rather than a regression --
+/// see `docs/decisions.md`'s Step 11 entry for the measured before/after.
+fn permute_range(range: &[u8], k: u8, size: usize) -> Vec<u8> {
+    let mut range_k = vec![0u8; size * size];
     for u in 0..size {
         for v in 0..size {
-            let d = i64::from(contracted.at(dr + u, dc + v));
             let (i, j) = isometry::map(k, u, v, size);
-            t1 += i64::from(range[i * size + j]) * d;
+            range_k[u * size + v] = range[i * size + j];
         }
     }
-    t1
+    range_k
+}
+
+/// [`cross_term`] with the permutation already done -- the actual hot-path entry point
+/// `search` uses, since it can amortise `range_k` across every domain position for a
+/// fixed isometry (see [`permute_range`]'s doc).
+fn cross_term_permuted(contracted: &Contracted, dr: usize, dc: usize, size: usize, range_k: &[u8]) -> i64 {
+    mars_simd::moments::dot_u8_i32_window(range_k, &contracted.data, contracted.stride, dr, dc, size)
 }
 
 /// Recompute one leaf's raw moments from its stored domain reference. Used only by

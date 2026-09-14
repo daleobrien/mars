@@ -13,6 +13,7 @@ mars-codec = { workspace = true }
 mars-core = { workspace = true }
 mars-search = { workspace = true }
 mars-gpu = { workspace = true }
+mars-simd = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }

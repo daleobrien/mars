@@ -1372,3 +1372,101 @@ dominated by pathological cases.
 
 **Tolerance impact.** None — `gate-10`'s two checks (lossless round-trip; reduction > 0%)
 are exactly as strict as written, and both passed on real, unmodified measurements.
+
+---
+
+## D31 · 2026-09-14 · Step 11's first `cross_term` NEON wiring was a measured regression, not a speedup — fixed by amortising the isometry permutation, not by touching the kernel
+
+**Context.** Step 11's brief names `(s1, s2, t0, t1, t2)` moment accumulation as the
+priority-one SIMD target. `crates/mars-simd` (new crate) implements two NEON kernels —
+`domain_sums` (`ΣD, ΣD²`) and `dot_u8_i32`/`dot_u8_i32_window` (`Σ a·b`, used for `t1 =
+Σr·D`) — each with an exact-equality differential test against a scalar reference (integer
+sums have no reassociation hazard, so "exact," not an epsilon, is the correct bar per that
+crate's own module doc). `mars_codec::encode::domain_sums`/`cross_term` were rewired to
+delegate to them, keeping both functions' public signatures unchanged so `mars-search`
+(Step 9) picks up the same change with no call-site edits.
+
+**What the first benchmark found.** `marsbench simd-bench` (A/B interleaved, N=5,
+median+MAD, `crates/mars-bench/src/simd_bench.rs`) timed both kernels over the full
+per-range-block search workload (every legal domain position x 8 isometries, matching
+`search()`'s own double loop — the workload Step 7 already established dominates search
+cost) at `size = 4, 8, 16, 32`, `flat128`/`checker8`/`noise_u8`/`mandelbrot`, Apple M3 Pro (6
+P-cores/6 E-cores). `domain_sums` showed the expected modest win (1.2-1.7x at `size<=16`,
+~flat at `size=32`, where the loop overhead the 4-lane NEON path saves is a shrinking
+fraction of total work per row). **`cross_term` was *slower* under NEON: 0.54-0.95x —
+a regression, not the "potentially largest single win" the brief hoped `t1` accumulation
+would be.**
+
+**Root cause, found before rationalising it away (verification-discipline: investigate,
+don't average out).** `cross_term`'s NEON path permutes `range` into the domain's raster
+order (`range_k`, a fresh `Vec<u8>` allocation + `size²` copy) *inside the function*, and
+`search()`'s inner loop calls `cross_term` once per `(domain position, isometry)` pair —
+so `range_k` was being rebuilt from scratch on every single domain position, even though it
+depends only on `range` and `k`, both fixed across the whole domain loop for one isometry.
+The scalar version paid an equivalent per-element permutation cost too (via `isometry::map`
+looked up inline), but with no separate heap allocation; the NEON version added a new
+allocation+copy per call without removing the redundant recomputation, so the vectorised
+dot product's savings were smaller than the new allocation overhead — worse at small
+`size` (more calls, cheaper individual dot products, so allocation dominates) and hidden
+at `size=32`.
+
+**Fix.** Split `cross_term` into `permute_range` (the permutation, now a named, reusable
+step) and a private `cross_term_permuted` (the dot product alone, given an
+already-permuted `range_k`). `search()` now precomputes all 8 `range_by_iso` permutations
+once per range block, *before* the domain-position loop, and calls `cross_term_permuted`
+in the hot loop — the permutation cost is unchanged in total (still `size²` work x 8
+isometries per range block, same as before), just moved outside the loop it doesn't
+depend on. `cross_term` itself (the public function `mars-search` calls) is unchanged in
+behaviour and signature — it still permutes per call, matching its own call pattern
+(Step 9's candidate-restriction methods call it per selected candidate, not in an
+isometry-outer loop, so there is nothing to amortise there without changing that crate's
+own call sites, which this session did not touch).
+
+**Re-measured after the fix**, official run on an otherwise-idle machine (`marsbench
+simd-bench`, N=5, A/B interleaved, `flat128`/`checker8`/`noise_u8`/`mandelbrot`,
+`size = 4, 8, 16, 32`; machine fingerprint: Apple M3 Pro, 6 P-cores/6 E-cores, macOS 27.0
+(26A428), rustc 1.97.1, release profile; confirmed idle immediately after `gate-6`'s own
+exhaustive-search sweep finished on the same machine, so no other compute was competing;
+every MAD was under 5% of its median, most well under 1%):
+
+| size | positions | `domain_sums` speedup | `cross_term` (x8 isometries) speedup |
+|---|---|---|---|
+| 4  | 3,969-16,129 | 1.11-1.23x | 2.70-3.43x |
+| 8  | 3,721-15,625 | 1.43-1.65x | 8.66-9.20x |
+| 16 | 3,249-14,641 | 1.26-1.35x | 12.10-12.85x |
+| 32 | 2,401-12,769 | 0.94-0.97x | 15.23-15.67x |
+
+`cross_term` went from **0.54-0.95x (regression) to 2.70-15.67x**, growing with `size`
+(the amortised permutation cost shrinks as a fraction of the growing dot-product work) —
+the permutation amortisation, not the NEON kernel itself, was the actual bottleneck.
+`domain_sums` was unaffected by this fix (it was never mis-amortised): a real but modest
+1.1-1.65x at `size <= 16`, and **no measurable gain at `size = 32`** (0.94-0.97x, i.e.
+roughly flat, on every image tested) — not investigated further this session, but worth
+naming rather than folding into an average: the hand-rolled 4-lane NEON loop's per-row
+overhead (bounds-checked slicing, the tail-handling branch) most likely stops paying for
+itself once each row is long enough that the compiler's own auto-vectorisation of the
+scalar reference closes the gap. `fixtures/images/manifest.toml`'s configs mostly use
+`min_size=4, max_size=16` (`size=32` is `configs/mars1-fixtures.json`'s `max32` variant
+only), so this does not blunt the win for the configs this project actually runs, but it
+is a real, size-dependent limit on this kernel worth remembering before quoting a single
+headline multiplier for it.
+
+**What this means for the differential tests.** None of `gate-11`'s exact-equality checks
+were affected — `cross_term`'s public output is bit-identical before and after this fix
+(the permutation math is unchanged, only *when* it runs moved), confirmed by
+`cargo test -p mars-codec` continuing to pass with no changes to that suite.
+
+**What would reverse or complete this.** The `UDOT` expansion the brief explicitly flags
+(`D = a+b+c+e` as four `u8 x u8` dot products) was not attempted this session — it needs a
+second plane-splitting builder (four half-resolution `u8` planes, not `Contracted`'s one
+summed `i32` plane) to make all four corner-pixel operands contiguously addressable, which
+is a real structural addition, not a kernel tweak, and did not fit this step's time budget
+on top of finding and fixing the regression above. SAD, 2:1 downsample, gradient, and DCT
+kernels (the brief's lower-priority list) are untouched. An end-to-end multi-image encode
+timing (vs. this session's per-range-block workload proxy) would need a duplicate scalar
+`encode_image` path to A/B against fairly, which this session judged not worth the
+duplication risk given the inner-loop workload already isolates exactly what changed.
+
+**Tolerance impact.** None — this is a performance finding, not a correctness or tolerance
+change. `gate-11`'s pass/fail bar (exact-equality differential tests) never moved; only the
+*speed* changed, and only in the direction the regression should have been caught in.

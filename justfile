@@ -237,6 +237,28 @@ gate-10:
 fuzz-mars-format seconds="60":
     cd crates/mars-codec/fuzz && cargo +nightly fuzz run mars_format_read -- -max_total_time={{seconds}}
 
+# Step 11 -- NEON kernels (`crates/mars-simd`) for the moment-accumulation inner loop
+# (`domain_sums`, `cross_term`) `mars_codec::encode::search` now delegates to. The exit
+# bar is exact-equality differential tests (integer sums have no reassociation hazard --
+# see that crate's module doc), which `cargo test -p mars-simd` runs; `cargo test -p
+# mars-codec` re-running clean is the bitstream-unchanged proof (same fixtures/leaves the
+# pre-Step-11 scalar code produced, since the new kernels are exact-equal to it by
+# construction, not just by this test). Speedup is reported, not gated -- `just
+# simd-bench` (needs an idle machine per the benchmark-protocol skill) -- and recorded in
+# docs/decisions.md D31, including a regression this step's own benchmark caught and a fix
+# for it (permutation amortisation, not the kernel), which is exactly what the report step
+# is for.
+gate-11:
+    cargo test -p mars-simd -p mars-codec --release
+    @echo "gate-11: PASS"
+
+# Step 11's A/B-interleaved NEON-vs-scalar speed report (not gated -- see gate-11's own
+# comment). Run this on an idle machine, in the foreground, per the benchmark-protocol
+# skill -- never from a background session.
+simd-bench:
+    cargo build --release -p mars-cli
+    ./target/release/marsbench simd-bench
+
 # The subset of Gate A that Step 1 alone is responsible for: the metrics engine is
 # correct, pinned, and agrees with implementations we did not write.
 gate-step1: test crossval

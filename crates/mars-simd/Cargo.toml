@@ -1,0 +1,24 @@
+[package]
+name = "mars-simd"
+description = "NEON kernels for the moment accumulation Step 6 made the search's inner loop (Step 11)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+rand = "0.8"
+
+# One of exactly two crates in this workspace allowed `unsafe` (the other is `mars-gpu`,
+# which as it turns out never needs it -- wgpu's own API is safe Rust). NEON intrinsics
+# require `unsafe` at the call site; every one here is wrapped in a safe function backed
+# by a scalar reference and a differential test (implementation-plan.md §4, Step 11).
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

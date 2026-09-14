@@ -21,6 +21,7 @@ pub mod provenance;
 pub mod recall;
 pub mod report;
 pub mod rust_encoder;
+pub mod simd_bench;
 pub mod store;
 pub mod sweep;
 
