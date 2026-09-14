@@ -9,3 +9,4 @@ pub mod encode;
 pub mod ifs;
 pub mod isometry;
 pub mod mars_format;
+pub mod rate;

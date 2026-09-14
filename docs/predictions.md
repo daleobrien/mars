@@ -1339,3 +1339,128 @@ The full survival/recall tradeoff curve (sweeping `FunnelConfig`'s survivor coun
 the Pareto frontier across the full 24-image corpus remain open, exactly as this
 prediction's "known gap" section said before any code ran — `docs/decisions.md` records
 this alongside D28's identical Step 9 scope cut.
+
+---
+
+## 2026-09-14 (not yet run) · Step 14 · rate-distortion optimisation
+
+`encode.rs`'s current `walk`/`split` recursion (Step 6, extended by Steps 12/13) makes the
+split decision top-down and threshold-driven: a block splits whenever `best_rms >
+params.t_rms`, before any child has been searched, so the decision cannot see what the
+children would actually have cost. Step 14 replaces this with `J = D + λR`: rate estimated
+from the live entropy models (not a constant-bits stand-in), and a bottom-up recursion
+that searches/codes the children first and only then compares the parent's own single-fit
+`J` against the sum of the children's `J`, keeping whichever is smaller. λ becomes the
+quality knob — an RD curve is a λ sweep, not a `t_rms` sweep with λ held fixed.
+
+### P14.1 — BD-rate improvement clears the step's own bar, but not by a wide margin
+
+Expect **BD-rate improvement in the 10-20% range** vs. the Step 9 `Exhaustive` reference
+at matched search effort, comfortably past the step's 10% target but well short of a 2x
+change — bottom-up RD pruning corrects a real blind spot (top-down thresholding cannot
+compare a parent's cost to its children's actual coded cost, only to a fixed RMS bar that
+has no direct relationship to bits), but the underlying representation (fixed quadtree
+geometry, single fractal mode) is unchanged, so most of the ceiling this step can reach is
+bounded by how often the old threshold was already picking the RD-better side by luck.
+Reasoning by analogy to video codecs' RDO-vs-heuristic-split gaps, which cluster in this
+same 10-20% band when only the split decision changes and the mode/partition set does not.
+
+### P14.2 — the convexity check is the real risk, not the BD-rate number
+
+Expect the first attempt at rate estimation to produce a **non-convex or non-monotone**
+RD curve at the extreme ends of the λ sweep (very low or very high λ) before it produces a
+clean one — rate estimation from live adaptive entropy models is context-dependent (the
+same symbol costs different bits depending on encode order and prior blocks' statistics),
+and a bottom-up comparison that estimates each child's rate independently, without
+accounting for how the adaptive model's state actually evolves across the real encode
+order, is the most likely place this shows up. Per the step's own framing, a non-convex
+curve is treated as a rate-estimation bug to fix, not a result to report.
+
+### P14.3 — the harness sanity check
+
+Expect that setting λ to select the same operating point the old `t_rms` threshold would
+have chosen (i.e., roughly matched bpp) reproduces a similar partition to the Step 9/13
+baseline's leaf-size histogram — not identical (the decision rule genuinely differs), but
+without a wholesale collapse to all-leaf or all-split, which would indicate the rate
+estimate or `J` comparison has a sign error or unit mismatch (e.g. λ and R in incompatible
+units) rather than a real algorithmic difference.
+
+### Known gap, stated before any code runs
+
+`μT` (decode-cost term) is out of scope this step per the brief ("extend... once
+decode-cost measurement exists") — only `J = D + λR` is implemented. The λ sweep is run at
+whatever image subset is practical this session, not necessarily the full 24-image
+`standard/` corpus; if scoped down, the cut is recorded in `docs/decisions.md` the same
+way D28/Step 13's corpus-subset cuts were.
+
+---
+
+## 2026-09-14 · Step 14 · outcomes
+
+`mars_codec::encode` now has a bottom-up `walk_rd`/`split_rd` (alongside the untouched
+legacy `walk`/`split`, selected by `EncodeParams::lambda: Option<f64>`), a frozen
+rate-estimation snapshot (`crates/mars-codec/src/rate.rs`), and `mars-cli`'s `encmars
+--lambda`. Measured via `crates/mars-bench/tests/rd_gate.rs` on `kodim01`/`kodim02`
+(4-point λ sweep `[50, 200, 800, 3200]` vs. the Step 9 `Exhaustive` reference's `t_rms`
+sweep `[2, 4, 8, 16, 32]`, both at `.mars` v0 bpp). `docs/decisions.md`'s D37 has the full
+detail; this compares directly against P14.1/P14.2/P14.3.
+
+### P14.1 — **falsified on the number: -8.07% mean, not the predicted 10-20% band**
+
+Measured mean BD-rate **-8.07%** (kodim01 -8.61%, kodim02 -7.54%) against the Step 9
+`Exhaustive` reference — real and substantial (comfortably past the project's 3%-BD-rate
+kill criterion, so Step 14 is not a "stop after Gate B" outcome), but *below* the
+predicted 10-20% band and short of the brief's own >= 10% target. Recorded as a genuine
+falsification, not revised after the fact: the prediction reasoned from a video-codec
+analogy (RDO-vs-heuristic-split gaps clustering at 10-20% when only the split decision
+changes) that turned out optimistic for this codec's specific situation. The most likely
+reason, per D37's own analysis: the rate estimator's frozen snapshot is warmed up at a
+*fixed* `t_rms = 8.0` regardless of the run's own λ, so its per-context statistics match
+the eventual λ-chosen partition's leaf-size mix only loosely at the sweep's extremes
+(λ = 50 and λ = 3200 produce leaf-size mixes quite different from the `t_rms = 8.0`
+warm-up partition) — a self-consistent (iterated) warm-up was named as the natural next
+step in the prediction's own reasoning about rate estimation, and remains the most
+promising unexplored lever here too.
+
+### P14.2 — **falsified: the first attempt did not show non-convexity**
+
+`mars_bench::rd_opt::check_convex_and_monotonic` passed cleanly on both images' λ curves
+on the first real measurement, with no sign flip or diminishing-returns violation at
+either sweep extreme. This is a genuine surprise relative to the prediction, which
+reasoned that per-candidate rate estimation independent of true encode-order adaptive
+state was "the most likely place this shows up." The chosen approximation (a frozen,
+read-only snapshot, §D37) sidesteps the specific failure mode the prediction worried
+about (an inconsistently-updated *mutable* model producing incoherent per-candidate
+prices) by never mutating the model *during* the search at all — every candidate at every
+λ is priced against the exact same fixed reference, which apparently preserves enough
+internal consistency for the resulting curve to stay convex even though the snapshot
+itself is a coarse approximation of the true adaptive cost (per P14.1's own shortfall).
+Recorded as a real, useful data point: freezing the model traded some BD-rate accuracy
+for convexity robustness, which on this evidence looks like a good trade for a first cut.
+
+### P14.3 — **confirmed: no degenerate collapse, but with a caveat found during testing**
+
+At a moderate λ on a real mixed-partition test image, the RD walk produces a genuine mix
+of leaf sizes rather than collapsing to all-leaf or all-split (`encode::tests::
+moderate_lambda_produces_a_real_mixed_partition_not_a_degenerate_one`) — no sign-error or
+unit-mismatch symptom. The caveat, found while writing that very test and worth recording
+per A7: on a *spatially uniform* synthetic image (`textured_image`, whose block-periodic
+texture makes every same-size block statistically near-identical), the RD walk's leaf-size
+choice flips in lockstep across the *entire* image as λ crosses a threshold, with no
+intermediate mix ever appearing at any λ tried — not a bug (every block genuinely faces
+the same local trade-off at once, so a uniform response is the correct answer for that
+specific image), but a reminder that "mixed partition" as a sanity check needs an image
+with genuine *spatial* heterogeneity (`half_flat_half_noisy_image`) to be a meaningful
+test at all; a spatially uniform fixture can pass or fail the same check for reasons
+unrelated to whether the RD logic itself is correct.
+
+### Known gap — same one named before any code ran, still open
+
+`μT` (decode-cost term) remains unimplemented, as scoped. The λ sweep ran on
+`kodim01`/`kodim02` only, not the full 24-image `standard/` corpus, and at 4 λ points
+(§M3's minimum) rather than a finer sweep — pure session time budget (bottom-up RD search
+costs ~6.2 billion evals per encode regardless of λ, since it visits every quadtree node
+down to `min_size` unconditionally; one encode takes on the order of a minute). A
+self-consistent (λ-adaptive, iterated) rate-estimation warm-up, the full corpus, and a
+finer λ sweep are the concrete next steps to close the gap to the brief's 10% target,
+per D37.

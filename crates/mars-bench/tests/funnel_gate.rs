@@ -77,6 +77,7 @@ fn never_split_params(cfg: &OracleConfig) -> EncodeParams {
         max_alfa: cfg.max_alfa,
         t_rms: 1e9,
         zero_threshold: 0,
+        lambda: None,
     }
 }
 

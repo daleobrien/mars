@@ -22,6 +22,7 @@ fn params() -> EncodeParams {
         max_alfa: 1.0,
         t_rms: 8.0,
         zero_threshold: 0,
+        lambda: None,
     }
 }
 

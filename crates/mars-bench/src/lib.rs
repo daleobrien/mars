@@ -22,6 +22,7 @@ pub mod pchip;
 pub mod provenance;
 pub mod recall;
 pub mod report;
+pub mod rd_opt;
 pub mod rust_encoder;
 pub mod simd_bench;
 pub mod store;

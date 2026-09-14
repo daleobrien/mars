@@ -673,6 +673,7 @@ mod tests {
             max_alfa: 1.0,
             t_rms: 8.0,
             zero_threshold: 0,
+            lambda: None,
         };
 
         for size in [4u32, 8, 16] {

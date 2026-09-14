@@ -226,6 +226,7 @@ const BASE: EncodeParams = EncodeParams {
     max_alfa: 1.0,
     t_rms: 0.0, // unused: this test calls search_block directly, not the walk
     zero_threshold: 0,
+    lambda: None,
 };
 
 /// The differential test's exact scope: full exhaustive search is `size^2` work per

@@ -49,6 +49,7 @@ const BASE: EncodeParams = EncodeParams {
     max_alfa: 1.0,
     t_rms: 0.0, // overwritten per rate
     zero_threshold: 0,
+    lambda: None,
 };
 const REFERENCE_METHOD: &str = "fisher";
 

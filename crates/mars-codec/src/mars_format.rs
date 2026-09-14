@@ -36,14 +36,18 @@ const HEADER_LEN: usize = 20;
 const SECTION_TABLE_ENTRY_LEN: usize = 5;
 const SECTION_TREE: u8 = 1;
 
-const FIELD_SPLIT: u8 = 0;
-const FIELD_MODE: u8 = 1;
-const FIELD_QALFA: u8 = 2;
-const FIELD_QBETA: u8 = 3;
-const FIELD_QBETA_DC: u8 = 4;
-const FIELD_ISOMETRY: u8 = 5;
-const FIELD_DOM_ROW: u8 = 6;
-const FIELD_DOM_COL: u8 = 7;
+// `pub(crate)` (Step 14): the rate estimator (`crate::rate`) prices split-flag and leaf
+// events against these exact context keys, so its cost estimate is keyed identically to
+// what the real entropy coder charges -- see that module's doc for why a constant-bits
+// approximation is exactly the bug this step exists to avoid.
+pub(crate) const FIELD_SPLIT: u8 = 0;
+pub(crate) const FIELD_MODE: u8 = 1;
+pub(crate) const FIELD_QALFA: u8 = 2;
+pub(crate) const FIELD_QBETA: u8 = 3;
+pub(crate) const FIELD_QBETA_DC: u8 = 4;
+pub(crate) const FIELD_ISOMETRY: u8 = 5;
+pub(crate) const FIELD_DOM_ROW: u8 = 6;
+pub(crate) const FIELD_DOM_COL: u8 = 7;
 
 /// `bits_alfa`/`bits_beta` are stored as a whole byte (unlike Mars 1's packed 4-bit
 /// fields) but are still bounded well short of 32, so that `1 << bits` and the zigzag
@@ -173,9 +177,7 @@ pub fn write(hdr: &Header, leaves: &[Leaf]) -> Result<Vec<u8>, MarsFormatError> 
         }
     }
 
-    let mut events = Vec::new();
-    let mut pred = Predictor::default();
-    walk_write(hdr, 0, 0, hdr.virtual_size(), &by_pos, &mut pred, &mut events)?;
+    let events = build_events(hdr, &by_pos)?;
     let tree = mars_entropy::encode(&events);
 
     let mut out = Vec::with_capacity(HEADER_LEN + SECTION_TABLE_ENTRY_LEN + tree.len());
@@ -283,6 +285,55 @@ pub fn read(data: &[u8]) -> Result<(Header, Vec<Leaf>), MarsFormatError> {
 struct Predictor {
     prev_row_units: i64,
     prev_col_units: i64,
+}
+
+/// The forward pass shared by [`write`] and, indirectly, Step 14's rate-estimation
+/// warm-up (`crate::rate`): walk the tree once in canonical order and record every event
+/// [`mars_entropy::encode`] will need, without touching the entropy coder itself.
+fn build_events(
+    hdr: &Header,
+    by_pos: &HashMap<(u32, u32, u32), &Leaf>,
+) -> Result<Vec<Event>, MarsFormatError> {
+    let mut events = Vec::new();
+    let mut pred = Predictor::default();
+    walk_write(hdr, 0, 0, hdr.virtual_size(), by_pos, &mut pred, &mut events)?;
+    Ok(events)
+}
+
+/// `pub(crate)`: the same event stream [`write`] would encode for `(hdr, leaves)`, built
+/// from a plain leaf slice rather than the caller's own `by_pos` map. Step 14's rate
+/// estimator uses this to turn a representative (not necessarily RD-optimal) partition
+/// into the real, observed per-context symbol frequencies its "warm-up" snapshot is built
+/// from -- see `crate::rate`'s module doc for why a snapshot beats a constant-bits guess.
+pub(crate) fn events_for_leaves(hdr: &Header, leaves: &[Leaf]) -> Result<Vec<Event>, MarsFormatError> {
+    let mut by_pos = HashMap::with_capacity(leaves.len());
+    for leaf in leaves {
+        if by_pos
+            .insert((leaf.row, leaf.col, leaf.size), leaf)
+            .is_some()
+        {
+            return Err(MarsFormatError::DuplicateLeaf {
+                row: leaf.row,
+                col: leaf.col,
+                size: leaf.size,
+            });
+        }
+    }
+    build_events(hdr, &by_pos)
+}
+
+/// `pub(crate)`: the events one leaf alone would contribute, keyed by `size_class`, with a
+/// *fresh* domain-position predictor (`Predictor::default()`) rather than the real
+/// whole-image sequential one. Used only by Step 14's rate estimator, which prices leaf
+/// candidates independently and out of final traversal order during the bottom-up search
+/// (the true predecessor leaf is not yet known at decision time) -- see `crate::rate`'s
+/// module doc for this specific, documented approximation and why it is confined to the
+/// two domain-position fields.
+pub(crate) fn leaf_events(hdr: &Header, leaf: &Leaf, size_class: u32) -> Vec<Event> {
+    let mut events = Vec::new();
+    let mut pred = Predictor::default();
+    emit_leaf(hdr, leaf, size_class, &mut pred, &mut events);
+    events
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -507,6 +558,7 @@ mod tests {
             max_alfa: 1.0,
             t_rms: 8.0,
             zero_threshold: 0,
+            lambda: None,
         }
     }
 
