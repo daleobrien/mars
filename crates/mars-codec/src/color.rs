@@ -480,6 +480,53 @@ pub fn decode_color_image_progression(
     }
 }
 
+/// Renders the quadtree partition as a standalone black-on-white image — the debug view
+/// reference Mars 1's `encmars -Q` writes to `quadtree.pgm` (`mars_enc.c`: white canvas,
+/// black lines at every split boundary), reconstructed here from the leaves `decmars`
+/// already parses out of the luma (or grayscale) stream. Native bitstream resolution,
+/// independent of any `--zoom`; chroma streams share the same partition shape up to
+/// subsampling and are not drawn separately.
+pub fn quadtree_image(data: &[u8]) -> Result<Image, ColorFormatError> {
+    let (_mode, streams) = read_container(data)?;
+    let (hdr, leaves) = mars_format::read(&streams[0])?;
+    Ok(Image::gray(quadtree_plane(&hdr, &leaves)))
+}
+
+fn quadtree_plane(hdr: &crate::ifs::Header, leaves: &[crate::ifs::Leaf]) -> Plane {
+    let (width, height) = (hdr.width as usize, hdr.height as usize);
+    let mut pixels = vec![255u8; width * height];
+    for leaf in leaves {
+        let (row, col, size) = (leaf.row as usize, leaf.col as usize, leaf.size as usize);
+        for dx in 0..size {
+            let x = col + dx;
+            if x >= width {
+                continue;
+            }
+            if row < height {
+                pixels[row * width + x] = 0;
+            }
+            let bottom = row + size - 1;
+            if bottom < height {
+                pixels[bottom * width + x] = 0;
+            }
+        }
+        for dy in 0..size {
+            let y = row + dy;
+            if y >= height {
+                continue;
+            }
+            if col < width {
+                pixels[y * width + col] = 0;
+            }
+            let right = col + size - 1;
+            if right < width {
+                pixels[y * width + right] = 0;
+            }
+        }
+    }
+    Plane::from_vec(width, height, pixels)
+}
+
 const COLOR_HEADER_LEN: usize = 4 /* magic */ + 1 /* version */ + 1 /* mode */ + 1 /* section_count */;
 
 fn write_container(mode: u8, streams: &[Vec<u8>]) -> Vec<u8> {

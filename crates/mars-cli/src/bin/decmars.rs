@@ -62,6 +62,14 @@ struct Cli {
     /// first cut -- refused rather than silently ignored.
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=4))]
     layer: Option<u8>,
+
+    /// Also write a quadtree debug image: white background, black lines at every
+    /// range-block boundary -- mirrors reference Mars 1's `encmars -Q` (`quadtree.pgm`).
+    /// Drawn from the leaves this decode already parsed, at native bitstream resolution
+    /// (independent of `--zoom`). Extension picks the format, same as `output`. Not
+    /// supported for a progressive `.mars` input.
+    #[arg(long)]
+    debug_rects: Option<PathBuf>,
 }
 
 fn image_writer(ext: &str) -> Result<fn(&Path, &Image) -> Result<(), ImageError>> {
@@ -86,6 +94,12 @@ fn main() -> Result<()> {
     let write = image_writer(&ext)?;
 
     if mars_codec::progressive::is_progressive(&bytes) {
+        if cli.debug_rects.is_some() {
+            bail!(
+                "{}: --debug-rects is not supported for a progressive stream yet",
+                cli.input.display()
+            );
+        }
         return decode_progressive(&cli, &bytes, &write);
     }
     if cli.layer.is_some() {
