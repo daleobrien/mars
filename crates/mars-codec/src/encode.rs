@@ -16,10 +16,10 @@
 use mars_core::Plane;
 
 use crate::ifs::Leaf;
-use crate::mars_format::Header;
-use crate::quant::ResidualQstep;
 use crate::isometry;
-use crate::mars_format::{leaf_events, FIELD_SPLIT};
+use crate::mars_format::Header;
+use crate::mars_format::{FIELD_SPLIT, leaf_events};
+use crate::quant::ResidualQstep;
 use crate::rate::RateModels;
 
 /// What the encoder needs beyond the header fields `docs/mars1-format.md` already names.
@@ -77,8 +77,11 @@ pub struct EncodeOptions {
 
 impl Default for EncodeOptions {
     fn default() -> Self {
-        Self { allowed_modes: [true; 4], adaptive_density: false,
-            residual_quantisation: ResidualQuantisation::default() }
+        Self {
+            allowed_modes: [true; 4],
+            adaptive_density: false,
+            residual_quantisation: ResidualQuantisation::default(),
+        }
     }
 }
 
@@ -300,7 +303,6 @@ fn adaptive_shift(base_shift: u32, rms: f64) -> u32 {
         base_shift
     }
 }
-
 
 /// Standard JPEG-style dead-zone width (half the step) — mode 3's coefficient quantiser
 /// deliberately biases small values to exactly zero rather than +-1 (see `crate::quant`'s
@@ -715,9 +717,15 @@ pub fn encode_image_rd_with_modes_and_density(
     allowed_modes: [bool; 4],
     adaptive_density: bool,
 ) -> (Header, Vec<Leaf>, u64, ModeStats) {
-    encode_image_with_options(image, params, &EncodeOptions {
-        allowed_modes, adaptive_density, ..EncodeOptions::default()
-    })
+    encode_image_with_options(
+        image,
+        params,
+        &EncodeOptions {
+            allowed_modes,
+            adaptive_density,
+            ..EncodeOptions::default()
+        },
+    )
 }
 
 /// Encode with explicit diagnostic controls and return the chosen step in the header.
@@ -730,24 +738,32 @@ pub fn encode_image_with_options(
     options: &EncodeOptions,
 ) -> (Header, Vec<Leaf>, u64, ModeStats) {
     if let Some(lambda) = params.lambda {
-        assert!(lambda.is_finite() && lambda >= 0.0, "lambda must be finite and nonnegative");
+        assert!(
+            lambda.is_finite() && lambda >= 0.0,
+            "lambda must be finite and nonnegative"
+        );
     }
     let residual_qstep = match options.residual_quantisation {
-        ResidualQuantisation::LambdaAdaptive => params.lambda.map_or(ResidualQstep::LEGACY, ResidualQstep::from_lambda),
+        ResidualQuantisation::LambdaAdaptive => params
+            .lambda
+            .map_or(ResidualQstep::LEGACY, ResidualQstep::from_lambda),
         ResidualQuantisation::Fixed(step) => step,
     };
     let allowed_modes = options.allowed_modes;
     let adaptive_density = options.adaptive_density;
-    let hdr = Header { residual_qstep, geometry: crate::ifs::Header {
-        bits_alfa: params.bits_alfa,
-        bits_beta: params.bits_beta,
-        min_size: params.min_size,
-        max_size: params.max_size,
-        shift: params.shift,
-        width: image.width() as u32,
-        height: image.height() as u32,
-        int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
-    }};
+    let hdr = Header {
+        residual_qstep,
+        geometry: crate::ifs::Header {
+            bits_alfa: params.bits_alfa,
+            bits_beta: params.bits_beta,
+            min_size: params.min_size,
+            max_size: params.max_size,
+            shift: params.shift,
+            width: image.width() as u32,
+            height: image.height() as u32,
+            int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
+        },
+    };
     let contracted = Contracted::build(image);
 
     if let Some(lambda) = params.lambda {
@@ -1318,6 +1334,7 @@ fn residual_for_candidate(
     }
 
     let mut resid = vec![0.0f64; size * size];
+    let mut prediction = vec![0.0f64; size * size];
     for u in 0..size {
         for v in 0..size {
             let dr = c.dom_row as usize + 2 * u;
@@ -1329,7 +1346,11 @@ fn residual_for_candidate(
                 / 4.0;
             let (i, j) = isometry::map(c.isometry, u, v, size);
             let pred = 0.5 + d * alfa + beta;
-            resid[i * size + j] = block[i * size + j] - pred;
+            // The decoder adds residual[u,v] before mapping the domain sample to
+            // range position [i,j]. Transform in domain-local coordinates; storing
+            // at [i,j] would apply the isometry to the residual a second time.
+            prediction[u * size + v] = pred;
+            resid[u * size + v] = block[i * size + j] - pred;
         }
     }
 
@@ -1343,12 +1364,22 @@ fn residual_for_candidate(
         .collect();
     let deq: Vec<f64> = levels
         .iter()
-        .map(|&l| crate::quant::dead_zone_dequantize(l, hdr.residual_qstep.get(), RESIDUAL_DEAD_ZONE))
+        .map(|&l| {
+            crate::quant::dead_zone_dequantize(l, hdr.residual_qstep.get(), RESIDUAL_DEAD_ZONE)
+        })
         .collect();
     let recon_resid = crate::dct::inverse_dct2d(&deq, size);
-    let sse: f64 = (0..size * size)
-        .map(|k| (resid[k] - recon_resid[k]).powi(2))
-        .sum();
+    let mut sse = 0.0;
+    for u in 0..size {
+        for v in 0..size {
+            let k = u * size + v;
+            let (i, j) = isometry::map(c.isometry, u, v, size);
+            // Price the actual output pixel, including the decoder's clamp and
+            // truncation, rather than only the continuous residual quantisation error.
+            let pixel = (prediction[k] + recon_resid[k]).clamp(0.0, 255.0) as u8;
+            sse += (block[i * size + j] - f64::from(pixel)).powi(2);
+        }
+    }
     (levels, sse)
 }
 
@@ -2060,6 +2091,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn residual_mode_distortion_matches_reconstructed_pixels() {
+        let image = textured_image(16, 16);
+        let params = rd_params(2.0);
+        let block: Vec<f64> = (0..4)
+            .flat_map(|i| (0..4).map(move |j| (i, j)))
+            .map(|(i, j)| f64::from(image.as_slice()[(8 + i) * 16 + 8 + j]))
+            .collect();
+        let contracted = Contracted::build(&image);
+        let mut candidate = search_block(&image, &contracted, 8, 8, 4, &params)
+            .0
+            .unwrap();
+        for step in [
+            ResidualQstep::LEGACY,
+            ResidualQstep::from_lambda(2.0),
+            ResidualQstep::new(65535.0).unwrap(),
+        ] {
+            let hdr = Header {
+                residual_qstep: step,
+                geometry: crate::ifs::Header {
+                    bits_alfa: 4,
+                    bits_beta: 7,
+                    min_size: 4,
+                    max_size: 4,
+                    shift: 4,
+                    width: 16,
+                    height: 16,
+                    int_max_alfa: 32,
+                },
+            };
+            for iso in 0..8 {
+                for qbeta in [0, 64, 127] {
+                    candidate.isometry = iso;
+                    candidate.qbeta = qbeta;
+                    let (levels, scored) = residual_for_candidate(
+                        &block,
+                        image.as_slice(),
+                        16,
+                        4,
+                        &candidate,
+                        &params,
+                        &hdr,
+                    );
+                    let leaf = Leaf {
+                        row: 8,
+                        col: 8,
+                        size: 4,
+                        mode: 3,
+                        qalfa: candidate.qalfa,
+                        qbeta,
+                        isometry: iso,
+                        dom_row: candidate.dom_row,
+                        dom_col: candidate.dom_col,
+                        qgx: 0,
+                        qgy: 0,
+                        residual: levels,
+                    };
+                    let decoded = crate::ifs::decode_step(&hdr, &[leaf], image.as_slice());
+                    let actual: f64 = (0..4)
+                        .flat_map(|i| (0..4).map(move |j| (i, j)))
+                        .map(|(i, j)| {
+                            (block[i * 4 + j] - f64::from(decoded[(8 + i) * 16 + 8 + j])).powi(2)
+                        })
+                        .sum();
+                    assert_eq!(
+                        scored, actual,
+                        "isometry={iso}, qbeta={qbeta}, step={step:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// A DCT residual's own round trip (encode-time quantise/dequantise, matching
     /// [`crate::dct`]/[`crate::quant`]'s own unit tests but exercised through
     /// [`residual_for_candidate`]'s actual call shape): coding the *same* prediction as
@@ -2097,21 +2201,28 @@ mod tests {
                 t2: 0,
             },
         };
-        let hdr = Header { residual_qstep: ResidualQstep::LEGACY, geometry: crate::ifs::Header {
-            bits_alfa: 4,
-            bits_beta: 7,
-            min_size: 4,
-            max_size: 16,
-            shift: 4,
-            width: 32,
-            height: 32,
-            int_max_alfa: 32,
-        }};
+        let hdr = Header {
+            residual_qstep: ResidualQstep::LEGACY,
+            geometry: crate::ifs::Header {
+                bits_alfa: 4,
+                bits_beta: 7,
+                min_size: 4,
+                max_size: 16,
+                shift: 4,
+                width: 32,
+                height: 32,
+                int_max_alfa: 32,
+            },
+        };
         let (levels, sse) =
             residual_for_candidate(&block, &px, 32, size, &c, &rd_params(1.0), &hdr);
+        // These synthetic target samples are fractional, unlike real input pixels.
+        // Zero residual coefficients still leave the decoder's truncation error.
+        let pixel = (beta + 0.5).clamp(0.0, 255.0) as u8;
+        let expected_sse: f64 = block.iter().map(|&p| (p - f64::from(pixel)).powi(2)).sum();
         assert!(
-            sse < 1e-6,
-            "an exact prediction should leave ~zero residual SSE, got {sse}"
+            (sse - expected_sse).abs() < 1e-6,
+            "zero residual must still price pixel truncation: {sse} vs {expected_sse}"
         );
         assert!(
             levels.iter().all(|&l| l == 0),
@@ -2157,16 +2268,19 @@ mod tests {
             lambda: Some(200.0),
         };
 
-        let hdr = Header { residual_qstep: ResidualQstep::from_lambda(200.0), geometry: crate::ifs::Header {
-            bits_alfa: params.bits_alfa,
-            bits_beta: params.bits_beta,
-            min_size: params.min_size,
-            max_size: params.max_size,
-            shift: params.shift,
-            width: image.width() as u32,
-            height: image.height() as u32,
-            int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
-        }};
+        let hdr = Header {
+            residual_qstep: ResidualQstep::from_lambda(200.0),
+            geometry: crate::ifs::Header {
+                bits_alfa: params.bits_alfa,
+                bits_beta: params.bits_beta,
+                min_size: params.min_size,
+                max_size: params.max_size,
+                shift: params.shift,
+                width: image.width() as u32,
+                height: image.height() as u32,
+                int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
+            },
+        };
         let contracted = Contracted::build(&image);
         // The exact same snapshot-construction call both mode-mask arms use internally
         // (`encode_image_rd_with_modes`) -- built once, shared explicitly here so there is

@@ -23,6 +23,19 @@ This revision incorporates the residual-quantisation experiment and changed `enc
 
 Do not start with metaheuristics, another learned model, GPU kernels, or rectangular partitions. Mars already has several sophisticated search implementations; a literature speedup against exhaustive search is not sufficient reason to add another one.
 
+## Execution log — implementation started 18 September 2026
+
+The source audit below describes `250af5b`; this log records subsequent implementation steps from `37e5e9c`. Historical benchmark numbers are not reattributed to the corrected encoder.
+
+### Step 1 — residual orientation and distortion (P0.2)
+
+- Reproduced the asymmetric residual regression (isometry 4 failed before correction).
+- Corrected **encoding**, not decoding: DCT residuals are domain-local `[u,v]`, matching the existing decoder. Existing streams retain their decoded semantics; newly encoded mode-3 coefficients and RD decisions may change. No format/version change.
+- Mode-3 distortion now includes decoder-equivalent clipping and truncation, evaluated at the source-domain prediction state. This remains collage distortion, not converged-image distortion.
+- Added an independent inverse-isometry oracle covering all eight orientations, serialization/parsing, two fixed and two adaptive qsteps; added unit coverage comparing scored distortion with reconstructed pixels.
+- Validation: residual orientation (1), qstep integration (6), residual unit tests (5) passed. A broader codec run passed 49 unit tests and two encoder tests, but timed out during the 512×512 parallel-determinism test; no full-suite or corpus performance pass is claimed.
+- Next: serialized measurement, CLI guards, tiny/odd geometry, and file-to-file experiments. Mode-3 orientation is no longer an untested blocker; corrected residual RD benefit still needs new measurements.
+
 ## 2. What Mars already implements
 
 The README now documents the working CLI, but its status table, “no Mars 2 codec” statement, and layout descriptions remain stale. Use source and [the optimisation status](docs/encmars-optimisation-status.md), not that table, to establish the baseline.
@@ -102,7 +115,7 @@ All three named gate helpers still serialize for byte count but decode the origi
 
 | Concern | Evidence at HEAD | Required regression / decision |
 |---|---|---|
-| Residual orientation | `residual_for_candidate` still constructs residuals at mapped range coordinates `[i,j]`; `ifs::decode_leaf` adds `res[u,v]` while writing `[i,j]`. The new hand-built qstep fixture uses isometry 0. | Independent expected reconstruction for nonzero asymmetric residuals, all eight isometries, serialize/parse/decode. A shared-decoder round-trip does not prove orientation correctness. A fix may change old mode-3 decoded pixels; decide compatibility. |
+| Residual orientation | **Resolved in execution step 1:** encoder stores domain-local residuals to match the unchanged decoder; independent all-eight-isometry serialized regression passes. | Preserve old decode semantics. Re-measure new mode-3 streams; their coefficients and scored distortion can change. |
 | Contrast header precision | Fitting still uses `params.max_alfa`; header stores a 1/32-quantized value; decoder uses header value. Residual-step wire rounding is handled, contrast normalization is not. | Test nonrepresentable parameters. Normalize before all fitting/scoring or reject them explicitly. |
 | Contractivity | Actual contrast is `qalfa / 2^bits_alfa * (int_max_alfa / 32)`. Default maximum coefficient is 15/16, but other accepted settings can allow ≥1. | Validate dequantized coefficients for the selected profile; distinguish noncontractive legacy settings. Fixed residuals do not increase the continuous map's Lipschitz constant, but integer iterations still need stopping/cycle diagnostics. |
 | Domain-grid phase | Density's finer-than-header-grid branch is already removed: only base/doubled stride is used. Independently, contracted samples use even-origin 2×2 averages and lookup divides coordinates by two. | Retain the density serialization regression. Test odd stride/origins against direct decoder sampling; use positive even stride in the baseline until phase-aware sampling is validated. |
@@ -146,7 +159,7 @@ Requirements:
 - Validate corpus completeness before expensive work.
 - Do not overwrite historical JSONL or reinterpret its timing as the new protocol.
 
-**Exit P0:** codec round-trip tests pass; defects affecting the selected profile are resolved or excluded explicitly; runner produces reproducible smoke artifacts; missing inputs cause an explicit failure; README status and warm-up documentation are corrected. Existing qstep tests and the incomplete Step22 run satisfy only parts of this gate. Start with modes0/2, fixed8, representable max contrast, and even stride; keep mode3 experiments blocked on the independent residual regression.
+**Exit P0:** codec round-trip tests pass; defects affecting the selected profile are resolved or excluded explicitly; runner produces reproducible smoke artifacts; missing inputs cause an explicit failure; README status and warm-up documentation are corrected. Existing qstep tests and the incomplete Step22 run satisfy only parts of this gate. Start with modes0/2, fixed8, representable max contrast, and even stride; require the independent residual regression (now passing in execution step 1) before mode3 experiments.
 
 ## 4. Phase P1 — one search pipeline for legacy and RD encoding
 
@@ -433,7 +446,7 @@ For each promotion show worst-image behavior. Proposed guardrails: no unexplaine
 | 7 | Sparse model/format/decoder/rate integration | Conditional versioned experimental codec and RD report |
 | 8 | Result store/reporting and docs | Reproducible final leaderboard, limitations, promote/defer decisions |
 
-**Next deliverable:** finish 0a/0b rather than register a new search enum. Existing residual metadata is delivered; neither the O7 performance gate nor P0 as a whole is complete. Re-run the current residual harness only after mode-3 correctness is established, and do not make completing its expensive corpus sweep a prerequisite for the restricted modes0/2 runner smoke.
+**Next deliverable:** finish 0a/0b rather than register a new search enum. Existing residual metadata is delivered; neither the O7 performance gate nor P0 as a whole is complete. Re-run the current residual harness using the corrected mode-3 encoder and passing independent regression, and do not make completing its expensive corpus sweep a prerequisite for the restricted modes0/2 runner smoke.
 
 0a and 0b can be delegated independently only with disjoint file ownership. Random, APCC, and P4 work can proceed in parallel after the shared interface is frozen; one integration owner controls common enums/CLI files. P5 and P6 can proceed independently after P0/P1. Sparse coding follows successful APCC and corrected RD/mode accounting.
 
