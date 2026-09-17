@@ -5,9 +5,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use mars_codec::color::{encode_color_image_with_residual_quantisation, wrap_gray_stream, ColorEncodeParams, Subsampling};
+use mars_codec::color::{
+    ColorEncodeParams, Subsampling, encode_color_image_with_residual_quantisation, wrap_gray_stream,
+};
 use mars_codec::encode::{EncodeOptions, EncodeParams, ResidualQuantisation};
 use mars_core::io::read_image;
 
@@ -78,14 +80,16 @@ struct Cli {
 
     /// Select legacy threshold partitioning: split blocks whose best-fit RMS exceeds
     /// this value. Higher = smaller files/lower quality. Without a threshold or --method,
-    /// the default is RD at lambda=200. With explicit --lambda, this instead sets the
-    /// rate-estimation warm-up threshold. The implicit legacy/warm-up threshold is 8.
+    /// the default is RD at lambda=200. Ignored when --lambda is explicitly supplied;
+    /// RD rate-estimation warm-up always uses a fixed threshold of 8. The implicit
+    /// legacy threshold is also 8.
     #[arg(short = 'r', long)]
     t_rms: Option<f64>,
 
     /// Split threshold for the Cb/Cr planes of a colour image (Step 18: independent
     /// per-plane quality control). Like --t-rms, selects legacy partitioning unless
-    /// --lambda is explicitly supplied. Defaults to the luma threshold (8 if omitted).
+    /// --lambda is explicitly supplied, in which case it is ignored (including during
+    /// the fixed-threshold-8 RD warm-up). Defaults to the luma threshold (8 if omitted).
     /// Chroma very
     /// commonly wants a looser (higher) threshold than luma, but the encoder never picks
     /// that automatically; the caller sets it explicitly.
@@ -101,36 +105,37 @@ struct Cli {
     /// block bottom-up and keeps whichever of "one leaf here" or "the four children" has
     /// the smaller distortion-plus-lambda-times-estimated-bits. This is the RD-optimal
     /// replacement for `--t-rms`/`-r`'s top-down threshold -- an RD curve is a lambda
-    /// sweep, not a t_rms sweep. When given, `--t-rms` is ignored for the split decision
-    /// (it still seeds the internal rate-estimation warm-up pass, unaffected by this
-    /// flag). Larger lambda = more weight on rate = fewer/larger blocks. Defaults to 200
+    /// sweep, not a t_rms sweep. When given, `--t-rms` and `--chroma-t-rms` are ignored;
+    /// the internal rate-estimation warm-up always uses a fixed threshold of 8.
+    /// Larger lambda = more weight on rate = fewer/larger blocks. Defaults to 200
     /// unless --t-rms, --chroma-t-rms or --method selects the legacy path.
     #[arg(long)]
     lambda: Option<f64>,
 
     /// Experimental lambda-derived residual step. Fixed step 8 remains the default:
     /// the initial Kodak measurement regressed. Requires --lambda; stored in the stream
-    /// so decmars needs no matching option. Enable residual mode too, e.g. --modes 0,2,3.
+    /// so decmars needs no matching option. Requires mode 3, e.g. --modes 0,2,3.
     /// Applies to grayscale, colour and progressive.
     #[arg(long, requires = "lambda", conflicts_with = "method")]
     adaptive_residual: bool,
 
-    /// Smallest range-block size.
+    /// Smallest range-block size: a power of two in 1..=128, no larger than --max-size.
     #[arg(long, default_value_t = 4)]
     min_size: u32,
-    /// Largest range-block size.
+    /// Largest range-block size: a power of two in 1..=128.
     #[arg(long, default_value_t = 16)]
     max_size: u32,
-    /// Domain-block downsampling shift.
+    /// Domain-pool stride: even, in 2..=254 (odd-origin contraction is unsupported).
     #[arg(long, default_value_t = 4)]
     shift: u32,
-    /// Bits for the quantised contrast (alfa) coefficient.
+    /// Bits for the quantised contrast (alfa) coefficient: 2..=24.
     #[arg(long, default_value_t = 4)]
     bits_alfa: u32,
-    /// Bits for the quantised brightness (beta) coefficient.
+    /// Bits for the quantised brightness (beta) coefficient: 1..=24.
     #[arg(long, default_value_t = 7)]
     bits_beta: u32,
-    /// Maximum contrast magnitude before quantisation.
+    /// Maximum contrast magnitude: an exact multiple of 1/32 in 1/32..=255/32,
+    /// representable without rounding in the stream header.
     #[arg(long, default_value_t = 1.0)]
     max_alfa: f64,
     /// `-z`: qalfa threshold for the zero-alfa (flat block) override.
@@ -152,17 +157,18 @@ struct Cli {
     /// which also documents why an earlier "denser where RMS is high" branch was removed
     /// (it could corrupt the bitstream; D43's originally-claimed -6.82% BD-rate number is
     /// withdrawn, see D48). Default off, matching every `encmars` invocation before this
-    /// flag existed -- byte-identical output either way when omitted.
+    /// flag existed -- byte-identical output either way when omitted. Requires the RD
+    /// path; rejected with --method, or with legacy thresholds unless --lambda selects RD.
     #[arg(long, default_value_t = false)]
     adaptive_density: bool,
 
     /// Step 15's per-leaf mode mask, a diagnostic/comparison knob: comma-separated mode
     /// numbers to allow, from 0 (flat), 1 (affine), 2 (fractal), 3 (fractal + residual) --
     /// e.g. `--modes 0,1,2` disables mode 3, `--modes 2` forces fractal-only. Only affects
-    /// the RD path (the default); explicit --t-rms without --lambda uses the legacy
-    /// split and ignores the mask. Default: 0,2 (flat and fractal), the better measured
-    /// combination on kodim01/02. Use --modes 0,1,2,3 to enable all four modes.
-    #[arg(long, value_delimiter = ',', default_value = "0,2")]
+    /// the RD path (the default); an explicit mask is rejected on the legacy/--method
+    /// path. Default on RD: 0,2 (flat and fractal), the better measured combination on
+    /// kodim01/02. Use --modes 0,1,2,3 to enable all four modes.
+    #[arg(long, value_delimiter = ',')]
     modes: Vec<u8>,
 
     /// Run `mars-search`'s candidate-restriction search (Step 9's classical speed-ups
@@ -190,7 +196,7 @@ struct Cli {
     /// `rayon::ThreadPoolBuilder` usage exactly, so the two binaries' thread-count
     /// semantics don't silently diverge. Must be set before any parallel work runs
     /// (Rayon lazily builds an unpinned default pool on first use otherwise), so this is
-    /// applied as the very first thing `main` does. Determinism (Step 12/14's own
+    /// applied immediately after option validation. Determinism (Step 12/14's own
     /// discipline): every encode path in this crate is bit-identical across thread
     /// counts by construction, so this flag exists for controlling wall-clock/CPU usage,
     /// never for reproducing a different result.
@@ -218,7 +224,7 @@ struct Cli {
 impl Cli {
     fn effective_lambda(&self) -> Option<f64> {
         // Only an explicitly selected legacy path suppresses the RD default. Keeping
-        // the parsed lambda optional preserves --method conflicts and warm-up overrides.
+        // the parsed lambda optional preserves --method conflicts and threshold precedence.
         self.lambda.or_else(|| {
             (self.t_rms.is_none() && self.chroma_t_rms.is_none() && self.method.is_none())
                 .then_some(200.0)
@@ -228,6 +234,84 @@ impl Cli {
     fn effective_t_rms(&self) -> f64 {
         self.t_rms.unwrap_or(8.0)
     }
+
+    fn effective_modes(&self) -> &[u8] {
+        // An omitted mask must not make ordinary legacy/method invocations fail.
+        if self.modes.is_empty() {
+            &[0, 2]
+        } else {
+            &self.modes
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("--lambda", self.lambda),
+            ("--t-rms", self.t_rms),
+            ("--chroma-t-rms", self.chroma_t_rms),
+        ] {
+            if value.is_some_and(|v| !v.is_finite() || v < 0.0) {
+                bail!("{name} must be finite and nonnegative");
+            }
+        }
+        for (name, size) in [("--min-size", self.min_size), ("--max-size", self.max_size)] {
+            if !size.is_power_of_two() || size > u32::from(u8::MAX) {
+                bail!("{name} must be a power of two in 1..=128 (8-bit geometry field)");
+            }
+        }
+        if self.min_size > self.max_size {
+            bail!("--min-size must not exceed --max-size");
+        }
+        if self.shift == 0 || self.shift > u32::from(u8::MAX) || self.shift % 2 != 0 {
+            bail!("--shift must be even and in 2..=254: odd-origin contraction is unsupported");
+        }
+        // Match mars_format's bounds; alfa=1 also gives the entropy coder an invalid
+        // one-symbol fractal alphabet on the progressive path.
+        if !(2..=24).contains(&self.bits_alfa) {
+            bail!("--bits-alfa must be in 2..=24");
+        }
+        if !(1..=24).contains(&self.bits_beta) {
+            bail!("--bits-beta must be in 1..=24");
+        }
+        // The fitter uses max_alfa directly, whereas the decoder uses int_max_alfa / 32.
+        // Reject lossy header rounding rather than silently fitting a different model.
+        let int_max_alfa = self.max_alfa * 32.0;
+        if !int_max_alfa.is_finite()
+            || !(1.0..=255.0).contains(&int_max_alfa)
+            || int_max_alfa.fract() != 0.0
+        {
+            bail!(
+                "--max-alfa must be finite and exactly representable in the header: a multiple of 1/32 in 1/32..=255/32"
+            );
+        }
+        if self.progressive && self.method.is_some() {
+            bail!("--progressive and --method are mutually exclusive");
+        }
+        if self.method.is_some() && self.lambda.is_some() {
+            bail!(
+                "--method and --lambda are mutually exclusive: methods only support legacy threshold partitioning"
+            );
+        }
+        if self.modes.iter().any(|&mode| mode > 3) {
+            bail!("--modes must contain only mode numbers 0-3");
+        }
+        if self.effective_lambda().is_none() {
+            if !self.modes.is_empty() {
+                bail!(
+                    "--modes requires the RD path; unsupported with legacy thresholds or --method"
+                );
+            }
+            if self.adaptive_density {
+                bail!(
+                    "--adaptive-density requires the RD path; unsupported with legacy thresholds or --method"
+                );
+            }
+        }
+        if self.adaptive_residual && !self.effective_modes().contains(&3) {
+            bail!("--adaptive-residual requires mode 3 in --modes (for example --modes 0,2,3)");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -235,8 +319,12 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Cli {
-        Cli::try_parse_from(["encmars", "input.png", "output.mars"].into_iter().chain(args.iter().copied()))
-            .expect("valid arguments")
+        Cli::try_parse_from(
+            ["encmars", "input.png", "output.mars"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )
+        .expect("valid arguments")
     }
 
     #[test]
@@ -244,24 +332,50 @@ mod tests {
         let cli = parse(&[]);
         assert_eq!(cli.effective_lambda(), Some(200.0));
         assert_eq!(cli.effective_t_rms(), 8.0);
-        assert_eq!(cli.modes, [0, 2]);
+        assert!(cli.modes.is_empty());
+        assert_eq!(cli.effective_modes(), [0, 2]);
         assert!(matches!(cli.subsampling, SubsamplingArg::Yuv444));
         assert!(!cli.adaptive_density && !cli.adaptive_residual && !cli.progressive);
     }
 
     #[test]
     fn explicit_thresholds_and_methods_keep_the_legacy_path() {
-        for args in [vec!["--t-rms", "8"], vec!["-r", "4"],
-            vec!["--chroma-t-rms", "16"], vec!["--method", "fisher"]] {
+        for args in [
+            vec!["--t-rms", "8"],
+            vec!["-r", "4"],
+            vec!["--chroma-t-rms", "16"],
+            vec!["--method", "fisher"],
+        ] {
             assert_eq!(parse(&args).effective_lambda(), None);
         }
         assert_eq!(parse(&["-r", "4"]).effective_t_rms(), 4.0);
     }
 
     #[test]
+    fn format_boundaries_are_not_replaced_with_arbitrary_limits() {
+        for args in [
+            vec!["--bits-alfa", "24", "--bits-beta", "24"],
+            vec!["--min-size", "1", "--max-size", "128", "--shift", "254"],
+            vec!["--max-alfa", "0.03125"],
+            vec!["--max-alfa", "7.96875"],
+            vec!["--t-rms", "1e300", "--zero-threshold", "4294967295"],
+        ] {
+            parse(&args).validate().expect("supported parameter bounds");
+        }
+    }
+
+    #[test]
     fn explicit_lambda_overrides_threshold_and_modes_replace_defaults() {
-        let cli = parse(&["--lambda", "50", "--t-rms", "0", "--chroma-t-rms", "16",
-            "--modes", "0,1,2,3"]);
+        let cli = parse(&[
+            "--lambda",
+            "50",
+            "--t-rms",
+            "0",
+            "--chroma-t-rms",
+            "16",
+            "--modes",
+            "0,1,2,3",
+        ]);
         assert_eq!(cli.effective_lambda(), Some(50.0));
         assert_eq!(cli.effective_t_rms(), 0.0);
         assert_eq!(cli.modes, [0, 1, 2, 3]);
@@ -273,9 +387,7 @@ mod tests {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if cli.lambda.is_some_and(|value| !value.is_finite() || value < 0.0) {
-        bail!("--lambda must be finite and nonnegative");
-    }
+    cli.validate()?;
 
     if let Some(threads) = cli.threads {
         rayon::ThreadPoolBuilder::new()
@@ -299,22 +411,7 @@ fn main() -> Result<()> {
         );
     }
 
-    if cli.progressive && cli.method.is_some() {
-        bail!(
-            "--progressive and --method are mutually exclusive: --progressive serialises \
-             the same RD/legacy partition every other encmars invocation produces, not a \
-             mars-search-restricted one -- see --help for --progressive"
-        );
-    }
-
     if let Some(method_arg) = cli.method {
-        if cli.lambda.is_some() {
-            bail!(
-                "--method and --lambda are mutually exclusive: mars-search's methods only \
-                 run mars-codec's legacy top-down --t-rms partition, which has no RD \
-                 pruning of its own -- see --help for --method"
-            );
-        }
         if image.planes().len() != 1 {
             bail!(
                 "{}: --method only supports grayscale input for now (got {} planes) -- \
@@ -350,16 +447,9 @@ fn main() -> Result<()> {
         t_rms: cli.chroma_t_rms.unwrap_or(cli.effective_t_rms()),
         ..base
     };
-    let mut allowed_modes = [true; 4];
-    if !cli.modes.is_empty() {
-        allowed_modes = [false; 4];
-        for &m in &cli.modes {
-            let idx = usize::from(m);
-            match allowed_modes.get_mut(idx) {
-                Some(slot) => *slot = true,
-                None => bail!("--modes: {m} is not a valid mode (expected 0-3)"),
-            }
-        }
+    let mut allowed_modes = [false; 4];
+    for &mode in cli.effective_modes() {
+        allowed_modes[usize::from(mode)] = true;
     }
 
     if cli.progressive {
@@ -375,9 +465,8 @@ fn main() -> Result<()> {
     };
 
     let (width, height) = (image.width(), image.height());
-    let (bytes, stats) = encode_color_image_with_residual_quantisation(
-        &image, &params, residual_policy(&cli),
-    );
+    let (bytes, stats) =
+        encode_color_image_with_residual_quantisation(&image, &params, residual_policy(&cli));
 
     std::fs::write(&cli.output, &bytes)
         .with_context(|| format!("writing {}", cli.output.display()))?;

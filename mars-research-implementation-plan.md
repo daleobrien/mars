@@ -43,9 +43,16 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - Validation: three integration tests and seven targeted benchmark unit tests passed.
 - This repairs the in-memory inner-stream bypass, not whole-container file-to-file measurement. Historical results remain historical; do not silently replace them.
 
+### Step 3 — explicit encoder CLI capabilities (P0)
+
+- `encmars` validates finite nonnegative lambda/RMS, legal power-of-two block sizes, even representable stride, coefficient bit widths, and header-representable contrast before image I/O.
+- Explicit mode masks and adaptive density are rejected on legacy/method paths; adaptive residual requires mode 3. Defaults and explicit lambda overriding thresholds are preserved.
+- Corrected CLI help and README: RD warm-up is fixed at RMS 8. README now describes the implemented codec rather than an empty crate.
+- Validation: encoder unit tests plus research-options, residual-qstep and classical CLI integration tests passed (17 tests). No corpus performance claim.
+
 ## 2. What Mars already implements
 
-The README now documents the working CLI, but its status table, “no Mars 2 codec” statement, and layout descriptions remain stale. Use source and [the optimisation status](docs/encmars-optimisation-status.md), not that table, to establish the baseline.
+README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.
 
 **Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. The general file-to-file runner, shared production retrieval interface, random/APCC methods, postprocessor, and sparse multi-domain format remain proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
 
@@ -64,14 +71,14 @@ The README now documents the working CLI, but its status table, “no Mars 2 cod
 
 ### Critical integration gap
 
-`mars-search` depends on `mars-codec`, but `mars_search::encode_image` is a separate RMS-threshold encoder. Production `encode.rs::walk` and `walk_rd` still call exhaustive search directly; `build_rate_snapshot` also runs the exhaustive threshold walk and discards its fit count. The CLI rejects `--method` with explicit `--lambda`, color input, or `--progressive`. Some flags, including mode selection outside RD, have no effect.
+`mars-search` depends on `mars-codec`, but `mars_search::encode_image` is a separate RMS-threshold encoder. Production `encode.rs::walk` and `walk_rd` still call exhaustive search directly; `build_rate_snapshot` also runs the exhaustive threshold walk and discards its fit count. The CLI rejects `--method` with explicit `--lambda`, color input, or `--progressive`. Execution step 3 rejects explicit mode selection and density outside RD instead of accepting no-op options.
 
 Therefore, adding APCC to `MethodName` alone would **not** make it available to the main RD encoder.
 
 ### Current defaults and compatibility
 
 - Plain `encmars` now selects RD at lambda 200, modes 0/2, fixed residual step 8, sizes 4–16, stride 4, color 4:4:4, and automatic threads. Density and progressive output remain off. Library/benchmark defaults were not changed to this CLI profile; `EncodeOptions::default()` still allows all four modes.
-- Explicit `--t-rms`, `--chroma-t-rms`, or `--method` selects the legacy path unless explicit lambda overrides the thresholds. **RD warm-up remains hard-coded to RMS 8** in `build_rate_snapshot`; contrary to current CLI help/README wording, user thresholds do not seed that pass. Correct this documentation in P0 rather than silently changing the baseline algorithm.
+- Explicit `--t-rms`, `--chroma-t-rms`, or `--method` selects the legacy path unless explicit lambda overrides the thresholds. **RD warm-up remains hard-coded to RMS 8** in `build_rate_snapshot`; user thresholds do not seed that pass. Execution step 3 corrected the CLI help/README without changing this baseline algorithm.
 - `--adaptive-residual` requires explicit `--lambda` and conflicts with `--method`. It does not enable mode 3: request e.g. `--lambda 200 --modes 0,2,3 --adaptive-residual`. Progressive containers are grayscale-only and incompatible with `--method`; color iteration callbacks are not color progressive-container support.
 - `ResidualQstep` validates [1, 65535] and stores binary32 bits. Quantization, scoring, and reconstruction use the wire-rounded step. The adaptive policy is `clamp(sqrt(6 * lambda / ln(2)), 1, 65535)`; fixed8 remains default. Color planes can carry separate steps. Keep the full `mars_format::Header`/`DecodeHeader` when decoding: passing only `.geometry` loses step metadata and implies legacy step 8.
 - O7 expanded `MARS` headers from 20 to 24 bytes and `MPRG` from 31 to 35 bytes **without changing version byte 0 or adding a legacy-layout fallback**. Old Mars 2 streams require re-encoding with this decoder; `MARC`'s unchanged outer layout does not make its embedded old streams compatible. Pin layout revision and decoder build as well as version byte. Mars 1 `.ifs` syntax is separate and unchanged; it cannot carry affine/residual modes or explicit residual steps.

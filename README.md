@@ -11,16 +11,14 @@ what order*, and *how we know it worked*.
 
 ## Status
 
-| Group | Steps | State |
-|---|---|---|
-| **A — measure before building** | 0 Repo/CI/result store · 1 Metrics engine · 2 Mars 1 baselines · 3 Format spec | **done** |
-| | 4 Anchor codecs | next |
-| B — decoder, encoder, oracle | 5–9 | not started |
-| C — optimisation | 10–14 | not started |
-| D — research | 15–21 | not started |
+Mars 2 implements threshold and rate–distortion quadtree encoding, iterative decoding,
+color, progressive streams, nine search methods, SIMD/GPU infrastructure, and benchmark
+metrics/anchors. Implementation does not imply that every research acceptance gate passed.
 
-No Mars 2 codec code exists yet, and that is the point: Group A's exit condition is that
-everything can be measured *before* anything is built. See §0 of the implementation plan.
+Current work follows [the research implementation plan](mars-research-implementation-plan.md):
+correct residual reconstruction, measure serialized output, validate CLI capabilities, then
+integrate search with the production RD encoder. See its execution log for completed steps
+and [optimisation status](docs/encmars-optimisation-status.md) for historical results and limits.
 
 ## Encode and decode
 
@@ -39,10 +37,13 @@ legacy threshold encoding. Library/benchmark defaults are unchanged.
 - `--subsampling 420`: optionally trade chroma detail for smaller colour files.
 - `--modes 0,1,2,3`: explicitly enable affine and residual modes too.
 - `--t-rms 8`: restore legacy threshold partitioning. `--chroma-t-rms` also selects
-  that path unless `--lambda` is supplied; explicit lambda takes precedence and the
-  thresholds then seed the rate-estimation warm-up.
+  that path unless `--lambda` is supplied; explicit lambda takes precedence and ignores
+  the thresholds. The rate-estimation warm-up uses fixed RMS 8.
 - `--method fisher` (and other search methods): still grayscale/legacy-only;
   cannot be combined with explicit `--lambda`.
+- Explicit `--modes` and `--adaptive-density` require RD, rather than silently doing
+  nothing on the legacy/method path. Numeric options are checked before reading input;
+  domain stride must be even and contrast limits must be representable in the header.
 - Adaptive density, progressive output and experimental adaptive residual quantisation
   remain opt-in. To try the latter, include mode 3:
   `--lambda 200 --modes 0,2,3 --adaptive-residual`.
@@ -66,10 +67,12 @@ marsbench metrics original.png decoded.png --coded stream.mars
 
 ```
 crates/mars-core/     image types, IO, and THE implementation of every quality metric
-crates/mars-codec/    partition/search/fit/encode/decode — empty until Step 5
+crates/mars-codec/    partition/search/fit/encode/decode, color and progressive formats
+crates/mars-search/   candidate retrieval and classical/learned search methods
 crates/mars-bench/    the harness: BD-rate, provenance, append-only result store, reports
-crates/mars-cli/      marsbench (encmars/decmars arrive with the encoder)
+crates/mars-cli/      marsbench, encmars, decmars
 reference/mars1/      the unmodified 1998 C, plus a pinned build wrapper
+Research/            papers and research summaries
 corpus/               manifests; images are fetched and hash-verified, never committed
 results/              append-only JSONL — committed
 docs/                 mars1-format.md, measurement.md, licensing.md, predictions.md, decisions.md
