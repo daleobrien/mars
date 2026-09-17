@@ -10,6 +10,7 @@ use mars_codec::color::{
     decode_color_image_auto, decode_color_image_progression, decode_color_image_zoomed,
     quadtree_image,
 };
+use mars_codec::postprocess::smooth_boundaries;
 use mars_core::image::Image;
 use mars_core::io::{ImageError, write_png, write_pnm};
 
@@ -72,6 +73,12 @@ struct Cli {
     /// supported for a progressive `.mars` input.
     #[arg(long)]
     debug_rects: Option<PathBuf>,
+
+    /// Smooth leaf boundaries after decoding a regular grayscale stream. Strong edges
+    /// are protected; progressive/color containers are refused. Iteration frames stay
+    /// unsmoothed, and only the final output is filtered.
+    #[arg(long)]
+    smooth: bool,
 }
 
 /// A writer function for one output image format, shared by every decode path.
@@ -102,6 +109,11 @@ fn main() -> Result<()> {
     let write = image_writer(&ext)?;
 
     if mars_codec::progressive::is_progressive(&bytes) {
+        if cli.smooth {
+            bail!(
+                "--smooth is not supported for progressive streams; use a regular grayscale container"
+            );
+        }
         if cli.debug_rects.is_some() {
             bail!(
                 "{}: --debug-rects is not supported for a progressive stream yet",
@@ -119,7 +131,11 @@ fn main() -> Result<()> {
         );
     }
 
-    let (image, iterations_used) = if let Some(dir) = &cli.progression {
+    let boundaries = cli
+        .smooth
+        .then(|| smoothing_leaves(&bytes, cli.zoom))
+        .transpose()?;
+    let (mut image, iterations_used) = if let Some(dir) = &cli.progression {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let width = cli.iterations.to_string().len();
         let stable_threshold = cli.auto.then_some(cli.threshold);
@@ -155,6 +171,9 @@ fn main() -> Result<()> {
             .with_context(|| format!("parsing {} as a .mars container", cli.input.display()))?;
         (image, cli.iterations)
     };
+    if let Some(leaves) = boundaries {
+        image = Image::gray(smooth_boundaries(&image.planes()[0], &leaves));
+    }
     let (width, height) = (image.width(), image.height());
 
     if let Some(path) = &cli.debug_rects {
@@ -171,7 +190,7 @@ fn main() -> Result<()> {
     write(&cli.output, &image).with_context(|| format!("writing {}", cli.output.display()))?;
 
     println!(
-        "{} -> {width}x{height} {} ({} iterations{}{}, {} plane(s)){}",
+        "{} -> {width}x{height} {} ({} iterations{}{}, {} plane(s)){}{}",
         cli.input.display(),
         cli.output.display(),
         iterations_used,
@@ -186,8 +205,44 @@ fn main() -> Result<()> {
             .as_ref()
             .map(|d| format!(", {iterations_used} frame(s) in {}", d.display()))
             .unwrap_or_default(),
+        if cli.smooth { ", smoothed" } else { "" },
     );
     Ok(())
+}
+
+// color::quadtree_image uses the same inner-stream parser, but its container reader
+// is private. Keep this deliberately restricted to the known MARC v0 gray envelope;
+// do not infer boundaries from a rendered debug image or accept unknown layouts.
+fn smoothing_leaves(bytes: &[u8], zoom: f64) -> Result<Vec<(usize, usize, usize)>> {
+    if bytes.get(..5) != Some(b"MARC\0") {
+        bail!("--smooth cannot expose leaves: expected a MARC v0 grayscale container");
+    }
+    if matches!(bytes.get(5), Some(1 | 2)) {
+        bail!("--smooth is grayscale only; color containers are not supported");
+    }
+    if bytes.get(5..7) != Some(&[0, 1]) {
+        bail!("--smooth cannot expose leaves: expected one grayscale section");
+    }
+    let length: [u8; 4] = bytes
+        .get(7..11)
+        .context("--smooth: truncated grayscale section length")?
+        .try_into()?;
+    let end = 11usize
+        .checked_add(u32::from_le_bytes(length) as usize)
+        .context("--smooth: grayscale section length overflow")?;
+    let stream = bytes
+        .get(11..end)
+        .context("--smooth: truncated grayscale section")?;
+    if end != bytes.len() {
+        bail!("--smooth cannot expose leaves: unexpected trailing container data");
+    }
+    let (header, leaves) =
+        mars_codec::mars_format::read(stream).context("--smooth: parsing grayscale leaves")?;
+    let (_, leaves) = mars_codec::ifs::zoom_leaves(&header, &leaves, zoom);
+    Ok(leaves
+        .into_iter()
+        .map(|leaf| (leaf.row as usize, leaf.col as usize, leaf.size as usize))
+        .collect())
 }
 
 /// CLI-E's own path: `--layer N` truncates `bytes` to that layer's own end offset
@@ -197,11 +252,7 @@ fn main() -> Result<()> {
 /// of a test harness. `--auto`/`--progression`/`--zoom` have no progressive-stream
 /// equivalent yet -- refused rather than
 /// silently ignored.
-fn decode_progressive(
-    cli: &Cli,
-    bytes: &[u8],
-    write: &ImageWriter,
-) -> Result<()> {
+fn decode_progressive(cli: &Cli, bytes: &[u8], write: &ImageWriter) -> Result<()> {
     if cli.auto || cli.progression.is_some() || cli.zoom != 1.0 {
         bail!(
             "{}: --auto/--progression/--zoom are not supported for a progressive stream yet \
