@@ -6,6 +6,8 @@
 
 This revision incorporates the residual-quantisation experiment and changed `encmars` defaults. It distinguishes implemented infrastructure from uncompleted research gates. No new corpus benchmark was run for this review; focused validation is listed in §3.
 
+**Research sources:** PDFs are now available under `Research/`, with summaries under `Research/summaries/`. The seven phase-relevant summaries were read for this update; paper-specific formulas and reproduction claims still require verification against the linked PDFs. The imported research is not part of the cited HEAD commit. This updated root-level plan is the codebase review; `Research/mars-research-implementation-plan.md` remains the older imported planning copy.
+
 **Objective:** determine whether bounded random search, Pearson/APCC indexing, improved partition optimization, and optional reconstruction enhancements improve Mars's measured rate–quality–time tradeoff enough to maintain them.
 
 **Recommended sequence:**
@@ -183,7 +185,9 @@ For controlled search comparisons initially retain the same exhaustive RD warm-u
 
 ## 5. Phase P2 — bounded seeded random search
 
-Suggested addition: `mars-search/src/random.rs`, configuration/CLI registration, focused search and integration tests.
+Sources: [randomized approach summary](Research/summaries/Fractal_image_compression_a_randomized_a.md) and [PDF](Research/Fractal_image_compression_a_randomized_a.pdf), Ghosh, Mukherjee and Das (2004). The paper uses first-acceptable stopping, fixed 4×4 ranges, one-pixel stride, and empirically calibrated trial caps. The bounded full-sample, even-stride quadtree control below is a deliberate Mars adaptation, not a paper-faithful reproduction. Do not import its published speedup or calibration thresholds as Mars expectations.
+
+Suggested addition: `crates/mars-search/src/random.rs`, configuration/CLI registration, focused search and integration tests.
 
 1. Enumerate legal domain positions deterministically once per block size.
 2. Sample without replacement with a pinned PRNG/algorithm; avoid new dependencies if existing deterministic machinery suffices.
@@ -202,7 +206,7 @@ Tests: reproducibility across threads, unique legal samples, small pools, empty 
 
 ## 6. Phase P3 — Pearson/APCC indexing
 
-Research source: the 2013 APCC paper, “A Novel Fractal Image Compression Scheme With Block Classification and Sorting Based on Pearson's Correlation Coefficient.” The originally cited `summaries/` files are **not in this checkout**; obtain and record the original paper/bibliographic source before implementing paper-specific details. This prerequisite also applies to P4–P7 below; those descriptions are research directions, not verified reproductions.
+Sources: [APCC summary](Research/summaries/A_Novel_Fractal_Image_Compression_Scheme_With_Block_Classification_and_Sorting_Based_on_Pearsons_Correlation_Coefficient.md) and [PDF](Research/A_Novel_Fractal_Image_Compression_Scheme_With_Block_Classification_and_Sorting_Based_on_Pearsons_Correlation_Coefficient.pdf), Wang and Zheng (2013), DOI 10.1109/TIP.2013.2268977. The summary describes class canonicalization, offline-trained reference blocks, and approximately 2k comparisons from R/−R queries. Count both branches and training cost separately; do not equate one paper window with the total Mars fit budget.
 
 Suggested new `crates/mars-search/src/apcc.rs` plus an offline training/export utility under `mars-bench`.
 
@@ -240,7 +244,7 @@ Run these as alternatives before stacking filters; combinations can discard good
 
 ### Binary local features
 
-Research source: the local-feature paper previously referenced as `Enhancing_fractal_image_compression_spee.md`; summary/PDF absent locally (see §6).
+Sources: [local-feature summary](Research/summaries/Enhancing_fractal_image_compression_spee.md) and [PDF](Research/Enhancing_fractal_image_compression_spee.pdf), Jaferzadeh, Moon and Gholami (2016). Its fixed grayscale scale factor and unresolved reported bit-accounting discrepancy differ from Mars's quantized variable-contrast model; use it as retrieval inspiration, not a matched-rate baseline.
 
 - Implement the paper's 12-bit perimeter-versus-central-mean descriptor first for 4×4 ranges and matching contracted domains.
 - Use XOR/popcount as a separately documented implementation choice instead of a 4096² lookup table.
@@ -250,7 +254,7 @@ Research source: the local-feature paper previously referenced as `Enhancing_fra
 
 ### Hierarchical intensity-sum classes
 
-Research source: the hierarchical-classification paper previously referenced as `Fractal_Image_Compression_using_Hierarch.md`; summary/PDF absent locally (see §6).
+Sources: [hierarchical-classification summary](Research/summaries/Fractal_Image_Compression_using_Hierarch.md) and [PDF](Research/Fractal_Image_Compression_using_Hierarch.pdf), Bhattacharya et al. (2015). The timing table's comparator is FISHER24, despite the abstract's BFIC wording; do not interpret its reported speedup as a measured comparison against Mars exhaustive search.
 
 - Implement P-I first: quadrant and subquadrant rank codes, sparse occupied buckets, deterministic tie policy.
 - Do not allocate a dense 24^5 class table per block size.
@@ -261,7 +265,7 @@ Research source: the hierarchical-classification paper previously referenced as 
 
 ## 8. Phase P5 — improve existing rate–distortion optimization
 
-Research source: the optimal hierarchical partition paper previously referenced as `Optimal_hierarchical_partitions_for_frac.md`; summary/PDF absent locally (see §6).
+Sources: [optimal hierarchical partition summary](Research/summaries/Optimal_hierarchical_partitions_for_frac.md) and [PDF](Research/Optimal_hierarchical_partitions_for_frac.pdf), Saupe et al. (1998). Its BFOS result is over prunings of a chosen HV tree under collage error, not globally optimal partitions or decoded distortion; the reported implementation omits isometries.
 
 ### P5a: verify the current objective
 
@@ -293,7 +297,9 @@ Do not call this an exact reproduction of the 1998 HV/BFOS paper. Rectangular HV
 
 ## 9. Phase P6 — adaptive boundary postprocessing
 
-Research source: the adaptive post-processing paper previously referenced as `Adaptive_post_processing_for_fractal_ima.md`; summary/PDF absent locally (see §6). Suggested new `crates/mars-codec/src/postprocess.rs`; explicit `decmars` option and benchmark payload fields.
+Sources: [adaptive post-processing summary](Research/summaries/Adaptive_post_processing_for_fractal_ima.md) and [PDF](Research/Adaptive_post_processing_for_fractal_ima.pdf), Giang and Saupe (year/venue unresolved in the summary). Reported gains combine in-loop smoothing and a final edge-adaptive filter; they are not predictions for the out-of-loop-only first stage below. Verify poorly extracted mathematical constants visually in the PDF.
+
+Suggested new `crates/mars-codec/src/postprocess.rs`; explicit `decmars` option and benchmark payload fields.
 
 1. Start with an out-of-loop edge-aware boundary filter using decoded pixels and actual leaf geometry.
 2. Compare off, a clearly labeled reference-style smoother, and the adaptive filter. Original C `smooth_image` is a useful control, not automatically equivalent Rust behavior.
@@ -307,7 +313,7 @@ Research source: the adaptive post-processing paper previously referenced as `Ad
 
 ## 10. Phase P7 — conditional sparse multi-domain coding
 
-Research source: the fast sparse fractal paper previously referenced as `Fast_sparse_fractal_image_compression.md`; summary/PDF absent locally (see §6). This is a new coding model, not another retrieval switch or the existing DCT residual mode.
+Sources: [fast sparse fractal summary](Research/summaries/Fast_sparse_fractal_image_compression.md) and [PDF](Research/Fast_sparse_fractal_image_compression.pdf), Wang et al. (2017). This is a new coding model, not another retrieval switch or the existing DCT residual mode. The paper's full-candidate rate–quality results and restricted-search timing settings are different experiments; do not combine them into one claimed operating point.
 
 - Start with at most two domain terms: `prediction = b + sum(a_i * transformed_domain_i)`.
 - Reuse APCC retrieval for residual searches; add joint least-squares/OMP fitting with domain–domain cross terms.
