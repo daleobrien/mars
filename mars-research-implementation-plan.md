@@ -95,11 +95,25 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - `marsbench experiment-smoke` accepts optional `--method`/`--budget`/`--seed`, validated against the ten encoder keys; omitted options preserve the original default bytes and report shape. Random requires explicit positive budget; budget/seed without random are rejected with a persisted report.
 - Validation: five harness and three CLI smoke tests passed, including unchanged default argv/bytes, a real random file-to-file case, and invalid-option persistence. Targeted Clippy passed after replacing the pre-existing `decmars::image_writer` type-complexity lint with a `ImageWriter` alias (decoder CLI tests unchanged).
 
+### Step 10 — APCC bucket-indexed retrieval (P3 implementation)
+
+- Added opt-in `encmars --method apcc --budget K`: Fisher-style class canonicalization, per-bucket domains sorted by |Pearson correlation| against a fixed train-free reference, lower-bound binary search with a wrapped bounded neighborhood, isometry composition via the existing mapping table, and refitting through the shared quantized fitter (real moments, 8 evals per inspected domain).
+- Deterministic: documented key formula, ascending-key then `(row,col)` tie-break, no NaN (constant blocks excluded; constant ranges yield no candidates and the codec's DC fallback applies). No exhaustive fallback; full budget is exhaustive **within the matching bucket**, not the whole pool.
+- Validation: six library tests (pinned ordering, ties, nesting, flat/negative-correlation, threads, production threshold/RD/density/mode3/tiny/odd) and five CLI tests (option validation, thread determinism, budget sensitivity, bucket-exhaustive byte identity on a single-domain fixture, density+mode3+adaptive-residual round-trip) passed; targeted clippy clean.
+- Not paper-faithful: no offline-trained reference blocks, no signed-contrast reproduction, no paper speedup claims. P3 scientific exit (Pareto comparison vs best existing deterministic method) remains open.
+
+### Step 11 — out-of-loop boundary smoothing (P6 first cut)
+
+- Added `mars-codec::postprocess::smooth_boundaries(decoded, leaf geometry)`: edge-aware cross-boundary blending with fixed weight `0.5·max(0, 1−g/64)²`; constant images and strong edges preserved exactly, corners deduplicated, borders untouched, deterministic, input immutable.
+- `decmars --smooth` applies it after a regular grayscale decode; progressive/color/unknown containers are refused clearly. Encoded streams are untouched (hash-verified in tests).
+- Synthetic evidence: 8×8 blocking fixture 22.067→22.408 dB; natural ramp unchanged (42.110 dB). Fifteen codec/CLI tests passed; targeted clippy clean.
+- Limitations: grayscale only, out-of-loop only, fixed constants (not the paper's), synthetic evidence only — no corpus BD/PSNR promotion claim yet.
+
 ## 2. What Mars already implements
 
 README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.
 
-**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. A restricted file-to-file smoke and shared production retrieval interface are implemented (steps 6/7); random is implemented as an opt-in provider (step 8); the full experiment runner, APCC, postprocessor and sparse multi-domain format remain proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
+**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. A restricted file-to-file smoke and shared production retrieval interface are implemented (steps 6/7); random (step 8) and APCC (step 10) are opt-in providers; the out-of-loop boundary filter is implemented (step 11). The full experiment runner and sparse multi-domain format remain proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
 
 | Area | Existing implementation | Consequence for this plan |
 |---|---|---|
@@ -107,7 +121,7 @@ README status/layout and warm-up wording were corrected in execution step 3. Use
 | RD partitioning | `encode.rs::walk_rd`, `split_rd`, `best_mode_leaf`; `rate.rs::RateModels` | Bottom-up `D + lambda R` selection already exists. Audit the objective and integrate retrieval first. |
 | Modes | Flat, spatial affine, single-domain fractal, fractal plus DCT residual | Keep mode sets controlled in search experiments. Sparse DCT residuals are not multi-domain fractal coding. |
 | Residual quantisation | `quant.rs::ResidualQstep`, `encode.rs::ResidualQuantisation`; per-stream step propagated through grayscale, color planes, and progressive output | Fixed8 remains default; lambda-adaptive quantisation is implemented but opt-in and not promoted by the incomplete experiment. Preserve metadata through decoding. |
-| Search | `mars-search`: Exhaustive, Fisher, Hurtgen, MassCenter, Saupe, SaupeFisher, McSaupe, Funnel, Learned | Use existing methods as serious challengers, not just historical context. Random is now implemented (step 8); 2013 APCC remains proposed. |
+| Search | `mars-search`: Exhaustive, Fisher, Hurtgen, MassCenter, Saupe, SaupeFisher, McSaupe, Funnel, Learned | Use existing methods as serious challengers, not just historical context. Random (step 8) and APCC (step 10) are now implemented. |
 | Search interface | `CandidateRetriever`, `DomainPool`, `RangeBlock`, `search_block`, `SizedRetrievers` | Good starting point, but a separate encoder currently consumes them. |
 | Acceleration | `mars-simd` integer moments/NEON; `mars-gpu` search; Rayon paths | Preserve existing exact kernels and deterministic threading; profile before more hardware work. |
 | Measurement | `mars-core` metrics; `mars-bench` BD-rate, provenance, JSONL store, oracle/recall, anchors | Reuse these components rather than introduce a second metrics implementation. |
@@ -282,7 +296,7 @@ Tests: reproducibility across threads, unique legal samples, small pools, empty 
 
 Sources: [APCC summary](Research/summaries/A_Novel_Fractal_Image_Compression_Scheme_With_Block_Classification_and_Sorting_Based_on_Pearsons_Correlation_Coefficient.md) and [PDF](Research/A_Novel_Fractal_Image_Compression_Scheme_With_Block_Classification_and_Sorting_Based_on_Pearsons_Correlation_Coefficient.pdf), Wang and Zheng (2013), DOI 10.1109/TIP.2013.2268977. The summary describes class canonicalization, offline-trained reference blocks, and approximately 2k comparisons from R/−R queries. Count both branches and training cost separately; do not equate one paper window with the total Mars fit budget.
 
-Suggested new `crates/mars-search/src/apcc.rs` plus an offline training/export utility under `mars-bench`.
+The train-free APCC provider is implemented in execution step 10 (`crates/mars-search/src/apcc.rs`); offline-trained reference blocks and the signed-contrast reproduction below remain future work.
 
 ### Important limitation: APCC is not Mars's exact objective
 
@@ -373,7 +387,7 @@ Do not call this an exact reproduction of the 1998 HV/BFOS paper. Rectangular HV
 
 Sources: [adaptive post-processing summary](Research/summaries/Adaptive_post_processing_for_fractal_ima.md) and [PDF](Research/Adaptive_post_processing_for_fractal_ima.pdf), Giang and Saupe (year/venue unresolved in the summary). Reported gains combine in-loop smoothing and a final edge-adaptive filter; they are not predictions for the out-of-loop-only first stage below. Verify poorly extracted mathematical constants visually in the PDF.
 
-Suggested new `crates/mars-codec/src/postprocess.rs`; explicit `decmars` option and benchmark payload fields.
+The out-of-loop filter is implemented in execution step 11 (`crates/mars-codec/src/postprocess.rs`, `decmars --smooth`, grayscale regular streams). In-loop smoothing, color/progressive composition, and paper-constant verification remain future work.
 
 1. Start with an out-of-loop edge-aware boundary filter using decoded pixels and actual leaf geometry.
 2. Compare off, a clearly labeled reference-style smoother, and the adaptive filter. Original C `smooth_image` is a useful control, not automatically equivalent Rust behavior.
