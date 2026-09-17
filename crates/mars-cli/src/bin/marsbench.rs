@@ -41,6 +41,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// One file-to-file case (partial P0 smoke only, not a corpus experiment runner).
+    ExperimentSmoke(ExperimentSmokeArgs),
     /// Compute every pinned quality metric for one (original, decoded) pair.
     Metrics(MetricsArgs),
     /// BD-rate and BD-PSNR between two curves given as JSON.
@@ -97,6 +99,63 @@ enum Cmd {
     /// the corpus at the oracle's own configs, reporting evals/transform and recall/regret
     /// against the Step 8 oracle cache in one table.
     ClassicalMethods(ClassicalMethodsArgs),
+}
+
+#[derive(Args)]
+struct ExperimentSmokeArgs {
+    /// Input PNG/PGM/PPM or headerless raw grayscale file.
+    input: PathBuf,
+    /// New artifact directory; must not exist, and its parent must exist.
+    #[arg(long)]
+    out_dir: PathBuf,
+    /// Encoder executable path; defaults to encmars beside this marsbench binary.
+    #[arg(long)]
+    encmars: Option<PathBuf>,
+    /// Decoder executable path; defaults to decmars beside this marsbench binary.
+    #[arg(long)]
+    decmars: Option<PathBuf>,
+    /// Required only for raw input, e.g. 16x16.
+    #[arg(long, value_name = "WxH", value_parser = parse_dims)]
+    raw_dims: Option<(usize, usize)>,
+    /// Initial smoke profile supports only 200.
+    #[arg(long, default_value_t = 200.0)]
+    lambda: f64,
+    /// Initial smoke profile supports only 0,2.
+    #[arg(long, value_delimiter = ',', default_value = "0,2")]
+    modes: Vec<u8>,
+    /// Fixed decoder iterations, not benchmark repetitions.
+    #[arg(long, default_value_t = 10)]
+    iterations: u32,
+    /// Encoder thread flag and RAYON_NUM_THREADS for both codec processes.
+    #[arg(long, default_value_t = 1)]
+    threads: usize,
+    /// Timeout per codec process, including startup and file I/O.
+    #[arg(long, default_value_t = 60)]
+    timeout_secs: u64,
+}
+
+fn experiment_smoke(a: ExperimentSmokeArgs) -> Result<()> {
+    let executable = std::env::current_exe().context("locating sibling codec binaries")?;
+    let sibling =
+        |name: &str| executable.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let options = mars_bench::experiment::SmokeOptions {
+        input: a.input,
+        out_dir: a.out_dir,
+        encmars: a.encmars.unwrap_or_else(|| sibling("encmars")),
+        decmars: a.decmars.unwrap_or_else(|| sibling("decmars")),
+        raw_dims: a.raw_dims,
+        lambda: a.lambda,
+        modes: a.modes,
+        iterations: a.iterations,
+        threads: a.threads,
+        timeout_secs: a.timeout_secs,
+    };
+    let report = mars_bench::experiment::run_smoke(&options)?;
+    println!(
+        "experiment-smoke succeeded (one case; partial P0 only): {}",
+        report.options.out_dir.join("report.json").display()
+    );
+    Ok(())
 }
 
 #[derive(Args)]
@@ -496,6 +555,7 @@ fn read_curve(path: &Path) -> Result<RdCurve> {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
+        Cmd::ExperimentSmoke(a) => experiment_smoke(a),
         Cmd::Metrics(a) => metrics(a),
         Cmd::Bdrate(a) => bdrate(a),
         Cmd::Report(a) => report(a),

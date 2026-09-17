@@ -65,6 +65,13 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - Validation: six decoder CLI tests, three progressive iteration tests, three existing progressive CLI tests and five residual CLI tests passed. Manual Tiny64 progressive encode → decode at 1/10 iterations → file metrics succeeded (75 bytes, 48.7107 dB at 10 iterations; smoke only, not corpus evidence).
 - `cargo test --locked --offline -p mars-cli` timed out at 120 seconds in `cli_a_gate::omitting_adaptive_density_matches_explicit_false_byte_for_byte`, which runs two full-Kodak exhaustive four-mode encodes. It is not a full-suite pass; no assertions or corpus fixture were weakened to bypass it.
 
+### Step 6 — real file-to-file smoke runner (partial P0.3)
+
+- Added `marsbench experiment-smoke`: runs the actual encoder/decoder, writes complete MARC and PNG files, then uses the existing file-based metrics implementation.
+- New artifact directory only; persisted report, command arguments, binary/input/stream/decoded SHA256, process wall times, provenance, stdout/stderr logs and explicit failures/timeouts. Timeout kills/reaps the direct codec process; no arbitrary descendant-process or metrics timeout guarantee.
+- Restricted initial profile: lambda 200, modes0/2, fixed8, native resolution, one case. Not the proposed resumable sweep/repeated-timing runner and not a promotion benchmark.
+- Validation: four harness tests and two CLI integration tests passed (raw/PGM/RGB PNG, missing prerequisites, no overwrite, failed/timed-out cases). Manual Tiny64 smoke completed with report under `target/research-file-smoke-01/` (local generated artifact).
+
 ## 2. What Mars already implements
 
 README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.
@@ -513,6 +520,14 @@ Small existing round-trip (creates output under `target/`; build first):
 ```
 
 The filename is arbitrary; this smoke command uses **existing Fisher**, not the proposed random method. For the existing RD path replace `--method fisher --t-rms 8` with `--lambda 200 --modes 0,2`; do not combine method and lambda before P1. Rebuild before mixing binaries/streams from different header layouts. Tiny64 cannot supply the pinned five-scale MS-SSIM and is not scientific corpus evidence.
+
+A new file-to-file smoke is available (output directory must not already exist; parent must exist):
+
+```sh
+./target/debug/marsbench experiment-smoke fixtures/mars1/tiny64.raw --raw-dims 64x64 --out-dir target/research-smoke --lambda 200 --modes 0,2 --iterations 10 --threads 1 --timeout-secs 30
+```
+
+Build the debug CLI first with `cargo build --locked -p mars-cli`, or use release binaries consistently. The runner defaults to sibling `encmars`/`decmars`; explicit `--encmars`/`--decmars` paths are supported. Inspect `report.json` and logs even on failure. This command is implemented; the general commands below remain proposed.
 
 The existing opt-in residual acceptance sweep is `just gate-22`. It is expensive, is not run by routine tests, and its previous recorded attempt timed out; do not describe it as passed. The three-arm synthetic smoke actually executed in this review is listed in §3. The CLI adaptive example is `encmars input.png output.mars --lambda 200 --modes 0,2,3 --adaptive-residual`; this exercises an experimental policy, not a recommended default.
 
