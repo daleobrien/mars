@@ -1,4 +1,31 @@
-//! The `.mars` container format v0 -- Step 10.
+//! The `.mars` plane container, revised version-0 layout.
+//!
+//! # O7/Step22 wire format
+//!
+//! All multibyte fields are little-endian. The 24-byte header contains:
+//! `MARS` (0..4), version = 0 (4), flags (5), channels (6), bit depth (7), colour
+//! space (8), min/max size (9/10), shift (11), alfa/beta bits (12/13), integer
+//! max alfa (14), width (15..17), height (17..19), section count (19), and an
+//! IEEE-754 binary32 residual qstep (20..24). The header is followed by
+//! `(u8 id, u32 length, payload)` sections. TREE is id 1. Qstep must be finite
+//! and in `[1, 65535]`; invalid values are rejected before entropy decoding.
+//! Every encode includes qstep, even fixed-step/threshold encodes, so
+//! adaptive-vs-fixed diagnostics pay identical header overhead.
+//! This deliberately replaces the old layout without a version bump or fallback:
+//! pre-O7 files must be re-encoded. No entropy vocabulary or dead-zone changes.
+//! Legacy `.ifs` bytes and behavior are unchanged.
+//!
+//! The `MARC` colour wrapper is unchanged: its length-delimited `MARS` planes
+//! independently carry their own qsteps (including chroma lambda).
+//! The revised `MPRG` layout is documented in [`crate::progressive`].
+//!
+//! # API migration
+//!
+//! [`Header`] wraps the unchanged [`crate::ifs::Header`] geometry. Encode and
+//! read return the wrapper; pass it intact to writers/reconstruction. Functions
+//! explicitly taking `&ifs::Header` erase the qstep via deref coercion: migrate
+//! reconstruction helpers to `&impl ifs::DecodeHeader` or `&mars_format::Header`.
+//! Geometry-only search/rate helpers can continue using `&ifs::Header`.
 //!
 //! Deliberately not Mars 1 compatible (`implementation-plan.md` Step 10: "break Mars 1
 //! compatibility deliberately and for stated reasons"). The raw fixed-width `.ifs`
@@ -28,11 +55,42 @@ use std::collections::HashMap;
 
 use mars_entropy::{Decoder as EntropyDecoder, Event};
 
-use crate::ifs::{Header, Leaf};
+use crate::ifs::{Header as GeometryHeader, Leaf};
+use crate::quant::ResidualQstep;
+
+/// Mars reconstruction metadata, kept separate from the legacy `.ifs` geometry.
+/// Dereferences to that geometry for existing search/rate helpers. Pass this whole
+/// header to reconstruction and writers; explicitly stripping it loses the qstep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Header {
+    pub geometry: GeometryHeader,
+    pub residual_qstep: ResidualQstep,
+}
+
+impl std::ops::Deref for Header {
+    type Target = GeometryHeader;
+    fn deref(&self) -> &Self::Target {
+        &self.geometry
+    }
+}
+
+impl From<GeometryHeader> for Header {
+    fn from(geometry: GeometryHeader) -> Self {
+        Self { geometry, residual_qstep: ResidualQstep::LEGACY }
+    }
+}
+
+impl crate::ifs::DecodeHeader for Header {
+    fn geometry(&self) -> &GeometryHeader { &self.geometry }
+    fn residual_qstep(&self) -> ResidualQstep { self.residual_qstep }
+    fn with_dimensions(&self, width: u32, height: u32) -> Self {
+        Self { geometry: GeometryHeader { width, height, ..self.geometry }, ..*self }
+    }
+}
 
 const MAGIC: [u8; 4] = *b"MARS";
 const VERSION: u8 = 0;
-const HEADER_LEN: usize = 20;
+const HEADER_LEN: usize = 24;
 const SECTION_TABLE_ENTRY_LEN: usize = 5;
 const SECTION_TREE: u8 = 1;
 
@@ -70,6 +128,8 @@ const MAX_BITS: u32 = 24;
 pub enum MarsFormatError {
     #[error("not a .mars file: bad magic")]
     BadMagic,
+    #[error("residual qstep must be finite and in [1, 65535]")]
+    InvalidResidualQstep,
     #[error("unsupported .mars version {0}")]
     UnsupportedVersion(u8),
     #[error("header truncated")]
@@ -153,8 +213,10 @@ fn leaf_count_within_bound(hdr: &Header) -> bool {
     (virtual_size / min_size).pow(2) <= MAX_LEAF_POSITIONS
 }
 
-/// Encode `(hdr, leaves)` -- Step 6's own output -- as a `.mars` v0 file.
-pub fn write(hdr: &Header, leaves: &[Leaf]) -> Result<Vec<u8>, MarsFormatError> {
+/// Encode `(hdr, leaves)` in the revised `.mars` v0 layout, including the exact residual step.
+/// A legacy geometry header implies step 8.
+pub fn write(hdr: &impl crate::ifs::DecodeHeader, leaves: &[Leaf]) -> Result<Vec<u8>, MarsFormatError> {
+    let hdr = &Header { geometry: *hdr.geometry(), residual_qstep: hdr.residual_qstep() };
     if !valid_header_fields(
         hdr.width,
         hdr.height,
@@ -207,13 +269,14 @@ pub fn write(hdr: &Header, leaves: &[Leaf]) -> Result<Vec<u8>, MarsFormatError> 
     out.extend_from_slice(&(hdr.width as u16).to_le_bytes());
     out.extend_from_slice(&(hdr.height as u16).to_le_bytes());
     out.push(1); // section_count
+    out.extend_from_slice(&hdr.residual_qstep.to_le_bytes());
     out.push(SECTION_TREE);
     out.extend_from_slice(&(u32::try_from(tree.len()).expect("tree fits in u32") ).to_le_bytes());
     out.extend_from_slice(&tree);
     Ok(out)
 }
 
-/// Decode a `.mars` v0 file back into `(hdr, leaves)`. Rejects any structurally invalid
+/// Decode the revised `.mars` v0 layout into `(hdr, leaves)`. Rejects structurally invalid
 /// input with a [`MarsFormatError`] rather than panicking, allocating unboundedly, or
 /// indexing out of bounds -- this is the function `mars-codec`'s fuzz target drives.
 pub fn read(data: &[u8]) -> Result<(Header, Vec<Leaf>), MarsFormatError> {
@@ -227,6 +290,8 @@ pub fn read(data: &[u8]) -> Result<(Header, Vec<Leaf>), MarsFormatError> {
     if version != VERSION {
         return Err(MarsFormatError::UnsupportedVersion(version));
     }
+    let residual_qstep = ResidualQstep::from_le_bytes(data[20..24].try_into().unwrap())
+        .ok_or(MarsFormatError::InvalidResidualQstep)?;
     let min_size = u32::from(data[9]);
     let max_size = u32::from(data[10]);
     let shift = u32::from(data[11]);
@@ -240,7 +305,7 @@ pub fn read(data: &[u8]) -> Result<(Header, Vec<Leaf>), MarsFormatError> {
     if !valid_header_fields(width, height, shift, bits_alfa, bits_beta, min_size, max_size) {
         return Err(MarsFormatError::DegenerateHeader);
     }
-    let hdr = Header {
+    let hdr = Header { residual_qstep, geometry: GeometryHeader {
         bits_alfa,
         bits_beta,
         min_size,
@@ -249,7 +314,7 @@ pub fn read(data: &[u8]) -> Result<(Header, Vec<Leaf>), MarsFormatError> {
         width,
         height,
         int_max_alfa,
-    };
+    }};
     if !leaf_count_within_bound(&hdr) {
         return Err(MarsFormatError::DegenerateHeader);
     }
@@ -316,7 +381,8 @@ fn build_events(
 /// estimator uses this to turn a representative (not necessarily RD-optimal) partition
 /// into the real, observed per-context symbol frequencies its "warm-up" snapshot is built
 /// from -- see `crate::rate`'s module doc for why a snapshot beats a constant-bits guess.
-pub(crate) fn events_for_leaves(hdr: &Header, leaves: &[Leaf]) -> Result<Vec<Event>, MarsFormatError> {
+pub(crate) fn events_for_leaves(hdr: &GeometryHeader, leaves: &[Leaf]) -> Result<Vec<Event>, MarsFormatError> {
+    let hdr = &Header::from(*hdr);
     let mut by_pos = HashMap::with_capacity(leaves.len());
     for leaf in leaves {
         if by_pos
@@ -756,6 +822,7 @@ mod tests {
         let mut bytes = vec![0u8; HEADER_LEN + SECTION_TABLE_ENTRY_LEN];
         bytes[0..4].copy_from_slice(&MAGIC);
         bytes[4] = VERSION;
+        bytes[20..24].copy_from_slice(&ResidualQstep::LEGACY.to_le_bytes());
         bytes[12] = 0; // bits_alfa = 0, invalid
         bytes[13] = 4; // bits_beta
         bytes[15..17].copy_from_slice(&16u16.to_le_bytes());

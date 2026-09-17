@@ -1,6 +1,6 @@
 # Mars 2 — `encmars` Optimisation Implementation Plan
 
-**Status:** proposed  
+**Status:** in progress — [execution checkpoint and O7 measurement](docs/encmars-optimisation-status.md); full roadmap acceptance remains open
 **Purpose:** implementation order for the Mars 2 encoder after the research already completed in the repository  
 **Companion documents:**  
 - [`implementation-plan.md`](implementation-plan.md) — authoritative implementation steps and gates

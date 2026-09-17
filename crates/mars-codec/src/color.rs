@@ -31,7 +31,7 @@ use mars_core::image::{ColorSpace, Image};
 use mars_core::metrics::{rgb_from_ycbcr, ycbcr};
 use mars_core::Plane;
 
-use crate::encode::{encode_image_rd_with_modes_and_density, EncodeParams};
+use crate::encode::{encode_image_with_options, EncodeOptions, EncodeParams, ResidualQuantisation};
 use crate::ifs::{
     decode_iterative, decode_step, decode_until_stable, max_pixel_delta, zoom_leaves,
 };
@@ -163,26 +163,43 @@ const MODE_RGB_420: u8 = 2;
 /// single-plane container [`encode_color_image`]'s own `Gray` arm produces -- for callers
 /// (CLI-C's `encmars --method`, `mars-search`-driven grayscale-only encodes) that build
 /// the plane stream themselves via a different encoder (`mars_search::encode_image`, not
-/// this module's own `encode_image_rd_with_modes_and_density`) but still need to hand
+/// this module's own `encode_image_with_options`) but still need to hand
 /// `decmars` something it can read. Colour is not supported through this path -- callers
 /// needing colour go through [`encode_color_image`] itself.
 pub fn wrap_gray_stream(plane_bytes: Vec<u8>) -> Vec<u8> {
     write_container(MODE_GRAY, &[plane_bytes])
 }
 
-/// Encode an [`Image`] (gray or RGB) to a colour `.mars` container.
+/// Encode an [`Image`] (gray or RGB) to a colour `.mars` container with fixed residual step 8.
+/// Use [`encode_color_image_with_residual_quantisation`] for explicit experiments.
 ///
 /// For `Gray` input, `params.y` is used and `params.chroma`/`params.subsampling` are
 /// ignored (there is no chroma to encode) — this keeps a single call site working for
 /// both colour spaces rather than forcing every caller to branch.
 pub fn encode_color_image(img: &Image, params: &ColorEncodeParams) -> (Vec<u8>, ColorEncodeStats) {
+    encode_color_image_with_residual_quantisation(img, params, ResidualQuantisation::default())
+}
+
+/// Encode gray or RGB with an explicit residual quantisation policy, without changing
+/// `ColorEncodeParams` literals. `LambdaAdaptive` derives each plane's step from its
+/// own lambda (`params.y` for Y, `params.chroma` for Cb/Cr); `Fixed` uses one step
+/// across all planes. For gray input only `params.y` is used.
+pub fn encode_color_image_with_residual_quantisation(
+    img: &Image,
+    params: &ColorEncodeParams,
+    policy: ResidualQuantisation,
+) -> (Vec<u8>, ColorEncodeStats) {
+    let options = EncodeOptions {
+        allowed_modes: params.allowed_modes,
+        adaptive_density: params.adaptive_density,
+        residual_quantisation: policy,
+    };
     match img.color() {
         ColorSpace::Gray => {
-            let (hdr, leaves, evals, _stats) = encode_image_rd_with_modes_and_density(
+            let (hdr, leaves, evals, _stats) = encode_image_with_options(
                 &img.planes()[0],
                 &params.y,
-                params.allowed_modes,
-                params.adaptive_density,
+                &options,
             );
             let bytes = mars_format::write(&hdr, &leaves)
                 .expect("encode_image always produces a header valid for mars_format::write");
@@ -205,23 +222,20 @@ pub fn encode_color_image(img: &Image, params: &ColorEncodeParams) -> (Vec<u8>, 
                 Subsampling::Yuv420 => (MODE_RGB_420, downsample_box(&cb), downsample_box(&cr)),
             };
 
-            let (y_hdr, y_leaves, y_evals, _) = encode_image_rd_with_modes_and_density(
+            let (y_hdr, y_leaves, y_evals, _) = encode_image_with_options(
                 &y,
                 &params.y,
-                params.allowed_modes,
-                params.adaptive_density,
+                &options,
             );
-            let (cb_hdr, cb_leaves, cb_evals, _) = encode_image_rd_with_modes_and_density(
+            let (cb_hdr, cb_leaves, cb_evals, _) = encode_image_with_options(
                 &cb_enc,
                 &params.chroma,
-                params.allowed_modes,
-                params.adaptive_density,
+                &options,
             );
-            let (cr_hdr, cr_leaves, cr_evals, _) = encode_image_rd_with_modes_and_density(
+            let (cr_hdr, cr_leaves, cr_evals, _) = encode_image_with_options(
                 &cr_enc,
                 &params.chroma,
-                params.allowed_modes,
-                params.adaptive_density,
+                &options,
             );
 
             let y_bytes = mars_format::write(&y_hdr, &y_leaves).expect("valid header");

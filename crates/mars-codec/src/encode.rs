@@ -15,7 +15,9 @@
 
 use mars_core::Plane;
 
-use crate::ifs::{Header, Leaf};
+use crate::ifs::Leaf;
+use crate::mars_format::Header;
+use crate::quant::ResidualQstep;
 use crate::isometry;
 use crate::mars_format::{leaf_events, FIELD_SPLIT};
 use crate::rate::RateModels;
@@ -45,6 +47,39 @@ pub struct EncodeParams {
     /// pruning: search/code the four children first, then keep whichever of "this block
     /// as one leaf" or "the four children as they stand" has the smaller `D + lambda*R`.
     pub lambda: Option<f64>,
+}
+
+/// Residual quantisation policy for an encode, independent of the mode mask.
+/// Defaults to fixed step 8. The user-reported O7 measurement on kodim01 worsened
+/// from +1.88% (fixed) to +3.34% (adaptive); the full run timed out at 19/24.
+/// Adaptive quantisation remains an explicit experiment, without retuning its mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidualQuantisation {
+    /// Experimental lambda-derived step; threshold encoding without lambda uses step 8.
+    LambdaAdaptive,
+    /// Fixed step; `ResidualQstep::LEGACY` (8) is the production default.
+    Fixed(ResidualQstep),
+}
+
+impl Default for ResidualQuantisation {
+    fn default() -> Self {
+        Self::Fixed(ResidualQstep::LEGACY)
+    }
+}
+
+/// Optional encode controls without adding fields to existing `EncodeParams` literals.
+#[derive(Debug, Clone, Copy)]
+pub struct EncodeOptions {
+    pub allowed_modes: [bool; 4],
+    pub adaptive_density: bool,
+    pub residual_quantisation: ResidualQuantisation,
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self { allowed_modes: [true; 4], adaptive_density: false,
+            residual_quantisation: ResidualQuantisation::default() }
+    }
 }
 
 /// The six integer moments of one candidate fit, kept alongside the winning candidate so
@@ -168,17 +203,10 @@ pub fn fit_f32(m: RawMoments, max_alfa: f32, bits_alfa: u32, bits_beta: u32) -> 
 
 // ------------------------------------------------------------------ Step 15: mode constants
 //
-// Modes 1 (affine) and 3 (fractal + residual) need a couple of quantisation parameters
-// that have no header field of their own (`docs/decisions.md`'s Step 15 entry records the
-// scope decision): rather than growing `.mars` v0's fixed header to carry a per-image
-// residual quantisation step (which would also mean threading it through every
-// `mars_format`/`ifs` call site that touches a `Header`), Step 15 fixes these as compile-
-// time constants shared by encoder and decoder alike, the same way `crate::residual`'s own
-// `LEVEL_CLAMP` is fixed. This means residual quantisation is not λ-adaptive this step —
-// a real, documented simplification, not a silent one — but the RD search still decides,
-// per block and per λ, whether paying for a mode-3 residual actually beats every other
-// mode's `J` at this fixed step, which is exactly the brief's "let J report honestly
-// whether residuals earn their bits".
+// Affine gradient quantisation remains fixed. O7/Step22 serialises the residual
+// step in the revised Mars v0 header. Fixed step 8 is the production default;
+// lambda-adaptive quantisation is opt-in. Dead-zone, level vocabulary and the
+// single-pass rate warm-up are deliberately unchanged.
 
 /// Mode 1's gradient fixed-point scale: `qgx`/`qgy` store `round(gradient * SCALE)`, so a
 /// gradient of e.g. 2.0 (steep contrast across even a 16-wide leaf) round-trips to a
@@ -273,12 +301,7 @@ fn adaptive_shift(base_shift: u32, rms: f64) -> u32 {
     }
 }
 
-/// Mode 3's fixed dead-zone quantisation step for DCT coefficients (`crate::quant`). `8.0`
-/// is a mid-range choice on an 8-bit pixel scale: large enough that most AC coefficients of
-/// a well-predicted fractal residual quantise to zero (residual coding should cost little
-/// when the fractal prediction is already good), small enough that a genuinely bad fractal
-/// match still has room to correct itself.
-pub(crate) const RESIDUAL_QSTEP_DEFAULT: f64 = 8.0;
+
 /// Standard JPEG-style dead-zone width (half the step) — mode 3's coefficient quantiser
 /// deliberately biases small values to exactly zero rather than +-1 (see `crate::quant`'s
 /// module doc).
@@ -692,7 +715,30 @@ pub fn encode_image_rd_with_modes_and_density(
     allowed_modes: [bool; 4],
     adaptive_density: bool,
 ) -> (Header, Vec<Leaf>, u64, ModeStats) {
-    let hdr = Header {
+    encode_image_with_options(image, params, &EncodeOptions {
+        allowed_modes, adaptive_density, ..EncodeOptions::default()
+    })
+}
+
+/// Encode with explicit diagnostic controls and return the chosen step in the header.
+///
+/// # Panics
+/// Panics if a supplied lambda is negative or non-finite.
+pub fn encode_image_with_options(
+    image: &Plane,
+    params: &EncodeParams,
+    options: &EncodeOptions,
+) -> (Header, Vec<Leaf>, u64, ModeStats) {
+    if let Some(lambda) = params.lambda {
+        assert!(lambda.is_finite() && lambda >= 0.0, "lambda must be finite and nonnegative");
+    }
+    let residual_qstep = match options.residual_quantisation {
+        ResidualQuantisation::LambdaAdaptive => params.lambda.map_or(ResidualQstep::LEGACY, ResidualQstep::from_lambda),
+        ResidualQuantisation::Fixed(step) => step,
+    };
+    let allowed_modes = options.allowed_modes;
+    let adaptive_density = options.adaptive_density;
+    let hdr = Header { residual_qstep, geometry: crate::ifs::Header {
         bits_alfa: params.bits_alfa,
         bits_beta: params.bits_beta,
         min_size: params.min_size,
@@ -701,7 +747,7 @@ pub fn encode_image_rd_with_modes_and_density(
         width: image.width() as u32,
         height: image.height() as u32,
         int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
-    };
+    }};
     let contracted = Contracted::build(image);
 
     if let Some(lambda) = params.lambda {
@@ -1249,7 +1295,7 @@ fn affine_fit(block: &[f64], size: usize, bits_beta: u32) -> (u32, i32, i32, f64
 
 /// Mode 3's residual: the mode-2 fractal prediction's continuous reconstruction error,
 /// forward-DCT'd, dead-zone quantised (`crate::quant`, at the fixed
-/// [`RESIDUAL_QSTEP_DEFAULT`]/[`RESIDUAL_DEAD_ZONE`]), and inverse-transformed back so the
+/// [`Header::residual_qstep`]/[`RESIDUAL_DEAD_ZONE`]), and inverse-transformed back so the
 /// exact SSE the decoder will actually see can be priced -- the same "price the quantised
 /// reconstruction, not the ideal one" discipline [`affine_fit`] and [`fit_f64`] both
 /// follow. Returns `(levels, sse)`; `levels` are the clamped integer coefficients
@@ -1291,13 +1337,13 @@ fn residual_for_candidate(
     let levels: Vec<i32> = coeffs
         .iter()
         .map(|&x| {
-            crate::quant::dead_zone_quantize(x, RESIDUAL_QSTEP_DEFAULT, RESIDUAL_DEAD_ZONE)
+            crate::quant::dead_zone_quantize(x, hdr.residual_qstep.get(), RESIDUAL_DEAD_ZONE)
                 .clamp(-crate::residual::LEVEL_CLAMP, crate::residual::LEVEL_CLAMP)
         })
         .collect();
     let deq: Vec<f64> = levels
         .iter()
-        .map(|&l| crate::quant::dead_zone_dequantize(l, RESIDUAL_QSTEP_DEFAULT, RESIDUAL_DEAD_ZONE))
+        .map(|&l| crate::quant::dead_zone_dequantize(l, hdr.residual_qstep.get(), RESIDUAL_DEAD_ZONE))
         .collect();
     let recon_resid = crate::dct::inverse_dct2d(&deq, size);
     let sse: f64 = (0..size * size)
@@ -2051,7 +2097,7 @@ mod tests {
                 t2: 0,
             },
         };
-        let hdr = Header {
+        let hdr = Header { residual_qstep: ResidualQstep::LEGACY, geometry: crate::ifs::Header {
             bits_alfa: 4,
             bits_beta: 7,
             min_size: 4,
@@ -2060,7 +2106,7 @@ mod tests {
             width: 32,
             height: 32,
             int_max_alfa: 32,
-        };
+        }};
         let (levels, sse) =
             residual_for_candidate(&block, &px, 32, size, &c, &rd_params(1.0), &hdr);
         assert!(
@@ -2111,7 +2157,7 @@ mod tests {
             lambda: Some(200.0),
         };
 
-        let hdr = Header {
+        let hdr = Header { residual_qstep: ResidualQstep::from_lambda(200.0), geometry: crate::ifs::Header {
             bits_alfa: params.bits_alfa,
             bits_beta: params.bits_beta,
             min_size: params.min_size,
@@ -2120,7 +2166,7 @@ mod tests {
             width: image.width() as u32,
             height: image.height() as u32,
             int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
-        };
+        }};
         let contracted = Contracted::build(&image);
         // The exact same snapshot-construction call both mode-mask arms use internally
         // (`encode_image_rd_with_modes`) -- built once, shared explicitly here so there is

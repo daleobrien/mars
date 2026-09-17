@@ -546,7 +546,7 @@ clean:
 gate-cli-b:
     cargo build --release -p mars-cli
     cargo test -p mars-cli --release --test cli_b_gate -- --nocapture
-    @echo "gate-cli-b: PASS (--modes 0,1,2,3 byte-identical to omitting the flag; --modes 2 forces every leaf to mode 2, verified by parsing the real .mars leaves the CLI wrote, not just its stdout summary; out-of-range mode numbers are rejected)"
+    @echo "gate-cli-b: PASS (plain invocation equals --lambda 200 --modes 0,2; explicit full-mode override remains available; --modes 2 forces mode 2; out-of-range modes rejected)"
 
 # CLI-C (encmars-decmars-cli-plan.md) -- expose mars-search's nine candidate-restriction
 # methods (Step 9's six classical ports plus Exhaustive, and Step 13's Funnel) as
@@ -610,3 +610,9 @@ gate-cli-e:
     cargo test -p mars-codec --release --lib progressive
     cargo test -p mars-cli --release --test cli_e_gate -- --nocapture
     @echo "gate-cli-e: PASS (decmars --layer N is byte-identical to decoding a file truncated to that layer's own end offset, for every N -- P19.1's own property, exercised through the real binaries; --layer on a non-progressive file and --progressive on colour input are both refused)"
+
+# Step 22/O7 -- real-stream, three-arm Kodak sweep; missing corpus is a hard failure.
+# New create-only results/step22-o7-*.jsonl per invocation; never loosen the +1.025% bar.
+gate-22:
+    cargo test -p mars-bench --release --test residual_qstep_gate step22_o7_acceptance -- --ignored --exact --nocapture --test-threads=1
+    @echo "gate-22: PASS (adaptive mean BD-rate <= +1.025% vs modes 0/2; at least half the historical +2.05% regression removed)"

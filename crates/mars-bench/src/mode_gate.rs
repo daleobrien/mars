@@ -1,13 +1,17 @@
 //! Step 15's own comparison tools: a "Step 14 equivalent" curve (modes 0/2 only, via
-//! `mars_codec::encode::encode_image_rd_with_modes`'s mode mask) and a "Step 15" curve
+//! `mars_codec::encode::EncodeOptions`' mode mask) and a "Step 15" curve
 //! (all four modes), both run through the exact same rate-estimation and search machinery
 //! so the only difference between the two curves is which modes `J` was allowed to pick
 //! from -- plus the mode-usage histogram the brief calls the step's real header finding.
+//! Both arms explicitly retain fixed8 residual quantisation after Step 22/O7.
 //!
 //! See `mars_codec::encode::Ctx::allowed_modes`'s doc for why this same-codebase A/B was
 //! chosen over diffing against a separate git revision.
 
-use mars_codec::encode::{encode_image_rd_with_modes, EncodeParams, ModeStats};
+use mars_codec::encode::{
+    encode_image_with_options, EncodeOptions, EncodeParams, ModeStats, ResidualQuantisation,
+};
+use mars_codec::quant::ResidualQstep;
 use mars_codec::ifs::decode_iterative;
 use mars_codec::mars_format;
 use mars_core::metrics::psnr;
@@ -25,9 +29,15 @@ pub const STEP15_MODES: [bool; 4] = [true, true, true, true];
 /// One sample under an explicit mode mask, plus the [`ModeStats`] histogram that encode
 /// produced -- the mode-mask counterpart of `rd_opt::sample`.
 pub fn sample_with_modes(image: &Plane, params: &EncodeParams, allowed_modes: [bool; 4]) -> (RdSample, ModeStats) {
-    let (hdr, leaves, evals, stats) = encode_image_rd_with_modes(image, params, allowed_modes);
+    // Gate 15 measures the historical fixed8 competition, not the new adaptive default.
+    let options = EncodeOptions {
+        allowed_modes,
+        residual_quantisation: ResidualQuantisation::Fixed(ResidualQstep::LEGACY),
+        ..EncodeOptions::default()
+    };
+    let (hdr, leaves, evals, stats) = encode_image_with_options(image, params, &options);
     let bytes = mars_format::write(&hdr, &leaves)
-        .expect("a partition `encode_image_rd_with_modes` produced must always be writable");
+        .expect("a partition `encode_image_with_options` produced must always be writable");
     let decoded = decode_iterative(&hdr, &leaves, 10);
     let psnr_db = psnr(image, &decoded).unwrap_or(f64::INFINITY);
     (

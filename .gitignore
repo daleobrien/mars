@@ -14,3 +14,6 @@
 # of the source image + config, same reasoning as /corpus/images/ above -- not something
 # to commit, and never silently reused if stale (the hash check refuses that).
 /oracle-cache/
+results
+output.mars
+output.png

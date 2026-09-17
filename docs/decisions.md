@@ -3233,3 +3233,61 @@ simply does not exist yet, so there is nothing to gate.
 **Scope note.** `--threads` is the whole of this session's CLI-D deliverable. `--gpu`
 remains open, unattempted, and not tracked as a numbered step of any plan this project
 currently has.
+
+---
+
+## D50 · 2026-09-17 · O7 lambda-adaptive residual experiment does not earn default status
+
+Following the optimisation plan's post-Gate-D exception, implemented per-stream residual
+qstep and the preselected high-rate mapping `sqrt(6λ/ln(2))`, canonicalised to binary32
+in [1,65535]. The user explicitly permits changing the unused product format in place:
+MARS/MPRG have one revised layout, no compatibility fallback. `.ifs` is unchanged.
+
+Prediction, provenance and 19/24 completed measurement rows are preserved in
+`results/step22-o7-1789648127131947000-41238.jsonl`. The 1200-second run timed out;
+the two-image mean is unknown and `gate-22` has NOT passed. On completed kodim01,
+fixed8 versus modes0/2 baseline is +1.880847% BD-rate, adaptive +3.342325%, with
+PSNR integration intervals 21.521209–29.279225 and 21.521209–29.010198 dB respectively.
+The historical +2.05% corpus mean is not substituted for missing new measurements.
+
+A real RGB CLI A/B at lambda200, 420, eight threads confirms the direction:
+fixed8 28106 bytes / 26.512978 dB PSNR-Y; adaptive 28138 bytes / 26.450003 dB.
+A stream-only comparison (new `compare_residual_streams` bench example) finds unchanged
+chroma, luma leaves 7737 -> 7725, eight matched blocks switching mode2 -> mode3,
+four new geometry locations, and fewer nonzero levels in shared residual leaves.
+Swapping fixed8 levels into only those shared residual leaves increases the adaptive
+luma stream from 26533 to 26565 bytes. This is a bit-cost ablation, NOT a valid
+reconstruction comparison. Coefficient coding becomes cheaper but the combined
+partition/mode decisions do not improve RD quality. The existing frozen rate model
+and source-domain distortion approximation remain limitations, not newly solved causes.
+
+Decision: no tuning to force a one-image win. Fixed8 remains production default;
+`encmars --adaptive-residual --lambda N` exposes the tested experimental path explicitly.
+Keep the strict +1.025% mean gate unchanged. Correctness tests pass but do not establish
+compression benefit. Full roadmap and validation status is recorded in
+`docs/encmars-optimisation-status.md`; neither O7 nor O1–O16 is marked complete.
+
+## D51 · 2026-09-18 · CLI defaults use RD lambda200 and modes0/2
+
+User requested the better measured configuration as the default. A plain Rust `encmars`
+invocation now resolves to lambda200 and modes0/2, retaining 4:4:4 colour, fixed8 residual
+quantisation, automatic thread selection and opt-in density/progressive experiments.
+This is a default quality/rate tradeoff supported by the limited D39/D40 comparisons,
+not a universal codec optimum or new full-corpus compression result. The earlier advice
+that 420 halves chroma bits was not established by a matched 444/420 comparison.
+
+Explicit --t-rms (including -r) or --chroma-t-rms selects legacy partitioning;
+explicit --lambda takes precedence, preserving threshold warm-up overrides. --method
+still selects legacy search and still rejects explicit --lambda. --modes replaces the
+0/2 default, so full four-mode competition and residual experiments remain available.
+No library/benchmark default, decoder or format change is part of this switch.
+The density measurement helper explicitly requests all four modes to retain historical
+A/B semantics. Plain invocations will change output and may take longer than before.
+
+CONTRACT-CHANGE: CLI-B's old default/all-four byte-equality assertion is replaced with
+plain/default versus explicit lambda200/modes0/2 byte equality and parsed mode checks.
+The separate full-mode/fractal-only comparison now explicitly requests all four modes;
+no numeric quality threshold is relaxed. Three CLI parser tests cover default resolution,
+legacy selection, zero/explicit lambda precedence and mode replacement. These and CLI-B,
+C, D, E and residual integration tests passed; focused encmars Clippy passed. CLI-A's
+real-image default/off byte comparison also passed; its opt-in density sweep was not run.

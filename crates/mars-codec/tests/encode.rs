@@ -42,7 +42,7 @@ fn flat128_encodes_to_the_section_11_partition() {
     // The writer round-trips: what we wrote parses back to the same tree.
     let bytes = write(&hdr, &leaves).expect("a tiled leaf set must serialise");
     let (hdr2, leaves2) = parse(&bytes).expect("the encoder's own output must be parseable");
-    assert_eq!(hdr2, hdr);
+    assert_eq!(hdr2, hdr.geometry);
     assert_eq!(leaves2, leaves);
 
     // §11: every pixel reconstructs to 129, one grey level above the constant 128 input.
@@ -75,6 +75,6 @@ fn mixed_129x127_reproduces_the_forced_subdivision_geometry() {
 
     let bytes = write(&hdr, &leaves).expect("a tiled leaf set must serialise");
     let (hdr2, leaves2) = parse(&bytes).expect("the encoder's own output must be parseable");
-    assert_eq!(hdr2, hdr);
+    assert_eq!(hdr2, hdr.geometry);
     assert_eq!(leaves2, leaves);
 }

@@ -22,7 +22,32 @@ what order*, and *how we know it worked*.
 No Mars 2 codec code exists yet, and that is the point: Group A's exit condition is that
 everything can be measured *before* anything is built. See §0 of the implementation plan.
 
-## Quick start
+## Encode and decode
+
+```bash
+cargo build --release -p mars-cli
+./target/release/encmars input.png output.mars
+./target/release/decmars output.mars decoded.png
+```
+
+A plain encode uses RD partitioning at `--lambda 200`, modes `0,2` (flat and fractal),
+4:4:4 colour, and automatic thread selection. The mode choice follows the existing
+kodim01/02 comparisons, not a claim of universal optimality. RD can be slower than
+legacy threshold encoding. Library/benchmark defaults are unchanged.
+
+- `--lambda 50`: prioritise quality; `--lambda 800`: prioritise smaller files.
+- `--subsampling 420`: optionally trade chroma detail for smaller colour files.
+- `--modes 0,1,2,3`: explicitly enable affine and residual modes too.
+- `--t-rms 8`: restore legacy threshold partitioning. `--chroma-t-rms` also selects
+  that path unless `--lambda` is supplied; explicit lambda takes precedence and the
+  thresholds then seed the rate-estimation warm-up.
+- `--method fisher` (and other search methods): still grayscale/legacy-only;
+  cannot be combined with explicit `--lambda`.
+- Adaptive density, progressive output and experimental adaptive residual quantisation
+  remain opt-in. To try the latter, include mode 3:
+  `--lambda 200 --modes 0,2,3 --adaptive-residual`.
+
+## Measurement setup
 
 ```bash
 just crossval-setup   # pinned python reference implementations (needs python3.12)
@@ -74,3 +99,14 @@ downstream. The measurement contract is the defence.
 
 GPL-2.0-or-later, following Mars 1. See [docs/licensing.md](docs/licensing.md) — there is a
 real Apache-2.0 interaction, and it is resolved deliberately rather than discovered later.
+
+
+## CLI
+```bash
+
+encmars input.png output.mars --lambda 200 --modes 0,2 --subsampling 420
+
+encmars input.png output.mars --lambda 50       # Higher quality
+encmars input.png output.mars --subsampling 420 # Smaller colour files
+encmars input.png output.mars --t-rms 8         # Legacy encoding
+```

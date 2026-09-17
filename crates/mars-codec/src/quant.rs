@@ -10,6 +10,59 @@
 //! iteration order to depend on), and the round-trip property below is the exact-equality
 //! oracle this module ships instead of a numeric tolerance.
 
+/// A positive, finite binary32 residual step in `[1, 65535]`.
+///
+/// Stored as bits so headers retain exact equality. Encoding, distortion scoring and
+/// reconstruction all use the same rounded value, not the unrounded lambda mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidualQstep(u32);
+
+impl ResidualQstep {
+    /// The pre-O7 fixed step, retained for diagnostic comparisons and `.ifs` metadata.
+    pub const LEGACY: Self = Self(8.0f32.to_bits());
+    /// Minimum step: one intensity unit in the orthonormal DCT domain.
+    pub const MIN: f64 = 1.0;
+    /// Maximum step: the largest unsigned 16-bit value (exact in binary32).
+    pub const MAX: f64 = 65535.0;
+
+    /// Validate and round a diagnostic fixed step to its wire representation.
+    pub fn new(step: f64) -> Option<Self> {
+        if step.is_finite() && (Self::MIN..=Self::MAX).contains(&step) {
+            Some(Self((step as f32).to_bits()))
+        } else {
+            None
+        }
+    }
+
+    /// Closed-form high-rate mapping, chosen before O7/Step22 measurement.
+    ///
+    /// Orthonormal DCT preserves SSE. With per-coefficient `D ≈ q²/12` and
+    /// `R ≈ C - log2(q)` bits, minimising `D + lambda*R` gives
+    /// `q = sqrt(6*lambda/ln(2))`. Clipping, sparse levels and the frozen rate
+    /// estimator violate this approximation; this is not a claim of RD optimality.
+    /// The bounds are representational, not fitted to a corpus. Square-rooting
+    /// lambda first avoids overflow at finite extreme inputs. Nonpositive/NaN
+    /// lambda maps to MIN, positive infinity to MAX; encoders reject invalid lambda.
+    pub fn from_lambda(lambda: f64) -> Self {
+        let step = (lambda.max(0.0).sqrt() * (6.0 / std::f64::consts::LN_2).sqrt())
+            .clamp(Self::MIN, Self::MAX);
+        Self::new(step).expect("bounded finite step")
+    }
+
+    /// Exact wire value promoted to binary64 for quantisation and reconstruction.
+    pub fn get(self) -> f64 {
+        f64::from(f32::from_bits(self.0))
+    }
+
+    pub(crate) fn to_le_bytes(self) -> [u8; 4] {
+        self.0.to_le_bytes()
+    }
+
+    pub(crate) fn from_le_bytes(bytes: [u8; 4]) -> Option<Self> {
+        Self::new(f64::from(f32::from_le_bytes(bytes)))
+    }
+}
+
 /// Quantise `x` (a DCT coefficient) to an integer level with step `step` and dead-zone
 /// fraction `dz_frac` (`0.0` = plain mid-tread uniform quantiser, `>0.0` widens the zero
 /// bin): `level = sign(x) * floor(|x|/step - dz_frac + 1)` when `|x| > dz_frac * step`,

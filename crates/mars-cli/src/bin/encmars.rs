@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
-use mars_codec::color::{encode_color_image, wrap_gray_stream, ColorEncodeParams, Subsampling};
-use mars_codec::encode::EncodeParams;
+use mars_codec::color::{encode_color_image_with_residual_quantisation, wrap_gray_stream, ColorEncodeParams, Subsampling};
+use mars_codec::encode::{EncodeOptions, EncodeParams, ResidualQuantisation};
 use mars_core::io::read_image;
 
 /// `mars-search`'s nine candidate-restriction methods (Step 9's six classical ports plus
@@ -76,16 +76,17 @@ struct Cli {
     /// Output `.mars` bitstream path.
     output: PathBuf,
 
-    /// Split threshold (Mars 1's `-r`) for the luma (or the only, for grayscale) plane: a
-    /// block splits when its best-fit RMS exceeds this. Higher = fewer/larger blocks =
-    /// more compression, lower quality. Superseded by `--lambda` (Step 14) as the
-    /// recommended quality knob; kept for the legacy top-down split rule, used whenever
-    /// `--lambda` is not given.
-    #[arg(short = 'r', long, default_value_t = 8.0)]
-    t_rms: f64,
+    /// Select legacy threshold partitioning: split blocks whose best-fit RMS exceeds
+    /// this value. Higher = smaller files/lower quality. Without a threshold or --method,
+    /// the default is RD at lambda=200. With explicit --lambda, this instead sets the
+    /// rate-estimation warm-up threshold. The implicit legacy/warm-up threshold is 8.
+    #[arg(short = 'r', long)]
+    t_rms: Option<f64>,
 
     /// Split threshold for the Cb/Cr planes of a colour image (Step 18: independent
-    /// per-plane quality control). Defaults to `--t-rms` if not given -- chroma very
+    /// per-plane quality control). Like --t-rms, selects legacy partitioning unless
+    /// --lambda is explicitly supplied. Defaults to the luma threshold (8 if omitted).
+    /// Chroma very
     /// commonly wants a looser (higher) threshold than luma, but the encoder never picks
     /// that automatically; the caller sets it explicitly.
     #[arg(long)]
@@ -102,9 +103,17 @@ struct Cli {
     /// replacement for `--t-rms`/`-r`'s top-down threshold -- an RD curve is a lambda
     /// sweep, not a t_rms sweep. When given, `--t-rms` is ignored for the split decision
     /// (it still seeds the internal rate-estimation warm-up pass, unaffected by this
-    /// flag). Larger lambda = more weight on rate = fewer/larger blocks.
+    /// flag). Larger lambda = more weight on rate = fewer/larger blocks. Defaults to 200
+    /// unless --t-rms, --chroma-t-rms or --method selects the legacy path.
     #[arg(long)]
     lambda: Option<f64>,
+
+    /// Experimental lambda-derived residual step. Fixed step 8 remains the default:
+    /// the initial Kodak measurement regressed. Requires --lambda; stored in the stream
+    /// so decmars needs no matching option. Enable residual mode too, e.g. --modes 0,2,3.
+    /// Applies to grayscale, colour and progressive.
+    #[arg(long, requires = "lambda", conflicts_with = "method")]
+    adaptive_residual: bool,
 
     /// Smallest range-block size.
     #[arg(long, default_value_t = 4)]
@@ -150,10 +159,10 @@ struct Cli {
     /// Step 15's per-leaf mode mask, a diagnostic/comparison knob: comma-separated mode
     /// numbers to allow, from 0 (flat), 1 (affine), 2 (fractal), 3 (fractal + residual) --
     /// e.g. `--modes 0,1,2` disables mode 3, `--modes 2` forces fractal-only. Only affects
-    /// the RD path (`--lambda`); the legacy top-down split (`--t-rms` alone) never runs
-    /// Step 15's mode competition, so this flag is a no-op without `--lambda`. Default
-    /// (omitted): all four modes allowed, today's behaviour, byte-identical either way.
-    #[arg(long, value_delimiter = ',')]
+    /// the RD path (the default); explicit --t-rms without --lambda uses the legacy
+    /// split and ignores the mask. Default: 0,2 (flat and fractal), the better measured
+    /// combination on kodim01/02. Use --modes 0,1,2,3 to enable all four modes.
+    #[arg(long, value_delimiter = ',', default_value = "0,2")]
     modes: Vec<u8>,
 
     /// Run `mars-search`'s candidate-restriction search (Step 9's classical speed-ups
@@ -164,7 +173,7 @@ struct Cli {
     /// implementation of the same idea as the default path, kept for cross-validation,
     /// not a faster or slower version of it. **Mutually exclusive with `--lambda`**:
     /// `mars-search::encode_image` only runs the legacy top-down `--t-rms` partition (the
-    /// same one `mars-codec`'s own encoder uses when `--lambda` is omitted) -- it has no
+    /// same one selected by explicit --t-rms without --lambda) -- it has no
     /// RD-pruning implementation of its own, so `--method X --lambda Y` would silently
     /// ignore one of the two; this is refused explicitly rather than left as a silent
     /// interaction for a user to discover. **Grayscale input only** for now -- colour's
@@ -206,8 +215,67 @@ struct Cli {
     progressive: bool,
 }
 
+impl Cli {
+    fn effective_lambda(&self) -> Option<f64> {
+        // Only an explicitly selected legacy path suppresses the RD default. Keeping
+        // the parsed lambda optional preserves --method conflicts and warm-up overrides.
+        self.lambda.or_else(|| {
+            (self.t_rms.is_none() && self.chroma_t_rms.is_none() && self.method.is_none())
+                .then_some(200.0)
+        })
+    }
+
+    fn effective_t_rms(&self) -> f64 {
+        self.t_rms.unwrap_or(8.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(["encmars", "input.png", "output.mars"].into_iter().chain(args.iter().copied()))
+            .expect("valid arguments")
+    }
+
+    #[test]
+    fn defaults_select_rd_and_measured_modes_without_other_experiments() {
+        let cli = parse(&[]);
+        assert_eq!(cli.effective_lambda(), Some(200.0));
+        assert_eq!(cli.effective_t_rms(), 8.0);
+        assert_eq!(cli.modes, [0, 2]);
+        assert!(matches!(cli.subsampling, SubsamplingArg::Yuv444));
+        assert!(!cli.adaptive_density && !cli.adaptive_residual && !cli.progressive);
+    }
+
+    #[test]
+    fn explicit_thresholds_and_methods_keep_the_legacy_path() {
+        for args in [vec!["--t-rms", "8"], vec!["-r", "4"],
+            vec!["--chroma-t-rms", "16"], vec!["--method", "fisher"]] {
+            assert_eq!(parse(&args).effective_lambda(), None);
+        }
+        assert_eq!(parse(&["-r", "4"]).effective_t_rms(), 4.0);
+    }
+
+    #[test]
+    fn explicit_lambda_overrides_threshold_and_modes_replace_defaults() {
+        let cli = parse(&["--lambda", "50", "--t-rms", "0", "--chroma-t-rms", "16",
+            "--modes", "0,1,2,3"]);
+        assert_eq!(cli.effective_lambda(), Some(50.0));
+        assert_eq!(cli.effective_t_rms(), 0.0);
+        assert_eq!(cli.modes, [0, 1, 2, 3]);
+        assert_eq!(parse(&["--lambda", "0"]).effective_lambda(), Some(0.0));
+        assert_eq!(parse(&["--modes", "3"]).modes, [3]);
+        assert_eq!(parse(&["--progressive"]).effective_lambda(), Some(200.0));
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.lambda.is_some_and(|value| !value.is_finite() || value < 0.0) {
+        bail!("--lambda must be finite and nonnegative");
+    }
 
     if let Some(threads) = cli.threads {
         rayon::ThreadPoolBuilder::new()
@@ -274,12 +342,12 @@ fn main() -> Result<()> {
         bits_alfa: cli.bits_alfa,
         bits_beta: cli.bits_beta,
         max_alfa: cli.max_alfa,
-        t_rms: cli.t_rms,
+        t_rms: cli.effective_t_rms(),
         zero_threshold: cli.zero_threshold,
-        lambda: cli.lambda,
+        lambda: cli.effective_lambda(),
     };
     let chroma = EncodeParams {
-        t_rms: cli.chroma_t_rms.unwrap_or(cli.t_rms),
+        t_rms: cli.chroma_t_rms.unwrap_or(cli.effective_t_rms()),
         ..base
     };
     let mut allowed_modes = [true; 4];
@@ -307,7 +375,9 @@ fn main() -> Result<()> {
     };
 
     let (width, height) = (image.width(), image.height());
-    let (bytes, stats) = encode_color_image(&image, &params);
+    let (bytes, stats) = encode_color_image_with_residual_quantisation(
+        &image, &params, residual_policy(&cli),
+    );
 
     std::fs::write(&cli.output, &bytes)
         .with_context(|| format!("writing {}", cli.output.display()))?;
@@ -358,7 +428,7 @@ fn run_with_method(
         bits_alfa: cli.bits_alfa,
         bits_beta: cli.bits_beta,
         max_alfa: cli.max_alfa,
-        t_rms: cli.t_rms,
+        t_rms: cli.effective_t_rms(),
         zero_threshold: cli.zero_threshold,
         lambda: None,
     };
@@ -396,12 +466,16 @@ fn run_with_method(
     Ok(())
 }
 
-/// CLI-E's own path: run the same RD/legacy partition every other grayscale `encmars`
-/// invocation would (`encode_image_rd_with_modes_and_density`, so `--lambda`/`--t-rms`/
-/// `--adaptive-density`/`--modes` all still apply), then hand the resulting `(Header,
-/// Vec<Leaf>)` to `mars_codec::progressive::encode` instead of `mars_format::write` --
-/// the progressive container's own magic (`MPRG`) lets `decmars` tell it apart from the
-/// single-layer `MARC` container without a separate flag.
+fn residual_policy(cli: &Cli) -> ResidualQuantisation {
+    if cli.adaptive_residual {
+        ResidualQuantisation::LambdaAdaptive
+    } else {
+        ResidualQuantisation::default()
+    }
+}
+
+/// Encode the same RD/legacy partition, including the selected residual policy,
+/// into the progressive container instead of the single-layer representation.
 fn run_progressive(
     cli: &Cli,
     base: &EncodeParams,
@@ -409,11 +483,14 @@ fn run_progressive(
     image: &mars_core::image::Image,
 ) -> Result<()> {
     let plane = &image.planes()[0];
-    let (hdr, leaves, evals, _stats) = mars_codec::encode::encode_image_rd_with_modes_and_density(
+    let (hdr, leaves, evals, _stats) = mars_codec::encode::encode_image_with_options(
         plane,
         base,
-        allowed_modes,
-        cli.adaptive_density,
+        &EncodeOptions {
+            allowed_modes,
+            adaptive_density: cli.adaptive_density,
+            residual_quantisation: residual_policy(cli),
+        },
     );
     let bytes = mars_codec::progressive::encode(plane, &hdr, &leaves)
         .context("building the progressive container")?;

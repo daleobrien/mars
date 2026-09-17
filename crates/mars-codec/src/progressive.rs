@@ -1,4 +1,15 @@
-//! Layered ("progressive") bitstream — Step 19.
+//! Layered ("progressive") bitstream — Step 19, with O7/Step22 qstep metadata.
+//!
+//! # Revised version-0 wire format
+//!
+//! The 35-byte header contains: `MPRG` (0..4), version = 0 (4), min/max size
+//! (5/6), shift (7), alfa/beta bits (8/9), integer max alfa (10), LE u16
+//! width/height (11..15), four LE u32 payload lengths (15..31), and the same
+//! validated LE binary32 residual qstep as `MARS` at 31..35. The four entropy
+//! payloads follow; length entries count only payload bytes. Reconstruction
+//! uses the header step when layer 4 is complete; prefix offsets start at 35.
+//! This replaces the old layout without a version bump or fallback: pre-O7
+//! files must be re-encoded. Layer coding and the encoder warm-up are unchanged.
 //!
 //! `docs/decisions.md` D46 has the full design reasoning; the short version: this is
 //! **not** a spatial multi-resolution pyramid. D11 (this file's sibling in `docs/`)
@@ -40,12 +51,14 @@ use std::collections::HashMap;
 use mars_core::Plane;
 use mars_entropy::{Decoder as EntropyDecoder, Event};
 
-use crate::ifs::{Header, Leaf};
+use crate::ifs::Leaf;
+use crate::mars_format::Header;
+use crate::quant::ResidualQstep;
 
 const MAGIC: [u8; 4] = *b"MPRG";
 const VERSION: u8 = 0;
-/// `MAGIC` + `VERSION` + 6 geometry bytes + 4 dimension bytes + 4x `u32` layer lengths.
-const HEADER_LEN: usize = 4 + 1 + 6 + 4 + 16;
+/// Magic, version, geometry, dimensions, four layer lengths and binary32 qstep.
+const HEADER_LEN: usize = 4 + 1 + 6 + 4 + 16 + 4;
 /// Fixed-point iteration count for every [`crate::ifs::decode_iterative`] call this module
 /// makes — the same convention every other test/bench call site in this workspace uses
 /// (`grep -rn "decode_iterative(" crates/`).
@@ -90,6 +103,8 @@ const MODE_ALPHABET: u32 = 4;
 pub enum ProgressiveError {
     #[error("not a progressive Mars stream: bad magic")]
     BadMagic,
+    #[error("residual qstep must be finite and in [1, 65535]")]
+    InvalidResidualQstep,
     #[error("unsupported progressive stream version {0}")]
     UnsupportedVersion(u8),
     #[error("stream truncated before the fixed header could be read")]
@@ -208,7 +223,8 @@ fn base_grid(hdr: &Header) -> Vec<(u32, u32, u32)> {
 /// output) as a 4-layer progressive stream. `image` is the *source* image — needed for
 /// layer 1's grid means and layer 2's flat approximation of mode-2/3 leaves, neither of
 /// which exists anywhere in `leaves` itself.
-pub fn encode(image: &Plane, hdr: &Header, leaves: &[Leaf]) -> Result<Vec<u8>, ProgressiveError> {
+pub fn encode(image: &Plane, hdr: &impl crate::ifs::DecodeHeader, leaves: &[Leaf]) -> Result<Vec<u8>, ProgressiveError> {
+    let hdr = &Header { geometry: *hdr.geometry(), residual_qstep: hdr.residual_qstep() };
     if !valid_header_fields(hdr) || !leaf_count_within_bound(hdr) {
         return Err(ProgressiveError::DegenerateHeader);
     }
@@ -306,6 +322,7 @@ pub fn encode(image: &Plane, hdr: &Header, leaves: &[Leaf]) -> Result<Vec<u8>, P
             &(u32::try_from(layer.len()).expect("layer fits in u32")).to_le_bytes(),
         );
     }
+    out.extend_from_slice(&hdr.residual_qstep.to_le_bytes());
     out.extend_from_slice(&layer1);
     out.extend_from_slice(&layer2);
     out.extend_from_slice(&layer3);
@@ -515,6 +532,8 @@ fn parse_header(data: &[u8]) -> Result<ParsedHeader, ProgressiveError> {
     if version != VERSION {
         return Err(ProgressiveError::UnsupportedVersion(version));
     }
+    let residual_qstep = ResidualQstep::from_le_bytes(data[31..35].try_into().unwrap())
+        .ok_or(ProgressiveError::InvalidResidualQstep)?;
     let min_size = u32::from(data[5]);
     let max_size = u32::from(data[6]);
     let shift = u32::from(data[7]);
@@ -524,7 +543,7 @@ fn parse_header(data: &[u8]) -> Result<ParsedHeader, ProgressiveError> {
     let width = u32::from(u16::from_le_bytes([data[11], data[12]]));
     let height = u32::from(u16::from_le_bytes([data[13], data[14]]));
 
-    let hdr = Header {
+    let hdr = Header { residual_qstep, geometry: crate::ifs::Header {
         bits_alfa,
         bits_beta,
         min_size,
@@ -533,7 +552,7 @@ fn parse_header(data: &[u8]) -> Result<ParsedHeader, ProgressiveError> {
         width,
         height,
         int_max_alfa,
-    };
+    }};
     if !valid_header_fields(&hdr) || !leaf_count_within_bound(&hdr) {
         return Err(ProgressiveError::DegenerateHeader);
     }

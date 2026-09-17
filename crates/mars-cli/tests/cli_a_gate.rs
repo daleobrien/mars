@@ -57,6 +57,8 @@ fn encode_via_cli(
         .args(["--raw-width", &KODAK_WIDTH.to_string()])
         .args(["--raw-height", &KODAK_HEIGHT.to_string()])
         .args(["--lambda", &lambda.to_string()])
+        // Preserve this historical four-mode density A/B despite the new CLI mask default.
+        .args(["--modes", "0,1,2,3"])
         // Match `density_gate.rs`'s own `BASE` exactly (`t_rms: 0.0`) -- `encmars`'s CLI
         // default is 8.0 (a sensible default for the legacy `--t-rms`-only path), but
         // `--lambda`'s own doc says `t_rms` still seeds the rate-estimation warm-up pass
@@ -177,6 +179,11 @@ fn omitting_adaptive_density_matches_explicit_false_byte_for_byte() {
         return;
     }
 
+    // Both arms must pin the same explicit non-default configuration (four modes,
+    // `t_rms` 0, matching `encode_via_cli` below) so this test isolates the
+    // `--adaptive-density` flag alone. With the D51 CLI-default switch, a bare
+    // `--lambda 200` invocation resolves to modes 0,2 / `t_rms` 8, which would make
+    // this a modes-vs-modes comparison instead of a density-flag one.
     let out_default = tmp.join("default.mars");
     let status = Command::new(encmars_bin())
         .arg(&image_path)
@@ -184,6 +191,8 @@ fn omitting_adaptive_density_matches_explicit_false_byte_for_byte() {
         .args(["--raw-width", &KODAK_WIDTH.to_string()])
         .args(["--raw-height", &KODAK_HEIGHT.to_string()])
         .args(["--lambda", "200"])
+        .args(["--modes", "0,1,2,3"])
+        .args(["--t-rms", "0"])
         .status()
         .expect("encmars runs");
     assert!(status.success());

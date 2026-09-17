@@ -21,6 +21,27 @@ pub struct Header {
     pub int_max_alfa: u32,
 }
 
+/// Metadata required by the shared reconstruction routines.
+/// Legacy geometry alone implies step 8; Mars headers carry the explicit step.
+pub trait DecodeHeader: Copy {
+    /// Legacy geometry and affine quantisation fields.
+    fn geometry(&self) -> &Header;
+    /// Residual quantisation step used to reconstruct mode 3.
+    fn residual_qstep(&self) -> crate::quant::ResidualQstep;
+    /// Preserve reconstruction metadata when changing the output dimensions.
+    fn with_dimensions(&self, width: u32, height: u32) -> Self;
+}
+
+impl DecodeHeader for Header {
+    fn geometry(&self) -> &Header { self }
+    fn residual_qstep(&self) -> crate::quant::ResidualQstep {
+        crate::quant::ResidualQstep::LEGACY
+    }
+    fn with_dimensions(&self, width: u32, height: u32) -> Self {
+        Self { width, height, ..*self }
+    }
+}
+
 impl Header {
     /// §4.1. Exact in binary64 for every `int_max_alfa` (it is a dyadic rational).
     pub fn max_alfa(&self) -> f64 {
@@ -251,8 +272,8 @@ fn walk(
 /// §10.1: fixed-point iteration over the transform list, starting from a flat grey image.
 /// This exists to sanity-check `parse`, not to replace `decmars` — no pyramidal mode, no
 /// postprocessing, no attempt at speed.
-pub fn decode_iterative(hdr: &Header, leaves: &[Leaf], iterations: u32) -> Plane {
-    let (w, h) = (hdr.width as usize, hdr.height as usize);
+pub fn decode_iterative(hdr: &impl DecodeHeader, leaves: &[Leaf], iterations: u32) -> Plane {
+    let (w, h) = (hdr.geometry().width as usize, hdr.geometry().height as usize);
     let mut img = vec![128u8; w * h];
     for _ in 0..iterations {
         img = decode_step(hdr, leaves, &img);
@@ -266,8 +287,8 @@ pub fn decode_iterative(hdr: &Header, leaves: &[Leaf], iterations: u32) -> Plane
 /// for callers that need to interleave iterations across multiple planes in lock-step —
 /// e.g. `color::decode_color_image_progression`, which needs one Y/Cb/Cr frame per step
 /// rather than each plane fully decoded in turn.
-pub fn decode_step(hdr: &Header, leaves: &[Leaf], img: &[u8]) -> Vec<u8> {
-    let (w, h) = (hdr.width as usize, hdr.height as usize);
+pub fn decode_step(hdr: &impl DecodeHeader, leaves: &[Leaf], img: &[u8]) -> Vec<u8> {
+    let (w, h) = (hdr.geometry().width as usize, hdr.geometry().height as usize);
     let mut next = vec![0u8; w * h];
     for leaf in leaves {
         decode_leaf(hdr, leaf, img, w, &mut next);
@@ -287,12 +308,12 @@ pub fn decode_step(hdr: &Header, leaves: &[Leaf], img: &[u8]) -> Vec<u8> {
 /// cap, since a `threshold` of 0 combined with 8-bit rounding can cycle between two states
 /// forever rather than settling on one.
 pub fn decode_until_stable(
-    hdr: &Header,
+    hdr: &impl DecodeHeader,
     leaves: &[Leaf],
     threshold: u8,
     max_iterations: u32,
 ) -> (Plane, u32) {
-    let (w, h) = (hdr.width as usize, hdr.height as usize);
+    let (w, h) = (hdr.geometry().width as usize, hdr.geometry().height as usize);
     let mut img = vec![128u8; w * h];
     let mut used = 0;
     for i in 0..max_iterations.max(1) {
@@ -331,7 +352,7 @@ pub(crate) fn max_pixel_delta(a: &[u8], b: &[u8]) -> u8 {
 /// different block size, so it is dropped when zooming — leaving the plain domain-reference
 /// reconstruction from mode 2's formula, a visually reasonable fallback rather than an
 /// attempt to resample DCT coefficients.
-pub fn zoom_leaves(hdr: &Header, leaves: &[Leaf], factor: f64) -> (Header, Vec<Leaf>) {
+pub fn zoom_leaves<H: DecodeHeader>(hdr: &H, leaves: &[Leaf], factor: f64) -> (H, Vec<Leaf>) {
     let scale = |v: u32| -> u32 { (f64::from(v) * factor).round() as u32 };
     let scaled = leaves
         .iter()
@@ -351,11 +372,7 @@ pub fn zoom_leaves(hdr: &Header, leaves: &[Leaf], factor: f64) -> (Header, Vec<L
             ..leaf.clone()
         })
         .collect();
-    let zoomed_hdr = Header {
-        width: scale(hdr.width),
-        height: scale(hdr.height),
-        ..*hdr
-    };
+    let zoomed_hdr = hdr.with_dimensions(scale(hdr.geometry().width), scale(hdr.geometry().height));
     (zoomed_hdr, scaled)
 }
 
@@ -371,7 +388,8 @@ pub fn zoom_leaves(hdr: &Header, leaves: &[Leaf], factor: f64) -> (Header, Vec<L
 /// consumed -- this function exists so [`decode_iterative`] (and hence any PSNR
 /// measurement built on it, e.g. `mars-bench`'s RD sampler) reconstructs every mode
 /// correctly, not only the two the legacy `.ifs` bitstream itself can express.
-fn decode_leaf(hdr: &Header, leaf: &Leaf, img: &[u8], stride: usize, next: &mut [u8]) {
+fn decode_leaf(header: &impl DecodeHeader, leaf: &Leaf, img: &[u8], stride: usize, next: &mut [u8]) {
+    let hdr = header.geometry();
     let size = leaf.size as usize;
 
     if leaf.mode == 1 {
@@ -404,7 +422,7 @@ fn decode_leaf(hdr: &Header, leaf: &Leaf, img: &[u8], stride: usize, next: &mut 
             .map(|&l| {
                 crate::quant::dead_zone_dequantize(
                     l,
-                    crate::encode::RESIDUAL_QSTEP_DEFAULT,
+                    header.residual_qstep().get(),
                     crate::encode::RESIDUAL_DEAD_ZONE,
                 )
             })

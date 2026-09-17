@@ -2,9 +2,8 @@
 //! mode mask as `encmars --modes`. Both checks run the real `encmars` binary
 //! (`CARGO_BIN_EXE_encmars`), fast (small synthetic image, one lambda point each).
 //!
-//! 1. `--modes 0,1,2,3` (every mode explicitly listed) must be byte-identical to omitting
-//!    the flag entirely -- the "the whole point is additive, not a second code path"
-//!    guarantee CLI-A's own default-off flag was held to.
+//! 1. Plain invocation must equal explicit `--lambda 200 --modes 0,2`.
+//!    Full four-mode competition remains available by explicit override.
 //! 2. `--modes 2` (fractal-only) on a known image must match a hand-computed
 //!    "fractal-only" leaf count. The `.mars` colour container's grayscale framing is
 //!    fixed and small (`COLOR_HEADER_LEN` = magic(4) + version(1) + mode(1) +
@@ -67,7 +66,7 @@ fn write_test_pgm(path: &Path) {
 }
 
 #[test]
-fn all_modes_explicit_is_byte_identical_to_omitting_the_flag() {
+fn measured_defaults_are_byte_identical_to_explicit_rd_and_modes() {
     let tmp = std::env::temp_dir().join(format!("gate-cli-b-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).expect("scratch dir");
     let input = tmp.join("in.pgm");
@@ -77,7 +76,6 @@ fn all_modes_explicit_is_byte_identical_to_omitting_the_flag() {
     let status = Command::new(encmars_bin())
         .arg(&input)
         .arg(&out_omitted)
-        .args(["--lambda", "200"])
         .status()
         .expect("encmars runs");
     assert!(status.success());
@@ -87,7 +85,7 @@ fn all_modes_explicit_is_byte_identical_to_omitting_the_flag() {
         .arg(&input)
         .arg(&out_explicit)
         .args(["--lambda", "200"])
-        .args(["--modes", "0,1,2,3"])
+        .args(["--modes", "0,2"])
         .status()
         .expect("encmars runs");
     assert!(status.success());
@@ -96,8 +94,12 @@ fn all_modes_explicit_is_byte_identical_to_omitting_the_flag() {
     let bytes_explicit = std::fs::read(&out_explicit).unwrap();
     assert_eq!(
         bytes_omitted, bytes_explicit,
-        "--modes 0,1,2,3 must be byte-identical to omitting --modes"
+        "plain invocation must match --lambda 200 --modes 0,2"
     );
+
+    let (_, leaves) = mars_codec::mars_format::read(strip_gray_container(&bytes_omitted)).unwrap();
+    assert!(!leaves.is_empty());
+    assert!(leaves.iter().all(|leaf| matches!(leaf.mode, 0 | 2)));
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -113,7 +115,7 @@ fn modes_2_forces_fractal_only_matching_a_hand_computed_leaf_count() {
     let status = Command::new(encmars_bin())
         .arg(&input)
         .arg(&out_all)
-        .args(["--lambda", "200"])
+        .args(["--lambda", "200", "--modes", "0,1,2,3"])
         .status()
         .expect("encmars runs");
     assert!(status.success());
