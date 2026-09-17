@@ -12,11 +12,11 @@
 //! Both curves measure `.mars` v0 (entropy-coded) bpp, since Step 14 optimises the actual
 //! coded rate, not the raw `.ifs` bit count.
 
-use mars_codec::encode::{encode_image, EncodeParams};
-use mars_codec::ifs::decode_iterative;
+use mars_codec::encode::{EncodeParams, encode_image};
+use mars_codec::ifs::{Leaf, decode_iterative};
 use mars_codec::mars_format;
-use mars_core::metrics::psnr;
 use mars_core::Plane;
+use mars_core::metrics::psnr;
 
 use crate::bdrate::{RdCurve, RdPoint};
 
@@ -34,16 +34,32 @@ pub struct RdSample {
 /// PSNR -- one point on an RD curve, plus its search cost.
 pub fn sample(image: &Plane, params: &EncodeParams) -> RdSample {
     let (hdr, leaves, evals) = encode_image(image, params);
-    let bytes = mars_format::write(&hdr, &leaves).expect(
-        "a partition `encode_image` produced must always be a writable `.mars` v0 tree",
-    );
+    let bytes = mars_format::write(&hdr, &leaves)
+        .expect("a partition `encode_image` produced must always be a writable `.mars` v0 tree");
+    sample_from_bytes(image, &bytes, evals)
+        .expect("the serialized `encode_image` partition must be readable")
+        .0
+}
+
+/// Measure an in-memory `.mars` inner stream, not a full CLI file-to-file round trip.
+/// Only parsed reconstruction metadata and leaves may contribute to decoded quality.
+pub(crate) fn sample_from_bytes(
+    image: &Plane,
+    bytes: &[u8],
+    evals: u64,
+) -> Result<(RdSample, Vec<Leaf>), mars_format::MarsFormatError> {
+    let (hdr, leaves) = mars_format::read(bytes)?;
+    // Keep the full parsed Header: coercing to ifs::Header would lose residual qstep.
     let decoded = decode_iterative(&hdr, &leaves, 10);
     let psnr_db = psnr(image, &decoded).unwrap_or(f64::INFINITY); // None = lossless (§M2)
-    RdSample {
-        point: RdPoint::from_size(bytes.len() as u64, image.width(), image.height(), psnr_db),
-        evals,
-        leaves: leaves.len(),
-    }
+    Ok((
+        RdSample {
+            point: RdPoint::from_size(bytes.len() as u64, image.width(), image.height(), psnr_db),
+            evals,
+            leaves: leaves.len(),
+        },
+        leaves,
+    ))
 }
 
 /// The Step 9 `Exhaustive` reference curve: the legacy top-down, `t_rms`-threshold walk
@@ -160,6 +176,117 @@ pub fn check_convex_and_monotonic(points: &[RdPoint], slack: f64) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn residual_stream() -> (mars_format::Header, Vec<Leaf>) {
+        use mars_codec::ifs::Header;
+        use mars_codec::quant::ResidualQstep;
+
+        let hdr = mars_format::Header {
+            geometry: Header {
+                bits_alfa: 4,
+                bits_beta: 7,
+                min_size: 4,
+                max_size: 4,
+                shift: 4,
+                width: 8,
+                height: 8,
+                int_max_alfa: 32,
+            },
+            residual_qstep: ResidualQstep::LEGACY,
+        };
+        let leaves = [(0, 0), (4, 0), (0, 4), (4, 4)]
+            .into_iter()
+            .map(|(row, col)| {
+                let mut residual = vec![0; 16];
+                residual[0] = 4;
+                residual[1] = -2;
+                residual[5] = 1;
+                Leaf {
+                    row,
+                    col,
+                    size: 4,
+                    mode: 3,
+                    qalfa: 4,
+                    qbeta: 64,
+                    isometry: 0,
+                    dom_row: 0,
+                    dom_col: 0,
+                    qgx: 0,
+                    qgy: 0,
+                    residual,
+                }
+            })
+            .collect();
+        (hdr, leaves)
+    }
+
+    #[test]
+    fn serialized_measurement_uses_wire_qstep_and_leaves() {
+        use mars_codec::quant::ResidualQstep;
+
+        let (mut hdr, mut leaves) = residual_stream();
+        let image = Plane::from_vec(8, 8, vec![128; 64]);
+        let mut bytes = mars_format::write(&hdr, &leaves).unwrap();
+        let (legacy, _) = sample_from_bytes(&image, &bytes, 17).unwrap();
+
+        // Change only the serialized qstep: reconstruction must not default to fixed8.
+        let step = ResidualQstep::new(17.123456789).unwrap();
+        bytes[20..24].copy_from_slice(&(step.get() as f32).to_le_bytes());
+        hdr.residual_qstep = step;
+        let expected = decode_iterative(&hdr, &leaves, 10);
+        assert_ne!(expected, decode_iterative(&hdr.geometry, &leaves, 10));
+        let (sample, parsed_leaves) = sample_from_bytes(&image, &bytes, 17).unwrap();
+        assert_eq!(parsed_leaves, leaves);
+        assert_eq!(sample.evals, 17);
+        assert_eq!(sample.leaves, leaves.len());
+        assert_eq!(
+            sample.point,
+            RdPoint::from_size(bytes.len() as u64, 8, 8, psnr(&image, &expected).unwrap())
+        );
+        assert_ne!(sample.point.psnr, legacy.point.psnr);
+        assert_eq!(mars_format::read(&bytes).unwrap().0, hdr);
+
+        // A different serialized leaf payload must change the measured reconstruction.
+        for leaf in &mut leaves {
+            leaf.residual.fill(0);
+        }
+        let changed_bytes = mars_format::write(&hdr, &leaves).unwrap();
+        let changed_image = decode_iterative(&hdr, &leaves, 10);
+        assert_ne!(changed_image, expected);
+        let (changed, parsed_leaves) = sample_from_bytes(&image, &changed_bytes, 17).unwrap();
+        assert_eq!(parsed_leaves, leaves);
+        assert_eq!(
+            changed.point,
+            RdPoint::from_size(
+                changed_bytes.len() as u64,
+                8,
+                8,
+                psnr(&image, &changed_image).unwrap_or(f64::INFINITY),
+            )
+        );
+        assert_ne!(changed.point.psnr, sample.point.psnr);
+
+        let (lossless, _) = sample_from_bytes(&changed_image, &changed_bytes, 0).unwrap();
+        assert_eq!(lossless.point.psnr, f64::INFINITY);
+    }
+
+    #[test]
+    fn serialized_measurement_rejects_invalid_streams_without_fallback() {
+        use mars_format::MarsFormatError;
+
+        let (hdr, leaves) = residual_stream();
+        let image = Plane::from_vec(8, 8, vec![128; 64]);
+        let mut bytes = mars_format::write(&hdr, &leaves).unwrap();
+        assert!(matches!(
+            sample_from_bytes(&image, &bytes[..10], 0),
+            Err(MarsFormatError::Truncated)
+        ));
+        bytes[20..24].copy_from_slice(&0.0_f32.to_le_bytes());
+        assert!(matches!(
+            sample_from_bytes(&image, &bytes, 0),
+            Err(MarsFormatError::InvalidResidualQstep)
+        ));
+    }
 
     fn pt(bpp: f64, psnr: f64) -> RdPoint {
         RdPoint { bpp, psnr }

@@ -14,14 +14,14 @@
 
 use std::time::Instant;
 
-use mars_codec::encode::{encode_image_rd_with_modes_and_density, EncodeParams, ModeStats};
-use mars_codec::ifs::{decode_iterative, Leaf};
+use mars_codec::encode::{EncodeParams, ModeStats, encode_image_rd_with_modes_and_density};
+use mars_codec::ifs::Leaf;
 use mars_codec::mars_format;
-use mars_core::metrics::psnr;
+
 use mars_core::Plane;
 
-use crate::bdrate::{RdCurve, RdPoint};
-use crate::rd_opt::RdSample;
+use crate::bdrate::RdCurve;
+use crate::rd_opt::{RdSample, sample_from_bytes};
 
 /// One operating point under an explicit `adaptive_density` flag: the usual RD sample plus
 /// the mode histogram, the leaves themselves (for partition-statistics reporting), and the
@@ -49,14 +49,10 @@ pub fn sample_with_density(
     let bytes = mars_format::write(&hdr, &leaves).expect(
         "a partition `encode_image_rd_with_modes_and_density` produced must always be writable",
     );
-    let decoded = decode_iterative(&hdr, &leaves, 10);
-    let psnr_db = psnr(image, &decoded).unwrap_or(f64::INFINITY);
+    let (sample, leaves) = sample_from_bytes(image, &bytes, evals)
+        .expect("the serialized density partition must be readable");
     DensitySample {
-        sample: RdSample {
-            point: RdPoint::from_size(bytes.len() as u64, image.width(), image.height(), psnr_db),
-            evals,
-            leaves: leaves.len(),
-        },
+        sample,
         stats,
         leaves,
         encode_secs,

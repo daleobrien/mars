@@ -36,6 +36,13 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - Validation: residual orientation (1), qstep integration (6), residual unit tests (5) passed. A broader codec run passed 49 unit tests and two encoder tests, but timed out during the 512×512 parallel-determinism test; no full-suite or corpus performance pass is claimed.
 - Next: serialized measurement, CLI guards, tiny/odd geometry, and file-to-file experiments. Mode-3 orientation is no longer an untested blocker; corrected residual RD benefit still needs new measurements.
 
+### Step 2 — serialized benchmark reconstruction (P0.1)
+
+- `rd_opt`, `mode_gate`, and `density_gate` now share a parser-backed measurement path: reported quality uses the full parsed header and leaves; density partition statistics use parsed leaves too.
+- Wire-step/payload differential tests prove serialized metadata affects quality; parse errors cannot fall back to encoder leaves.
+- Validation: three integration tests and seven targeted benchmark unit tests passed.
+- This repairs the in-memory inner-stream bypass, not whole-container file-to-file measurement. Historical results remain historical; do not silently replace them.
+
 ## 2. What Mars already implements
 
 The README now documents the working CLI, but its status table, “no Mars 2 codec” statement, and layout descriptions remain stale. Use source and [the optimisation status](docs/encmars-optimisation-status.md), not that table, to establish the baseline.
@@ -102,7 +109,7 @@ input file → encode → serialize → actual coded file
                                      mars-core metrics from input + decoded files
 ```
 
-All three named gate helpers still serialize for byte count but decode the original in-memory header/leaves. `mode_gate` now explicitly pins fixed8, but that does not repair this measurement bypass. A previous adaptive-density result was withdrawn after this pattern hid a coordinate-serialization problem. The historically reported corrected density result was about −0.14% BD-rate, not the withdrawn −6.82%; this is not proof that today's gate enforces serialized reconstruction.
+**Updated in execution step 2:** all three named helpers now decode the serialized/parsed full header and leaves through `rd_opt::sample_from_bytes`; `mode_gate` explicitly pins fixed8. They remain inner-stream measurements, not CLI whole-file measurements. A previous adaptive-density result was withdrawn after this pattern hid a coordinate-serialization problem. The historically reported corrected density result was about −0.14% BD-rate, not the withdrawn −6.82%; this is not proof that today's gate enforces serialized reconstruction.
 
 `crates/mars-bench/tests/residual_qstep_gate.rs::measure` already serializes, parses, checks headers/leaves, qstep and mode counts, then decodes the **parsed** stream for PSNR. Reuse that pattern. It is still an in-memory stream experiment, not the proposed file-to-file benchmark: no coded/decoded file reload, decoded-image hash, or CLI container/output coverage. Its `encode_elapsed_s` times the encoder call only; `elapsed_s` also includes serialization/parsing, decode, and PSNR, not primary end-to-end encode/decode timing.
 

@@ -9,16 +9,14 @@
 //! chosen over diffing against a separate git revision.
 
 use mars_codec::encode::{
-    encode_image_with_options, EncodeOptions, EncodeParams, ModeStats, ResidualQuantisation,
+    EncodeOptions, EncodeParams, ModeStats, ResidualQuantisation, encode_image_with_options,
 };
-use mars_codec::quant::ResidualQstep;
-use mars_codec::ifs::decode_iterative;
 use mars_codec::mars_format;
-use mars_core::metrics::psnr;
+use mars_codec::quant::ResidualQstep;
 use mars_core::Plane;
 
-use crate::bdrate::{RdCurve, RdPoint};
-use crate::rd_opt::RdSample;
+use crate::bdrate::RdCurve;
+use crate::rd_opt::{RdSample, sample_from_bytes};
 
 /// Modes 0 (flat) and 2 (fractal) only -- Step 14's own decision rule, reproduced exactly
 /// on the current codebase (§ this module's doc).
@@ -28,7 +26,11 @@ pub const STEP15_MODES: [bool; 4] = [true, true, true, true];
 
 /// One sample under an explicit mode mask, plus the [`ModeStats`] histogram that encode
 /// produced -- the mode-mask counterpart of `rd_opt::sample`.
-pub fn sample_with_modes(image: &Plane, params: &EncodeParams, allowed_modes: [bool; 4]) -> (RdSample, ModeStats) {
+pub fn sample_with_modes(
+    image: &Plane,
+    params: &EncodeParams,
+    allowed_modes: [bool; 4],
+) -> (RdSample, ModeStats) {
     // Gate 15 measures the historical fixed8 competition, not the new adaptive default.
     let options = EncodeOptions {
         allowed_modes,
@@ -38,16 +40,9 @@ pub fn sample_with_modes(image: &Plane, params: &EncodeParams, allowed_modes: [b
     let (hdr, leaves, evals, stats) = encode_image_with_options(image, params, &options);
     let bytes = mars_format::write(&hdr, &leaves)
         .expect("a partition `encode_image_with_options` produced must always be writable");
-    let decoded = decode_iterative(&hdr, &leaves, 10);
-    let psnr_db = psnr(image, &decoded).unwrap_or(f64::INFINITY);
-    (
-        RdSample {
-            point: RdPoint::from_size(bytes.len() as u64, image.width(), image.height(), psnr_db),
-            evals,
-            leaves: leaves.len(),
-        },
-        stats,
-    )
+    let (sample, _) = sample_from_bytes(image, &bytes, evals)
+        .expect("the serialized `encode_image_with_options` partition must be readable");
+    (sample, stats)
 }
 
 /// A λ-swept curve under a fixed mode mask, plus the mode-usage histogram summed across
@@ -134,7 +129,13 @@ mod tests {
             lambda: None,
         };
         let (_curve, _samples, stats) = mode_curve("test", &image, &base, &[100.0], STEP14_MODES);
-        assert_eq!(stats.leaf_modes[1], 0, "mode 1 must never appear under the Step-14 mask");
-        assert_eq!(stats.leaf_modes[3], 0, "mode 3 must never appear under the Step-14 mask");
+        assert_eq!(
+            stats.leaf_modes[1], 0,
+            "mode 1 must never appear under the Step-14 mask"
+        );
+        assert_eq!(
+            stats.leaf_modes[3], 0,
+            "mode 3 must never appear under the Step-14 mask"
+        );
     }
 }
