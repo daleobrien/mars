@@ -13,6 +13,7 @@
 //! affine fit + RMS is actually computed) — see that function's doc for the exact
 //! bookkeeping.
 
+pub mod apcc;
 pub mod classify;
 pub mod exhaustive;
 pub mod fisher;

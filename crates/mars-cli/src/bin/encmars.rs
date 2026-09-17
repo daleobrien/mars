@@ -31,6 +31,7 @@ enum MethodArg {
     Funnel,
     Learned,
     Random,
+    Apcc,
 }
 
 impl MethodArg {
@@ -46,12 +47,18 @@ impl MethodArg {
             MethodArg::Funnel => mars_search::MethodName::Funnel,
             MethodArg::Learned => mars_search::MethodName::Learned,
             MethodArg::Random => return None,
+            MethodArg::Apcc => return None,
         })
     }
 
     fn key(self) -> &'static str {
-        self.indexed_method()
-            .map_or("random", |method| method.key())
+        match self {
+            MethodArg::Random => "random",
+            MethodArg::Apcc => "apcc",
+            other => other
+                .indexed_method()
+                .map_or("unnamed", |method| method.key()),
+        }
     }
 }
 
@@ -187,6 +194,7 @@ struct Cli {
     /// `random` is opt-in and requires --budget; --seed defaults to 0. Its budget
     /// limits production queries only, not the exhaustive RD warm-up, which may
     /// dominate total work.
+    /// `apcc` is opt-in and requires --budget (no seed); the same budget limits apply.
     /// Grayscale only; mutually exclusive with --progressive for now.
     /// Reported `evals` counts production search only; `warmup_evals` and `total_evals`
     /// separately expose RD rate-estimation work.
@@ -194,8 +202,8 @@ struct Cli {
     method: Option<MethodArg>,
 
     /// Positive domain-position budget per production search query (8 isometry fits
-    /// per position, at most 8*K fits). Required with --method random; rejected for
-    /// other methods. Does not limit exhaustive RD warm-up fits.
+    /// per position, at most 8*K fits). Required with --method random or apcc; rejected
+    /// for other methods. Does not limit exhaustive RD warm-up fits.
     #[arg(long)]
     budget: Option<usize>,
 
@@ -303,16 +311,27 @@ impl Cli {
     }
 
     fn validate(&self) -> Result<()> {
-        if matches!(self.method, Some(MethodArg::Random)) {
-            if self.budget.is_none_or(|budget| budget == 0) {
-                bail!("--method random requires an explicit positive --budget");
+        match self.method {
+            Some(MethodArg::Random) => {
+                if self.budget.is_none_or(|budget| budget == 0) {
+                    bail!("--method random requires an explicit positive --budget");
+                }
             }
-        } else {
-            if self.budget.is_some() {
-                bail!("--budget is only valid with --method random");
+            Some(MethodArg::Apcc) => {
+                if self.budget.is_none_or(|budget| budget == 0) {
+                    bail!("--method apcc requires an explicit positive --budget");
+                }
+                if self.seed.is_some() {
+                    bail!("--seed is only valid with --method random");
+                }
             }
-            if self.seed.is_some() {
-                bail!("--seed is only valid with --method random");
+            _ => {
+                if self.budget.is_some() {
+                    bail!("--budget is only valid with --method random or apcc");
+                }
+                if self.seed.is_some() {
+                    bail!("--seed is only valid with --method random");
+                }
             }
         }
         for (name, value) in [
@@ -582,20 +601,8 @@ fn run_with_method(
     options: &EncodeOptions,
 ) -> Result<()> {
     let plane = &image.planes()[0];
-    let (outcome, search_details) = match method_arg.indexed_method() {
-        Some(method) => (
-            encode_image_with_search(plane, params, options, |contracted| {
-                if matches!(method_arg, MethodArg::Exhaustive) {
-                    Box::new(ExhaustiveSearch)
-                } else {
-                    Box::new(mars_search::IndexedSearchProvider::build(
-                        plane, contracted, params, options, method,
-                    ))
-                }
-            }),
-            String::new(),
-        ),
-        None => {
+    let (outcome, search_details) = match method_arg {
+        MethodArg::Random => {
             let config = mars_search::random::RandomConfig {
                 budget: cli.budget.context("--method random requires --budget")?,
                 seed: cli.seed.unwrap_or(0),
@@ -612,6 +619,37 @@ fn run_with_method(
                 ))
             });
             (outcome, details)
+        }
+        MethodArg::Apcc => {
+            let budget = cli.budget.context("--method apcc requires --budget")?;
+            let details = format!("budget={budget}, ");
+            let outcome = encode_image_with_search(plane, params, options, |contracted| {
+                Box::new(mars_search::apcc::ApccSearchProvider::build(
+                    plane,
+                    contracted,
+                    params,
+                    options,
+                    mars_search::apcc::ApccConfig { budget },
+                ))
+            });
+            (outcome, details)
+        }
+        other => {
+            let Some(method) = other.indexed_method() else {
+                bail!("no search provider wired for --method {}", other.key());
+            };
+            (
+                encode_image_with_search(plane, params, options, |contracted| {
+                    if matches!(other, MethodArg::Exhaustive) {
+                        Box::new(ExhaustiveSearch)
+                    } else {
+                        Box::new(mars_search::IndexedSearchProvider::build(
+                            plane, contracted, params, options, method,
+                        ))
+                    }
+                }),
+                String::new(),
+            )
         }
     };
     cli.validate_leaf_modes(&outcome.leaves)?;
