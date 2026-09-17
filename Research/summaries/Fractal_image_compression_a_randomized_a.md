@@ -1,0 +1,21 @@
+# Fractal image compression: a randomized approach
+- **Authors:** S. K. Ghosh, Jayanta Mukherjee, P. P. Das.
+- **Year / venue:** 2004, Pattern Recognition Letters 25, 1013–1024; DOI: 10.1016/j.patrec.2004.02.008.
+- **Core method:** Replace sequential domain search with a bounded number of random trials per range. Stop at the first acceptable RMS match; otherwise retain the best sampled candidate, without exhaustive fallback.
+- **Key techniques:**
+  - Partitioned IFS with eight isometries, spatial averaging, fitted intensity scale/offset, and |scale| < 1.
+  - Tests use 256×256 images, 4×4 ranges, 8×8 domains, and one-pixel domain stride.
+  - Analyze depth of search and qualifying-domain probability to characterize image self-similarity.
+  - Estimate the fraction of ranges having any acceptable domain from about 100 sampled ranges.
+  - Choose trial caps of **1500 / 1300 / 1100 / 900** for estimated fractions below **0.5 / 0.7 / 0.9 / otherwise**.
+- **Reported results:** Main comparison uses qualifying-block threshold **20** (Tables 4–5).
+  - Lena: **40.92× time speedup**, **40.72× search reduction**, **0.90 dB PSNR loss** from **27.25 dB**.
+  - Lena randomized PSNR is therefore **26.35 dB**, with approximately **320 s** encoding versus **13,096 s** (derived from reported speedup).
+  - Across ten images: approximately **36–48× time speedup**, PSNR losses **0.17–1.01 dB**.
+  - Lena trial sweep: **100 trials: 27 s / 25.04 dB**; **2000 trials: 482 s / 26.46 dB**.
+  - Compression ratio and SSIM are not reported.
+- **Implementation notes:**
+  - Strong low-complexity baseline: only a sampler, trial budget, early exit, and best-so-far match are added to conventional FIC.
+  - Exhaustive fallback erases almost all speedup; randomized bucket classification gives no substantial additional gain.
+  - Trial-budget calibration adds preprocessing and is empirical; validate it on new image sizes/content and measure stochastic variability.
+  - Quadtree integration is suggested, not demonstrated; published comparisons against other methods are not all identically configured.

@@ -1,0 +1,21 @@
+# Genetic Algorithm based Fractal Image Compression
+- **Author:** Mahesh G. Huddar.
+- **Year / venue:** 2013, International Journal of Modern Engineering Research (IJMER) 3(2), March–April, 1123–1128.
+- **Core method:** Use a genetic algorithm to find domain coordinates and isometries for each range block, fitting intensity parameters analytically. Combine the search with quadtree subdivision of ranges that fail a size-dependent error threshold.
+- **Key techniques:**
+  - Five-field chromosome: domain x/y, isometric flip, and two fitted intensity parameters; only the first three evolve.
+  - RMS-based fitness, linear fitness scaling, roulette-wheel selection, coordinate crossover, and random gene mutation.
+  - Population **100**, crossover **0.7**, mutation **0.1**, maximum **20 generations** in the main error-limit sweep.
+  - Begin with **16×16** regions, halve unresolved regions toward a **4-pixel** minimum, and relax the final error threshold.
+  - Stop a range search when an acceptable match is found or the generation cap is reached.
+- **Reported results:** Tables label reconstruction quality only as **“Quality (dB)”**; PSNR is not explicitly defined and SSIM is absent.
+  - Lena, RMS limit **5**: **43 s**, **34.80 dB**, **9.82:1**, **1792 ranges** (Table 3).
+  - Standard quadtree Lena baseline: **1 h 11 min 10 s**, **32.01 dB**, **11.48:1**; Fisher classification: **2 min 55 s**, **30.05 dB**, **9.73:1**.
+  - Error-limit tradeoff: RMS **0 → 25** reduces time **164 → 13 s**, quality **35.66 → 19.01 dB**, while ratio increases **4.29:1 → 26.25:1**.
+  - Population **5 → 1000** increases time **9 → 1384 s**, quality **29.62 → 35.12 dB**, and ratio **8.30:1 → 10.97:1** (Table 4).
+- **Implementation notes:**
+  - More machinery and tuning than random sampling; requires quadtree bookkeeping, a GA, and conventional fractal fitting/decoding.
+  - Reproducibility is weak: hardware, image dimensions, and repeated-run variability are not clearly specified.
+  - Table 4 reports **32.23 dB / 44 s** at population 100, unlike Table 3; do not assume identical settings or consistent quality measurements.
+  - The second-offspring crossover equation appears erroneous; coordinate rounding/bounds and subdivision details need clarification before implementation.
+  - Treat claims of near-baseline quality cautiously: the conclusion says standard coding is best, but the Lena tables contradict that claim.

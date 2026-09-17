@@ -2,7 +2,9 @@
 
 ## 1. Scope and recommendation
 
-**Source inspected:** [daleobrien/mars](https://github.com/daleobrien/mars), commit [`5fc80de5e28388728915fbcd24ca4843eaf94284`](https://github.com/daleobrien/mars/tree/5fc80de5e28388728915fbcd24ca4843eaf94284), 17 September 2026. Repository paths below are relative to that checkout. This is a proposed implementation plan, not a claim that the proposed experiments have run.
+**Source reviewed:** local checkout at commit `250af5bc184ac4998297904ae9b32567431f432a`, 18 September 2026. The original planning audit targeted parent `5fc80de5e28388728915fbcd24ca4843eaf94284` on 17 September. Paths are repository-relative; crate names in write-scope tables refer to `crates/<name>/`. Historical measurements retain their recorded build provenance; reviewing them at HEAD does not make them clean-HEAD runs.
+
+This revision incorporates the residual-quantisation experiment and changed `encmars` defaults. It distinguishes implemented infrastructure from uncompleted research gates. No new corpus benchmark was run for this review; focused validation is listed in §3.
 
 **Objective:** determine whether bounded random search, Pearson/APCC indexing, improved partition optimization, and optional reconstruction enhancements improve Mars's measured rate–quality–time tradeoff enough to maintain them.
 
@@ -21,13 +23,16 @@ Do not start with metaheuristics, another learned model, GPU kernels, or rectang
 
 ## 2. What Mars already implements
 
-The README's statement that no Mars 2 codec exists is stale. Actual source is substantially ahead of it.
+The README now documents the working CLI, but its status table, “no Mars 2 codec” statement, and layout descriptions remain stale. Use source and [the optimisation status](docs/encmars-optimisation-status.md), not that table, to establish the baseline.
+
+**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. The general file-to-file runner, shared production retrieval interface, random/APCC methods, postprocessor, and sparse multi-domain format remain proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
 
 | Area | Existing implementation | Consequence for this plan |
 |---|---|---|
-| Codec | `mars-codec/src/encode.rs`, `ifs.rs`, `mars_format.rs`: quantized fitting, iterative decoding, threshold quadtree, entropy-coded streams | Extend; do not rebuild the baseline. |
+| Codec | `crates/mars-codec/src/encode.rs`, `ifs.rs`, `mars_format.rs`: quantized fitting, iterative decoding, threshold quadtree, entropy-coded streams | Extend; do not rebuild the baseline. |
 | RD partitioning | `encode.rs::walk_rd`, `split_rd`, `best_mode_leaf`; `rate.rs::RateModels` | Bottom-up `D + lambda R` selection already exists. Audit the objective and integrate retrieval first. |
 | Modes | Flat, spatial affine, single-domain fractal, fractal plus DCT residual | Keep mode sets controlled in search experiments. Sparse DCT residuals are not multi-domain fractal coding. |
+| Residual quantisation | `quant.rs::ResidualQstep`, `encode.rs::ResidualQuantisation`; per-stream step propagated through grayscale, color planes, and progressive output | Fixed8 remains default; lambda-adaptive quantisation is implemented but opt-in and not promoted by the incomplete experiment. Preserve metadata through decoding. |
 | Search | `mars-search`: Exhaustive, Fisher, Hurtgen, MassCenter, Saupe, SaupeFisher, McSaupe, Funnel, Learned | Use existing methods as serious challengers, not just historical context. Random and 2013 APCC are missing. |
 | Search interface | `CandidateRetriever`, `DomainPool`, `RangeBlock`, `search_block`, `SizedRetrievers` | Good starting point, but a separate encoder currently consumes them. |
 | Acceleration | `mars-simd` integer moments/NEON; `mars-gpu` search; Rayon paths | Preserve existing exact kernels and deterministic threading; profile before more hardware work. |
@@ -37,13 +42,32 @@ The README's statement that no Mars 2 codec exists is stale. Actual source is su
 
 ### Critical integration gap
 
-`mars-search` depends on `mars-codec`, but `mars_search::encode_image` is a separate RMS-threshold encoder. Production `encode.rs::walk` and `walk_rd` call exhaustive search directly. The CLI rejects `--method` with `--lambda` or color. Some flags, including mode selection outside RD, have no effect.
+`mars-search` depends on `mars-codec`, but `mars_search::encode_image` is a separate RMS-threshold encoder. Production `encode.rs::walk` and `walk_rd` still call exhaustive search directly; `build_rate_snapshot` also runs the exhaustive threshold walk and discards its fit count. The CLI rejects `--method` with explicit `--lambda`, color input, or `--progressive`. Some flags, including mode selection outside RD, have no effect.
 
 Therefore, adding APCC to `MethodName` alone would **not** make it available to the main RD encoder.
 
+### Current defaults and compatibility
+
+- Plain `encmars` now selects RD at lambda 200, modes 0/2, fixed residual step 8, sizes 4–16, stride 4, color 4:4:4, and automatic threads. Density and progressive output remain off. Library/benchmark defaults were not changed to this CLI profile; `EncodeOptions::default()` still allows all four modes.
+- Explicit `--t-rms`, `--chroma-t-rms`, or `--method` selects the legacy path unless explicit lambda overrides the thresholds. **RD warm-up remains hard-coded to RMS 8** in `build_rate_snapshot`; contrary to current CLI help/README wording, user thresholds do not seed that pass. Correct this documentation in P0 rather than silently changing the baseline algorithm.
+- `--adaptive-residual` requires explicit `--lambda` and conflicts with `--method`. It does not enable mode 3: request e.g. `--lambda 200 --modes 0,2,3 --adaptive-residual`. Progressive containers are grayscale-only and incompatible with `--method`; color iteration callbacks are not color progressive-container support.
+- `ResidualQstep` validates [1, 65535] and stores binary32 bits. Quantization, scoring, and reconstruction use the wire-rounded step. The adaptive policy is `clamp(sqrt(6 * lambda / ln(2)), 1, 65535)`; fixed8 remains default. Color planes can carry separate steps. Keep the full `mars_format::Header`/`DecodeHeader` when decoding: passing only `.geometry` loses step metadata and implies legacy step 8.
+- O7 expanded `MARS` headers from 20 to 24 bytes and `MPRG` from 31 to 35 bytes **without changing version byte 0 or adding a legacy-layout fallback**. Old Mars 2 streams require re-encoding with this decoder; `MARC`'s unchanged outer layout does not make its embedded old streams compatible. Pin layout revision and decoder build as well as version byte. Mars 1 `.ifs` syntax is separate and unchanged; it cannot carry affine/residual modes or explicit residual steps.
+
 ### How much to trust existing results
 
-The audit found 10,906 enveloped historical result rows, all marked dirty with run index zero, plus 16 classical-method rows without the standard provenance envelope. This does not prove the measurements wrong, but they cannot serve as a clean, reproducible baseline for this revision. Preserve them; produce a new versioned result series.
+The local inventory contains 10,906 enveloped historical rows (all dirty, run index zero), 16 classical-method rows without that envelope, and 23 Step22 records in `results/step22-o7-1789648127131947000-41238.jsonl` (metadata, 19 samples, two comparisons, one operator-added timeout record). These are not all independent measurements or one schema. Preserve them; establish a new clean, versioned result series.
+
+The Step22/O7 experiment compares modes0/2 fixed8, all-modes fixed8, and all-modes adaptive at lambda 50/200/800/3200 on kodim01/02. It timed out after **19/24 points**. Only kodim01 has complete comparisons against modes0/2:
+
+| Arm | Reported BD-rate | PSNR integration interval |
+|---|---:|---|
+| All-modes fixed8 | +1.880847% | 21.521209–29.279225 dB |
+| All-modes adaptive | +3.342325% | 21.521209–29.010198 dB |
+
+The new two-image mean is unknown; the +1.025% adaptive mean acceptance ceiling remains unresolved. Different intervals prevent subtracting these numbers as an adaptive-versus-fixed8 BD-rate result. Fixed8 and CLI modes0/2 remain the baseline, not evidence of universal optimality.
+
+Step22 records dirty parent `5fc80de`, a tracked patch, embedded harness source, and build metadata—not a clean HEAD run. Its embedded adaptive arm also differs from HEAD's explicit `LambdaAdaptive` selection. Reproduce the current harness before attributing those results to HEAD. Single observations per point do not establish timing speedups. See [O7 status and limitations](docs/encmars-optimisation-status.md).
 
 Existing anchor support already covers JPEG, OpenJPEG, WebP, AVIF, and JPEG XL. The JPEG implementation recorded by the audit is libjpeg-turbo, not automatically mozjpeg. Existing anchor results use color Kodak; many Mars research gates use grayscale. Do not compare these as equivalent workloads.
 
@@ -53,7 +77,7 @@ Existing anchor support already covers JPEG, OpenJPEG, WebP, AVIF, and JPEG XL. 
 
 ### P0.1 Make every quality measurement cross the serialization boundary
 
-Inspect and update `mars-bench/src/rd_opt.rs::sample`, `mode_gate.rs`, `density_gate.rs`, and new experiment code so the authoritative path is:
+Update `crates/mars-bench/src/rd_opt.rs::sample`, `mode_gate.rs::sample_with_modes`, `density_gate.rs::sample_with_density`, and new experiment code so the authoritative path is:
 
 ```text
 input file → encode → serialize → actual coded file
@@ -63,39 +87,49 @@ input file → encode → serialize → actual coded file
                                      mars-core metrics from input + decoded files
 ```
 
-Some existing gates serialize for byte count but decode the original in-memory leaves. A previous adaptive-density result was withdrawn after this pattern hid a coordinate-serialization problem. The corrected historical density result was about −0.14% BD-rate, not the withdrawn −6.82%.
+All three named gate helpers still serialize for byte count but decode the original in-memory header/leaves. `mode_gate` now explicitly pins fixed8, but that does not repair this measurement bypass. A previous adaptive-density result was withdrawn after this pattern hid a coordinate-serialization problem. The historically reported corrected density result was about −0.14% BD-rate, not the withdrawn −6.82%; this is not proof that today's gate enforces serialized reconstruction.
+
+`crates/mars-bench/tests/residual_qstep_gate.rs::measure` already serializes, parses, checks headers/leaves, qstep and mode counts, then decodes the **parsed** stream for PSNR. Reuse that pattern. It is still an in-memory stream experiment, not the proposed file-to-file benchmark: no coded/decoded file reload, decoded-image hash, or CLI container/output coverage. Its `encode_elapsed_s` times the encoder call only; `elapsed_s` also includes serialization/parsing, decode, and PSNR, not primary end-to-end encode/decode timing.
 
 - Measure whole-container bytes, not estimated payload or summed leaf costs.
 - Keep in-memory reconstruction as a differential diagnostic, never the headline quality source.
-- Record bitstream hash, decoded-image hash, format version, dimensions, and crop rules.
-- Preserve existing golden streams. A change to decoded semantics requires a compatibility decision and regression fixture, even if syntax stays the same.
+- Record bitstream hash, decoded-image hash, format version **and layout/build identity**, container type (`MARS`/`MARC`/`MPRG`), dimensions, and crop rules. Compare like containers; an inner-plane stream omits CLI wrapper bytes.
+- Preserve existing golden streams with their decoder provenance. Account explicitly for the already-breaking O7 layout change. Further syntax or decoded-semantics changes require a compatibility decision and regression fixture; do not repeat an indistinguishable version-0 layout change.
 
 ### P0.2 Reproduce suspected source-level defects before fixing them
 
-| Concern | Evidence at inspected revision | Required regression / decision |
+| Concern | Evidence at HEAD | Required regression / decision |
 |---|---|---|
-| Residual orientation | `residual_for_candidate` constructs residuals at mapped range coordinates `[i,j]`; `ifs::decode_leaf` adds `res[u,v]` while writing `[i,j]` | Nonzero asymmetric residual, all eight isometries, serialize/parse/decode. Establish correct coordinate convention and compatibility impact. |
-| Contrast header precision | Fitting uses `params.max_alfa`; header stores a 1/32-quantized value; decoder uses header value | Test nonrepresentable parameters. Normalize before fitting or reject them explicitly. |
-| Contractivity | Default maximum is contractive, but configurable/header values can allow coefficients ≥1 | Validate dequantized coefficients. Separate contractive research profile from explicitly noncontractive legacy settings. |
-| Domain-grid phase | Contracted samples use even-origin 2×2 averages; candidate lookup divides full coordinates by two | Test odd stride/origins against direct decoder sampling. Reject unsupported grids or implement their phase correctly. |
-| Flat/tied features | Zero-energy normalization and non-total sort comparison patterns exist in current search code | Constant blocks, duplicate keys, finite stable sorting, deterministic DC policy. |
-| Empty/tiny pools | Search pool enumeration can produce an invalid origin when domains do not fit; forced border splits can fall below indexed sizes | Checked geometry, guaranteed termination, explicit no-candidate handling, odd/non-power-of-two image tests. |
+| Residual orientation | `residual_for_candidate` still constructs residuals at mapped range coordinates `[i,j]`; `ifs::decode_leaf` adds `res[u,v]` while writing `[i,j]`. The new hand-built qstep fixture uses isometry 0. | Independent expected reconstruction for nonzero asymmetric residuals, all eight isometries, serialize/parse/decode. A shared-decoder round-trip does not prove orientation correctness. A fix may change old mode-3 decoded pixels; decide compatibility. |
+| Contrast header precision | Fitting still uses `params.max_alfa`; header stores a 1/32-quantized value; decoder uses header value. Residual-step wire rounding is handled, contrast normalization is not. | Test nonrepresentable parameters. Normalize before all fitting/scoring or reject them explicitly. |
+| Contractivity | Actual contrast is `qalfa / 2^bits_alfa * (int_max_alfa / 32)`. Default maximum coefficient is 15/16, but other accepted settings can allow ≥1. | Validate dequantized coefficients for the selected profile; distinguish noncontractive legacy settings. Fixed residuals do not increase the continuous map's Lipschitz constant, but integer iterations still need stopping/cycle diagnostics. |
+| Domain-grid phase | Density's finer-than-header-grid branch is already removed: only base/doubled stride is used. Independently, contracted samples use even-origin 2×2 averages and lookup divides coordinates by two. | Retain the density serialization regression. Test odd stride/origins against direct decoder sampling; use positive even stride in the baseline until phase-aware sampling is validated. |
+| Flat/tied features | Zero-energy normalization and non-total sort comparison patterns remain search-audit concerns, not demonstrated fixes. | Constant blocks, duplicate keys, finite stable sorting, deterministic DC policy. |
+| Empty/tiny pools and decoding | Production exhaustive search already uses checked subtraction and returns no candidate when domains cannot fit. `mars-search::DomainPool` uses saturating subtraction and can enumerate an invalid origin; boundary leaves can fall below indexed sizes. Contracted-plane chunking and decoder domain reads also need tiny-image coverage. | Checked geometry before work, guaranteed termination, indexed no-candidate handling, odd/non-power-of-two round-trips, and DC leaves whose nominal domain does not fit. Do not confuse safe exhaustive enumeration with safe end-to-end geometry. |
 
 These are source-audit findings, not all reproduced defects. Fix only after a failing focused test identifies the behavior. Keep fixes in isolated changes, then establish a corrected baseline before comparing algorithms.
 
-**Validation actually performed during planning:** `cargo test --locked --offline -p mars-codec residual` passed four tests. This covers residual entropy round-trips and a zero-residual fit, not the nonidentity/asymmetric residual regression above. No headline benchmark or full test suite was run.
+**Validation actually performed:** the original parent-revision planning run `cargo test --locked --offline -p mars-codec residual` passed four tests. During this HEAD review:
+
+| Command | Result |
+|---|---|
+| `cargo test --locked --offline -p mars-codec --test residual_qstep` | 6 passed |
+| `cargo test --locked --offline -p mars-codec --lib residual` | 4 passed |
+| `cargo test --locked --offline -p mars-bench --release --test residual_qstep_gate arms_and_real_stream_measurement_are_wired -- --exact --nocapture --test-threads=1` | 1 passed |
+
+These establish focused qstep bounds/metadata, malformed-step rejection, round-trips, color/progressive propagation, residual unit behavior, and three-arm synthetic 32×32 measurement wiring. They do **not** establish the all-isometry invariant above, Kodak acceptance, speed, or convergence. No full suite or new headline benchmark was run. Broader historical validation and timeouts are separately reported in [the optimisation status](docs/encmars-optimisation-status.md); routine ignored/opt-in test results are not corpus-gate evidence.
 
 ### P0.3 Build a strict unified experiment runner
 
 Suggested new modules: `crates/mars-bench/src/experiment.rs`, `experiment_config.rs`, `experiment_report.rs`; thin CLI wiring in `mars-cli/src/bin/marsbench.rs`. Names are proposals, not existing APIs.
 
-Reuse `store::Row`, `ResultStore`, `measure`, `bdrate`, `provenance`, and reports. Keep legacy row readers working; add a versioned experiment payload.
+Reuse `store::Row`, `ResultStore`, `measure`, `bdrate`, `provenance`, and reports. Keep legacy row readers working; add a versioned experiment payload. Reuse Step22's parsed-stream checks and per-record flushing, but do not mistake its separate JSONL schema for this runner. Its timeout completion was operator-added after termination; implement runner-owned timeout/failure accounting and explicit interrupted-run recovery.
 
 Each planned case must have a stable identity and persist:
 
 - Source SHA, dirty status, dirty-source patch hash if applicable, lockfile/build identity, compiler/flags, harness version.
 - Experiment/config/split/image/oracle/model hashes and artifact paths.
-- All codec parameters, enabled modes, partition/search strategy, domain stride, quantizers, seed/RNG version.
+- All codec parameters, enabled modes, partition/search strategy, domain stride, quantizers (including residual policy and actual wire step per plane), seed/RNG version.
 - Decoder initialization, iteration/stopping policy, filter settings, color/subsampling, whole-container bytes.
 - Phase work counters, timing boundaries, raw repetition samples, threads, machine/OS/QoS/operator conditions.
 - PSNR, SSIM, MS-SSIM availability, bpp, convergence status, candidate coverage/regret, leaf/mode histograms.
@@ -110,7 +144,7 @@ Requirements:
 - Validate corpus completeness before expensive work.
 - Do not overwrite historical JSONL or reinterpret its timing as the new protocol.
 
-**Exit P0:** codec round-trip tests pass; defects affecting the selected profile are resolved or excluded explicitly; runner produces reproducible smoke artifacts; missing inputs cause an explicit failure; documentation status is corrected.
+**Exit P0:** codec round-trip tests pass; defects affecting the selected profile are resolved or excluded explicitly; runner produces reproducible smoke artifacts; missing inputs cause an explicit failure; README status and warm-up documentation are corrected. Existing qstep tests and the incomplete Step22 run satisfy only parts of this gate. Start with modes0/2, fixed8, representable max contrast, and even stride; keep mode3 experiments blocked on the independent residual regression.
 
 ## 4. Phase P1 — one search pipeline for legacy and RD encoding
 
@@ -131,7 +165,7 @@ Route `walk`, `walk_rd`, and eventually RD warm-up through the shared provider. 
 - Immutable query indexes usable through `Sync`; separate index construction from querying.
 - Explicit block/plane identity, geometry, legal domain stride, candidate-budget units.
 - Separate candidate retrieval from exact fitting; permit a fit-aware driver for early stopping and widening.
-- Return fitted parameters and raw moments needed by residual modes, not just coordinates.
+- Return fitted parameters and raw moments needed by residual modes, not just coordinates. Preserve the codec's full header/quantisation context across adapters, including residual step; do not narrow it to `ifs::Header` geometry.
 - Deterministic candidate order/ties; for a changed method define canonical tie IDs `(row,col,isometry)`.
 - Bounded, explicitly counted fallback; distinguish no match from a legitimate flat-block result.
 - Cache domain moments per position/size and reuse cross terms where valid. Avoid recalculating domain sums for every orientation.
@@ -145,7 +179,7 @@ Report separately: contracted-plane construction, index build, feature queries, 
 
 For controlled search comparisons initially retain the same exhaustive RD warm-up and charge its full cost. Then test selected-provider warm-up as a separate factor, since it changes both time and frozen rate models.
 
-**Exit P1:** default exhaustive path preserves pinned bytes on the supported fixtures; each existing method can exercise the production grayscale threshold and RD paths; flags behave explicitly; work includes warm-up; thread-count tests pass.
+**Exit P1:** default exhaustive path preserves pinned **post-P0/current-layout** bytes on the supported fixtures; each existing method can exercise the production grayscale threshold and RD paths; flags behave explicitly; work includes warm-up; thread-count tests pass. Do not use pre-O7 container bytes as an unqualified identity target.
 
 ## 5. Phase P2 — bounded seeded random search
 
@@ -168,7 +202,9 @@ Tests: reproducibility across threads, unique legal samples, small pools, empty 
 
 ## 6. Phase P3 — Pearson/APCC indexing
 
-Source: [2013 APCC paper summary](summaries/A_Novel_Fractal_Image_Compression_Scheme_With_Block_Classification_and_Sorting_Based_on_Pearsons_Correlation_Coefficient.md). Suggested new `mars-search/src/apcc.rs` plus an offline training/export utility under `mars-bench`.
+Research source: the 2013 APCC paper, “A Novel Fractal Image Compression Scheme With Block Classification and Sorting Based on Pearson's Correlation Coefficient.” The originally cited `summaries/` files are **not in this checkout**; obtain and record the original paper/bibliographic source before implementing paper-specific details. This prerequisite also applies to P4–P7 below; those descriptions are research directions, not verified reproductions.
+
+Suggested new `crates/mars-search/src/apcc.rs` plus an offline training/export utility under `mars-bench`.
 
 ### Important limitation: APCC is not Mars's exact objective
 
@@ -204,7 +240,7 @@ Run these as alternatives before stacking filters; combinations can discard good
 
 ### Binary local features
 
-Source: [local-feature paper](summaries/Enhancing_fractal_image_compression_spee.md).
+Research source: the local-feature paper previously referenced as `Enhancing_fractal_image_compression_spee.md`; summary/PDF absent locally (see §6).
 
 - Implement the paper's 12-bit perimeter-versus-central-mean descriptor first for 4×4 ranges and matching contracted domains.
 - Use XOR/popcount as a separately documented implementation choice instead of a 4096² lookup table.
@@ -214,7 +250,7 @@ Source: [local-feature paper](summaries/Enhancing_fractal_image_compression_spee
 
 ### Hierarchical intensity-sum classes
 
-Source: [hierarchical-classification paper](summaries/Fractal_Image_Compression_using_Hierarch.md).
+Research source: the hierarchical-classification paper previously referenced as `Fractal_Image_Compression_using_Hierarch.md`; summary/PDF absent locally (see §6).
 
 - Implement P-I first: quadrant and subquadrant rank codes, sparse occupied buckets, deterministic tie policy.
 - Do not allocate a dense 24^5 class table per block size.
@@ -225,7 +261,7 @@ Source: [hierarchical-classification paper](summaries/Fractal_Image_Compression_
 
 ## 8. Phase P5 — improve existing rate–distortion optimization
 
-Source: [optimal hierarchical partition paper](summaries/Optimal_hierarchical_partitions_for_frac.md).
+Research source: the optimal hierarchical partition paper previously referenced as `Optimal_hierarchical_partitions_for_frac.md`; summary/PDF absent locally (see §6).
 
 ### P5a: verify the current objective
 
@@ -234,7 +270,9 @@ Mars already searches a full square quadtree and prunes bottom-up. Its costs are
 Consequently, the current solution is optimal only over evaluated choices under its additive surrogate—not all domains, partitions, stream lengths, or final decoded distortion.
 
 - Log estimated versus actual total bits and category costs (partition, modes, coordinates, coefficients, residuals).
-- Count the fixed `t_rms=8` warm-up explicitly; do not claim user `t_rms` controls it.
+- Count the fixed `t_rms=8` warm-up explicitly: its evaluations are currently discarded by `build_rate_snapshot`. Do not claim user `t_rms` controls it despite current CLI help wording.
+- Audit residual distortion against quantized decoded predictions, clipping/truncation, and iterative reconstruction. Current residual scoring uses continuous source-domain prediction error; wire-rounded qstep consistency does not make that final-image distortion.
+- Keep fixed8 versus lambda-adaptive quantisation as a separate factor with identical allowed modes. Step22's unfinished three-arm result is a starting diagnostic, not a passed residual improvement gate.
 - Compare threshold partitions versus existing RD partitions with the **same retrieval provider** and mode set.
 - Begin with modes 0 and 2 (flat/fractal). Reintroduce affine and residual modes as separate ablations after P0.
 - Sweep lambda on validation to obtain overlapping curves; retain all raw points.
@@ -255,7 +293,7 @@ Do not call this an exact reproduction of the 1998 HV/BFOS paper. Rectangular HV
 
 ## 9. Phase P6 — adaptive boundary postprocessing
 
-Source: [adaptive post-processing paper](summaries/Adaptive_post_processing_for_fractal_ima.md). Suggested new `mars-codec/src/postprocess.rs`; explicit `decmars` option and benchmark payload fields.
+Research source: the adaptive post-processing paper previously referenced as `Adaptive_post_processing_for_fractal_ima.md`; summary/PDF absent locally (see §6). Suggested new `crates/mars-codec/src/postprocess.rs`; explicit `decmars` option and benchmark payload fields.
 
 1. Start with an out-of-loop edge-aware boundary filter using decoded pixels and actual leaf geometry.
 2. Compare off, a clearly labeled reference-style smoother, and the adaptive filter. Original C `smooth_image` is a useful control, not automatically equivalent Rust behavior.
@@ -269,7 +307,7 @@ Source: [adaptive post-processing paper](summaries/Adaptive_post_processing_for_
 
 ## 10. Phase P7 — conditional sparse multi-domain coding
 
-Source: [fast sparse fractal paper](summaries/Fast_sparse_fractal_image_compression.md). This is a new coding model, not another retrieval switch or the existing DCT residual mode.
+Research source: the fast sparse fractal paper previously referenced as `Fast_sparse_fractal_image_compression.md`; summary/PDF absent locally (see §6). This is a new coding model, not another retrieval switch or the existing DCT residual mode.
 
 - Start with at most two domain terms: `prediction = b + sum(a_i * transformed_domain_i)`.
 - Reuse APCC retrieval for residual searches; add joint least-squares/OMP fitting with domain–domain cross terms.
@@ -290,7 +328,7 @@ Source: [fast sparse fractal paper](summaries/Fast_sparse_fractal_image_compress
 - **Correctness:** committed Tiny64/golden streams; generated flat, gradient, checkerboard, noise, edge/rotation fixtures; odd dimensions and invalid geometry cases. Pin generator seeds and hashes.
 - **Development:** existing kodim01/kodim02 are historically used for learned training/evaluation and must not be described as fresh blind tests.
 - **Training/validation:** create explicit image-level manifests before APCC or threshold tuning. Prefer separately licensed training data and reserve Kodak for final reporting. If initially limited to Kodak, freeze a documented split and label whole-Kodak results development-influenced.
-- **Headline standard set:** all 24 Kodak images with pinned grayscale conversion. Existing raw images are not present in the planning checkout and must be fetched/generated.
+- **Headline standard set:** all 24 Kodak images with pinned grayscale conversion. This local checkout contains 24 PNGs and 24 grayscale raw images; their hashes match `corpus/kodak.manifest.json` and `corpus/standard.images.json`, and raw byte lengths were checked during review. They are ignored/generated artifacts, not supplied by the commit; fresh checkouts still require preparation. The conversion itself was not regenerated in this review.
 - **Generalization:** separately hashed textures and larger photographs with documented licenses, no overlap with tuning data. Existing CLIC/USC-SIPI mentions are plans, not downloaded benchmark sets.
 - All block crops from an image belong to that image's split. Pin APCC reference artifacts per class/size. Account for training/model storage separately; encoder-only reference data need not inflate decoder stream size.
 
@@ -304,7 +342,7 @@ Source: [fast sparse fractal paper](summaries/Fast_sparse_fractal_image_compress
 
 Layer A must use a common block population, not method-dependent output leaves. Existing recall reports membership of the selected tuple in oracle top-k; add candidate-set coverage separately. Report sample count, zero-error cases, tied optima, and unavailable coverage.
 
-Current oracle is GPU f32 top-32 and starts at block size 8. Use CPU f64 exhaustive fitting as the ranking reference on bounded common samples, cross-check GPU near ties, and avoid describing GPU output as unconditionally exact. Full-grid size-4 oracle builds can be prohibitively expensive; use a frozen stratified size-4 sample with disclosed coverage first.
+There are 72 oracle cache files locally; their presence does not establish freshness or validity, and their contents were not validated during this review. Current oracle is GPU f32 top-32 and starts at block size 8. Use CPU f64 exhaustive fitting as the ranking reference on bounded common samples, cross-check GPU near ties, and avoid describing GPU output as unconditionally exact. Full-grid size-4 oracle builds can be prohibitively expensive; use a frozen stratified size-4 sample with disclosed coverage first.
 
 ### 11.3 Limit experiment growth
 
@@ -317,9 +355,9 @@ Do not run every method × budget × stride × mode × lambda × seed × thread 
 5. Freeze finalists and run full standard/extended sets.
 6. Repeat final timing configurations, not every discarded tuning point.
 
-Initial controlled profile: grayscale; min/max 8/16; shift 4; 4-bit contrast, 7-bit offset, max contrast 1.0; eight isometries; modes 0/2 for RD; adaptive density off; filter off. Threshold starting grid: 4, 6, 8, 12, 16. Lambda starting grid: 25, 50, 100, 200, 400, 800, 1600, 3200. These are proposed sweeps, not equal-bitrate settings.
+Initial controlled profile: grayscale; min/max 8/16; shift 4; 4-bit contrast, 7-bit offset, max contrast 1.0 (maximum dequantized coefficient 15/16); fixed residual step 8; eight isometries; modes 0/2 for RD; adaptive density off; filter off. Threshold starting grid: 4, 6, 8, 12, 16. Lambda starting grid: 25, 50, 100, 200, 400, 800, 1600, 3200. These are proposed sweeps, not equal-bitrate settings.
 
-Reproduce current default behavior first, then vary size 4, max size 32, and stride 8 separately. Add color, more modes, and density only after search effects are understood.
+Pin the current CLI default profile (§2, minimum size 4) separately from this controlled minimum-size-8 research profile. Reproduce both before changing retrieval; vary size 4, max size 32, and stride 8 as labeled factors from the controlled profile. Add color, more modes, adaptive residual quantisation, and density only after search effects and P0 restrictions are understood.
 
 Record a manifest-derived case count and wall-time estimate from a small pilot before a large run. Set per-case and per-stage timeouts; preserve incomplete evidence and do not rank methods on incompatible completed subsets.
 
@@ -378,16 +416,18 @@ For each promotion show worst-image behavior. Proposed guardrails: no unexplaine
 
 | Increment | Main write scope | Deliverable |
 |---|---|---|
-| 0a | `mars-codec` focused tests and isolated fixes | Validated baseline semantics; unchanged legacy fixtures or explicit compatibility decision |
-| 0b | `mars-bench`, benchmark CLI, experiment configs | Strict serialized-output runner, schema, completeness checks, smoke report |
+| 0a | `mars-codec` focused tests and isolated fixes; status/help docs | Build on existing qstep tests; resolve independent residual/geometry regressions and layout compatibility; correct stale default/warm-up claims |
+| 0b | `mars-bench`, benchmark CLI, experiment configs | Build on Step22 parsed-stream checks; repair three legacy gate bypasses; add strict file-to-file runner, schema, completeness/timeout handling, smoke report |
 | 1 | Codec search interface, `mars-search` adapter, `encmars` | Shared production search for threshold/RD paths |
 | 2 | `mars-search/random.rs` and tests | Budgeted random baseline and reproducibility tests |
 | 3 | APCC retrieval/training utility and tests | Versioned reference blocks; APCC validation report |
 | 4 | Binary/hierarchical modules | Optional challenger reports; no automatic default changes |
-| 5 | `encode.rs`, `rate.rs`, RD benchmark tests | Audited objective, retrieval-driven RD, optionally exact-result pruning |
+| 5 | `encode.rs`, `rate.rs`, RD benchmark tests | Audited objective and warm-up counters, controlled fixed8/adaptive residual ablation, retrieval-driven RD, optionally exact-result pruning |
 | 6 | Postprocessor, decoder option, metrics experiments | Fixed-stream quality/time ablation |
 | 7 | Sparse model/format/decoder/rate integration | Conditional versioned experimental codec and RD report |
 | 8 | Result store/reporting and docs | Reproducible final leaderboard, limitations, promote/defer decisions |
+
+**Next deliverable:** finish 0a/0b rather than register a new search enum. Existing residual metadata is delivered; neither the O7 performance gate nor P0 as a whole is complete. Re-run the current residual harness only after mode-3 correctness is established, and do not make completing its expensive corpus sweep a prerequisite for the restricted modes0/2 runner smoke.
 
 0a and 0b can be delegated independently only with disjoint file ownership. Random, APCC, and P4 work can proceed in parallel after the shared interface is frozen; one integration owner controls common enums/CLI files. P5 and P6 can proceed independently after P0/P1. Sparse coding follows successful APCC and corrected RD/mode accounting.
 
@@ -424,7 +464,9 @@ Small existing round-trip (creates output under `target/`; build first):
 ./target/release/marsbench metrics fixtures/mars1/tiny64.raw target/random-plan-smoke.pgm --raw-dims 64x64 --coded target/random-plan-smoke.mars
 ```
 
-The filename is arbitrary; this smoke command uses **existing Fisher**, not the proposed random method. For the existing RD path replace `--method fisher --t-rms 8` with `--lambda 200 --modes 0,2`; do not combine method and lambda before P1. Tiny64 cannot supply the pinned five-scale MS-SSIM and is not scientific corpus evidence.
+The filename is arbitrary; this smoke command uses **existing Fisher**, not the proposed random method. For the existing RD path replace `--method fisher --t-rms 8` with `--lambda 200 --modes 0,2`; do not combine method and lambda before P1. Rebuild before mixing binaries/streams from different header layouts. Tiny64 cannot supply the pinned five-scale MS-SSIM and is not scientific corpus evidence.
+
+The existing opt-in residual acceptance sweep is `just gate-22`. It is expensive, is not run by routine tests, and its previous recorded attempt timed out; do not describe it as passed. The three-arm synthetic smoke actually executed in this review is listed in §3. The CLI adaptive example is `encmars input.png output.mars --lambda 200 --modes 0,2,3 --adaptive-residual`; this exercises an experimental policy, not a recommended default.
 
 ### Proposed commands: implement in P0/P1 before use
 
@@ -452,4 +494,4 @@ These command names/config files do not exist at the inspected revision. Define 
 
 The implementation goal is not to reproduce the earlier shortlist in isolation. Mars already has stronger infrastructure and more alternatives than that shortlist assumed.
 
-**First deliver a trustworthy shared-path benchmark, then random search, then APCC.** Reuse the existing quadtree RD optimizer, add filtering as an independent low-risk experiment, and defer new sparse syntax until a measured benefit warrants it. A negative result against Saupe/Fisher/Funnel or existing modes is useful progress; an impressive number from mismatched bitrates or an unparsed stream is not.
+**Finish the restricted-profile serialized-output baseline and shared search path, then random search, then APCC.** Build on the delivered qstep metadata/tests without treating the incomplete residual experiment as a success. Reuse the existing quadtree RD optimizer, resolve residual semantics before mode-3 comparisons, add filtering as an independent low-risk experiment, and defer new sparse syntax until a measured benefit warrants it. A negative result against Saupe/Fisher/Funnel or existing modes is useful progress; an impressive number from mismatched bitrates or an unparsed stream is not.

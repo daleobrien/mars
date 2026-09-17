@@ -1,0 +1,19 @@
+# Fractal Image Compression
+- **Author:** Miroslav Galabov.
+- **Year / venue:** 2003, International Conference on Computer Systems and Technologies (CompSysTech).
+- **Core method:** A simple reference fractal codec matches fixed-size range blocks against blocks in a half-resolution, averaged copy of the input. It stores domain coordinates and fitted intensity scale/offset, then reconstructs by iterative application.
+- **Key techniques:**
+  - Downsampling with averaging/low-pass filtering; 128×128 input becomes a 64×64 domain image.
+  - Fixed 2×2 or 4×4 blocks; exhaustive domain–range comparisons using squared-error distortion.
+  - Affine intensity mapping with contrast scale in [0,1] and luminance shift in [-255,255].
+  - No classification, search acceleration, or implemented adaptive partitioning.
+- **Reported results:** MATLAB implementation, 128×128 grayscale Lena, black initialization, six decoding iterations (Table 1).
+  - 2×2: encode **10 min**, decode **45 s**, codebook **16,384 bytes**, reported SNR **27 dB**.
+  - 4×4: encode **55 s**, decode **28 s**, codebook **6,144 bytes**, reported SNR **21 dB**.
+  - Relative to 16,384 raw grayscale bytes, derived codebook-only ratios are **1:1** and **2.67:1**, respectively.
+  - PSNR and SSIM are not reported; the table labels its quality measure as signal-to-noise ratio.
+- **Implementation notes:**
+  - Useful as a minimal educational baseline, not a competitive encoder; exhaustive matching dominates cost.
+  - Small blocks improve reported SNR but can eliminate compression entirely.
+  - Error-driven adaptive block sizes are suggested as future work, not demonstrated.
+  - Scale-independent decoding generates synthetic detail; it does not recover genuine missing image detail.

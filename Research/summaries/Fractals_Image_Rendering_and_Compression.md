@@ -1,0 +1,21 @@
+# Fractals Image Rendering and Compression using GPUs
+- **Authors:** Munesh Singh Chauhan and Ashish Negi.
+- **Year / venue:** 2012, International Journal of Digital Information and Wireless Communications (IJDIWC) 2(1), 1–6.
+- **Core method:** Parallelize conventional fractal domain–range matching on a GPU using OpenCL. Independent range searches and domain contractions expose parallel work without introducing a new coding model.
+- **Key techniques:**
+  - Fixed range blocks; introductory example uses 4×4 ranges and 8×8 domains.
+  - Contracted domain pool, affine intensity adjustments, and RMS matching error.
+  - Parallelism across independent range searches and pixel-level computations, including domain contraction.
+  - C++ CPU baseline compared with an OpenCL GPU implementation.
+  - No demonstrated block classification, adaptive partitioning, or algorithmic search pruning.
+- **Reported results:**
+  - CPU: Intel Core 2 Duo T7500, **2.2 GHz**; GPU: Nvidia GeForce **GT-540M**.
+  - Image sizes: **64×64, 256×256, 512×512, 1024×1024**; range sizes: **4×4 and 8×8**.
+  - Figures 4–5 compare encoding times; the text says GPU encoding is faster in every tested category.
+  - Text claims a frame interval **below 9 ms**, versus a **16.67 ms** target; no unambiguous per-configuration timings are available in extracted text.
+  - No PSNR, SSIM, compression ratio, or tabulated numeric speedup is reported.
+- **Implementation notes:**
+  - Useful motivation for GPU acceleration, but not a reproducible kernel-level implementation guide.
+  - Requires an existing fractal codec and OpenCL-capable hardware; kernel layout, memory strategy, and benchmarking details are sparse.
+  - Validate timing and reconstruction quality independently before relying on the real-time claim.
+  - Treat introductory claims about unchanged quality under scaling cautiously; resolution-independent synthesis does not preserve unknown original detail.
