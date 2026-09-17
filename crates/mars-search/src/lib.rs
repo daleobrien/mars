@@ -22,6 +22,7 @@ pub mod kdtree;
 pub mod learned;
 pub mod masscenter;
 pub mod mc_saupe;
+pub mod random;
 pub mod saupe;
 pub mod saupe_fisher;
 pub mod tables;

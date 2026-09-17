@@ -30,11 +30,12 @@ enum MethodArg {
     McSaupe,
     Funnel,
     Learned,
+    Random,
 }
 
-impl From<MethodArg> for mars_search::MethodName {
-    fn from(m: MethodArg) -> Self {
-        match m {
+impl MethodArg {
+    fn indexed_method(self) -> Option<mars_search::MethodName> {
+        Some(match self {
             MethodArg::Exhaustive => mars_search::MethodName::Exhaustive,
             MethodArg::Fisher => mars_search::MethodName::Fisher,
             MethodArg::Hurtgen => mars_search::MethodName::Hurtgen,
@@ -44,7 +45,13 @@ impl From<MethodArg> for mars_search::MethodName {
             MethodArg::McSaupe => mars_search::MethodName::McSaupe,
             MethodArg::Funnel => mars_search::MethodName::Funnel,
             MethodArg::Learned => mars_search::MethodName::Learned,
-        }
+            MethodArg::Random => return None,
+        })
+    }
+
+    fn key(self) -> &'static str {
+        self.indexed_method()
+            .map_or("random", |method| method.key())
     }
 }
 
@@ -177,11 +184,24 @@ struct Cli {
     /// `exhaustive` uses the codec's own exhaustive provider, producing identical bytes
     /// to no-method encoding with the same threshold/lambda and options. Other methods
     /// use mars-search's indexed candidate providers. `learned` has baked-in weights.
+    /// `random` is opt-in and requires --budget; --seed defaults to 0. Its budget
+    /// limits production queries only, not the exhaustive RD warm-up, which may
+    /// dominate total work.
     /// Grayscale only; mutually exclusive with --progressive for now.
     /// Reported `evals` counts production search only; `warmup_evals` and `total_evals`
     /// separately expose RD rate-estimation work.
     #[arg(long, value_enum)]
     method: Option<MethodArg>,
+
+    /// Positive domain-position budget per production search query (8 isometry fits
+    /// per position, at most 8*K fits). Required with --method random; rejected for
+    /// other methods. Does not limit exhaustive RD warm-up fits.
+    #[arg(long)]
+    budget: Option<usize>,
+
+    /// Reproducible random-search seed (default 0). Only valid with --method random.
+    #[arg(long)]
+    seed: Option<u64>,
 
     /// Pin Rayon's global thread pool to this many threads instead of Rayon's own
     /// default (`std::thread::available_parallelism()`). Matches `marsbench`'s own
@@ -283,6 +303,18 @@ impl Cli {
     }
 
     fn validate(&self) -> Result<()> {
+        if matches!(self.method, Some(MethodArg::Random)) {
+            if self.budget.is_none_or(|budget| budget == 0) {
+                bail!("--method random requires an explicit positive --budget");
+            }
+        } else {
+            if self.budget.is_some() {
+                bail!("--budget is only valid with --method random");
+            }
+            if self.seed.is_some() {
+                bail!("--seed is only valid with --method random");
+            }
+        }
         for (name, value) in [
             ("--lambda", self.lambda),
             ("--t-rms", self.t_rms),
@@ -549,17 +581,39 @@ fn run_with_method(
     params: &EncodeParams,
     options: &EncodeOptions,
 ) -> Result<()> {
-    let method: mars_search::MethodName = method_arg.into();
     let plane = &image.planes()[0];
-    let outcome = encode_image_with_search(plane, params, options, |contracted| {
-        if matches!(method_arg, MethodArg::Exhaustive) {
-            Box::new(ExhaustiveSearch)
-        } else {
-            Box::new(mars_search::IndexedSearchProvider::build(
-                plane, contracted, params, options, method,
-            ))
+    let (outcome, search_details) = match method_arg.indexed_method() {
+        Some(method) => (
+            encode_image_with_search(plane, params, options, |contracted| {
+                if matches!(method_arg, MethodArg::Exhaustive) {
+                    Box::new(ExhaustiveSearch)
+                } else {
+                    Box::new(mars_search::IndexedSearchProvider::build(
+                        plane, contracted, params, options, method,
+                    ))
+                }
+            }),
+            String::new(),
+        ),
+        None => {
+            let config = mars_search::random::RandomConfig {
+                budget: cli.budget.context("--method random requires --budget")?,
+                seed: cli.seed.unwrap_or(0),
+            };
+            let details = format!(
+                "budget={}, seed={}, rng_version={}, ",
+                config.budget,
+                config.seed,
+                mars_search::random::RNG_VERSION
+            );
+            let outcome = encode_image_with_search(plane, params, options, |contracted| {
+                Box::new(mars_search::random::RandomSearchProvider::build(
+                    plane, contracted, params, options, config,
+                ))
+            });
+            (outcome, details)
         }
-    });
+    };
     cli.validate_leaf_modes(&outcome.leaves)?;
     let transforms = outcome.leaves.len() as u64;
     let evals = outcome.counters.search_evals;
@@ -577,11 +631,11 @@ fn run_with_method(
     let bpp = 8.0 * bytes.len() as f64 / (width * height) as f64;
     println!(
         "{width}x{height} gray -> {} ({} bytes, {bpp:.3} bpp, method {}, {evals} evals, \
-         search_evals={evals}, warmup_evals={warmup_evals}, total_evals={total_evals}, \
+         {search_details}search_evals={evals}, warmup_evals={warmup_evals}, total_evals={total_evals}, \
          {transforms} transforms, {:.2} evals/transform)",
         cli.output.display(),
         bytes.len(),
-        method.key(),
+        method_arg.key(),
         evals as f64 / transforms.max(1) as f64,
     );
     Ok(())

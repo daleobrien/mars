@@ -81,11 +81,19 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - Validation: pinned provider tests, all-method fitted-moment/stream/thread comparisons, tiny/odd geometry, CLI method matrix, strict-mask rejection, default byte identity and residual round-trips passed. Fisher adaptive residual support uses explicit modes0/3, retaining a nonzero-residual assertion.
 - Targeted production-library/binary Clippy found the existing `decmars::image_writer` type-complexity lint; no codec/search compile errors. Full end-to-end speed/memory/repeated timing acceptance remains unmeasured; P1 performance promotion is not claimed.
 
+### Step 8 — bounded seeded random search (P2 implementation)
+
+- Added opt-in `encmars --method random --budget K --seed N` through the same production threshold/RD provider. Budget counts unique domain positions, each fitted under all eight isometries; no early stop or exhaustive fallback. Explicit positive budget required; seed defaults to zero.
+- Query-local, versioned grayscale FNV-1a identity + SplitMix64 + unbiased sparse partial Fisher–Yates; candidate sets are nested across budgets and sorted into reference order. Sampling expected O(K), sorting O(K log K), temporary memory O(K); owned legal-position indexes are built once per image/size/stride.
+- Full-budget output matches exhaustive bytes, including RD, density, residual modes and thread counts. Random remains grayscale-only and nondefault. RD warm-up remains exhaustive and **outside the per-query random budget**, included in separate counters and wall time.
+- Validation: seven library integration tests and four CLI tests passed; pinned RNG/hash/sample vectors, no duplicates, query-order independence, thread identity, different-seed outputs, empty/tiny pools and full-budget equivalence. Targeted Clippy and release CLI build passed.
+- P2 scientific exit is still open: no frozen validation Pareto frontier, full-stream corpus RD curves, or promotion result yet. The general experiment runner still needs method/budget/seed sweep support.
+
 ## 2. What Mars already implements
 
 README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.
 
-**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. A restricted file-to-file smoke and shared production retrieval interface are implemented (steps 6/7); the full experiment runner, random/APCC methods, postprocessor and sparse multi-domain format remain proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
+**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. A restricted file-to-file smoke and shared production retrieval interface are implemented (steps 6/7); random is implemented as an opt-in provider (step 8); the full experiment runner, APCC, postprocessor and sparse multi-domain format remain proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
 
 | Area | Existing implementation | Consequence for this plan |
 |---|---|---|
@@ -93,7 +101,7 @@ README status/layout and warm-up wording were corrected in execution step 3. Use
 | RD partitioning | `encode.rs::walk_rd`, `split_rd`, `best_mode_leaf`; `rate.rs::RateModels` | Bottom-up `D + lambda R` selection already exists. Audit the objective and integrate retrieval first. |
 | Modes | Flat, spatial affine, single-domain fractal, fractal plus DCT residual | Keep mode sets controlled in search experiments. Sparse DCT residuals are not multi-domain fractal coding. |
 | Residual quantisation | `quant.rs::ResidualQstep`, `encode.rs::ResidualQuantisation`; per-stream step propagated through grayscale, color planes, and progressive output | Fixed8 remains default; lambda-adaptive quantisation is implemented but opt-in and not promoted by the incomplete experiment. Preserve metadata through decoding. |
-| Search | `mars-search`: Exhaustive, Fisher, Hurtgen, MassCenter, Saupe, SaupeFisher, McSaupe, Funnel, Learned | Use existing methods as serious challengers, not just historical context. Random and 2013 APCC are missing. |
+| Search | `mars-search`: Exhaustive, Fisher, Hurtgen, MassCenter, Saupe, SaupeFisher, McSaupe, Funnel, Learned | Use existing methods as serious challengers, not just historical context. Random is now implemented (step 8); 2013 APCC remains proposed. |
 | Search interface | `CandidateRetriever`, `DomainPool`, `RangeBlock`, `search_block`, `SizedRetrievers` | Good starting point, but a separate encoder currently consumes them. |
 | Acceleration | `mars-simd` integer moments/NEON; `mars-gpu` search; Rayon paths | Preserve existing exact kernels and deterministic threading; profile before more hardware work. |
 | Measurement | `mars-core` metrics; `mars-bench` BD-rate, provenance, JSONL store, oracle/recall, anchors | Reuse these components rather than introduce a second metrics implementation. |
@@ -242,6 +250,8 @@ For controlled search comparisons initially retain the same exhaustive RD warm-u
 **Exit P1:** default exhaustive path preserves pinned **post-P0/current-layout** bytes on the supported fixtures; each existing method can exercise the production grayscale threshold and RD paths; flags behave explicitly; work includes warm-up; thread-count tests pass. Do not use pre-O7 container bytes as an unqualified identity target.
 
 ## 5. Phase P2 — bounded seeded random search
+
+**Implementation delivered in execution step 8.** `crates/mars-search/src/random.rs` implements the full bounded sample (no early-stop variant). CLI registration is intentionally separate from legacy benchmark `MethodName`; general benchmark sweeps still require wiring. Correctness gates below are covered by focused tests; measured RD/time promotion remains open.
 
 Sources: [randomized approach summary](Research/summaries/Fractal_image_compression_a_randomized_a.md) and [PDF](Research/Fractal_image_compression_a_randomized_a.pdf), Ghosh, Mukherjee and Das (2004). The paper uses first-acceptable stopping, fixed 4×4 ranges, one-pixel stride, and empirically calibrated trial caps. The bounded full-sample, even-stride quadtree control below is a deliberate Mars adaptation, not a paper-faithful reproduction. Do not import its published speedup or calibration thresholds as Mars expectations.
 
