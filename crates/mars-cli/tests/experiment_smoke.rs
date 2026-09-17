@@ -161,6 +161,62 @@ fn actual_file_round_trips_raw_pgm_and_rgb_png_with_exact_artifact_accounting() 
         assert_eq!(r["metrics"]["planes"], if format == "png" { 3 } else { 1 });
         assert!(r["metrics"]["ms_ssim_unavailable"].is_string());
         let args = r["encode"]["args"].as_array().unwrap();
+        for key in ["method", "budget", "seed"] {
+            assert!(r["options"].get(key).is_none());
+            assert!(!args.iter().any(|arg| arg == &format!("--{key}")));
+        }
+        // Independent pre-passthrough invocation: omitted options must preserve both
+        // the original argv and the actual whole-container bytes, not just decode well.
+        let baseline = tmp.path(&format!("baseline-{format}.mars"));
+        let mut baseline_cmd = Command::new(env!("CARGO_BIN_EXE_encmars"));
+        baseline_cmd
+            .arg(&input)
+            .arg(&baseline)
+            .args([
+                "--lambda",
+                "200",
+                "--modes",
+                "0,2",
+                "--threads",
+                "1",
+                "--min-size",
+                "4",
+                "--max-size",
+                "16",
+                "--shift",
+                "4",
+                "--bits-alfa",
+                "4",
+                "--bits-beta",
+                "7",
+                "--max-alfa",
+                "1",
+                "--zero-threshold",
+                "0",
+                "--subsampling",
+                "444",
+                "--t-rms",
+                "8",
+                "--chroma-t-rms",
+                "8",
+            ])
+            .env("RAYON_NUM_THREADS", "1");
+        if format == "raw" {
+            baseline_cmd.args(["--raw-width", "16", "--raw-height", "16"]);
+        }
+        let expected_args: Vec<Value> = baseline_cmd
+            .get_args()
+            .skip(2)
+            .map(|arg| serde_json::json!(arg.to_str().unwrap()))
+            .collect();
+        assert_eq!(&args[2..], expected_args);
+        let baseline_result = run(&mut baseline_cmd);
+        assert!(
+            baseline_result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&baseline_result.stderr)
+        );
+        assert_eq!(fs::read(&stream).unwrap(), fs::read(&baseline).unwrap());
         assert_eq!(args[0], input.to_str().unwrap());
         assert_eq!(args[1], stream.to_str().unwrap());
         assert!(args
@@ -176,6 +232,93 @@ fn actual_file_round_trips_raw_pgm_and_rgb_png_with_exact_artifact_accounting() 
             saved,
             "rerun must not overwrite"
         );
+    }
+}
+
+#[test]
+fn random_passthrough_succeeds_and_invalid_method_options_preserve_reports() {
+    let tmp = Scratch::new("random");
+    let input = tmp.path("input.raw");
+    let pixels: Vec<u8> = (0..256)
+        .map(|n| ((n * 23 + n / 16 * 11) % 256) as u8)
+        .collect();
+    fs::write(&input, pixels).unwrap();
+    for (index, extra) in [
+        vec!["--method", "random", "--budget", "2", "--seed", "42"],
+        vec!["--method", "random", "--budget", "2"],
+        vec!["--method", "invalid"],
+        vec!["--method", "random"],
+        vec!["--method", "random", "--budget", "0"],
+        vec!["--budget", "2"],
+        vec!["--seed", "0"],
+        vec!["--method", "fisher", "--budget", "2"],
+        vec!["--method", "exhaustive", "--seed", "42"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let out = tmp.path(&format!("case-{index}"));
+        let result = run(Command::new(env!("CARGO_BIN_EXE_marsbench"))
+            .arg("experiment-smoke")
+            .arg(&input)
+            .arg("--out-dir")
+            .arg(&out)
+            .args([
+                "--raw-dims",
+                "16x16",
+                "--iterations",
+                "3",
+                "--timeout-secs",
+                "5",
+            ])
+            .arg("--encmars")
+            .arg(env!("CARGO_BIN_EXE_encmars"))
+            .arg("--decmars")
+            .arg(env!("CARGO_BIN_EXE_decmars"))
+            .args(&extra));
+        let r: Value = serde_json::from_slice(&fs::read(out.join("report.json")).unwrap()).unwrap();
+        if index < 2 {
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(r["status"], "succeeded");
+            assert_eq!(r["options"]["method"], "random");
+            assert_eq!(r["options"]["budget"], 2);
+            assert_eq!(r["options"]["lambda"], 200.0);
+            assert_eq!(r["options"]["modes"], serde_json::json!([0, 2]));
+            assert_eq!(r["decode"]["status"], "succeeded");
+            assert_eq!(r["metrics"]["width"], 16);
+            let args = r["encode"]["args"].as_array().unwrap();
+            for pair in extra.chunks_exact(2) {
+                assert!(args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]));
+            }
+            let scope = r["scope"].as_str().unwrap();
+            assert!(scope.contains("random") && scope.contains("budget=Some(2)"));
+            if index == 0 {
+                assert_eq!(r["options"]["seed"], 42);
+                assert!(scope.contains("seed=Some(42)"));
+            } else {
+                assert!(r["options"].get("seed").is_none());
+                assert!(!args.iter().any(|arg| arg == "--seed"));
+                assert!(scope.contains("seed=None"));
+            }
+            let stream = fs::read(out.join("coded.mars")).unwrap();
+            let decoded = fs::read(out.join("decoded.png")).unwrap();
+            assert!(stream.starts_with(b"MARC"));
+            assert!(decoded.starts_with(b"\x89PNG\r\n\x1a\n"));
+            assert_eq!(r["stream"]["sha256"], sha256_hex(&stream));
+            assert_eq!(r["decoded"]["sha256"], sha256_hex(&decoded));
+        } else {
+            assert!(!result.status.success());
+            assert!(String::from_utf8_lossy(&result.stderr).contains("report retained at"));
+            assert_eq!(r["status"], "failed");
+            assert_eq!(r["encode"]["status"], "blocked");
+            assert_eq!(r["decode"]["status"], "blocked");
+            assert!(!out.join("coded.mars").exists());
+            assert!(r["error"].as_str().unwrap().contains("--method"));
+        }
     }
 }
 

@@ -44,6 +44,9 @@ fn options(tmp: &Scratch, name: &str) -> SmokeOptions {
         iterations: 3,
         threads: 1,
         timeout_secs: 1,
+        method: None,
+        budget: None,
+        seed: None,
     }
 }
 
@@ -99,6 +102,83 @@ fn missing_prerequisites_and_invalid_parameters_are_reported_without_skips() {
                 .unwrap()
                 .contains("decmars prerequisite"));
         }
+    }
+}
+
+#[test]
+fn method_validation_preserves_invalid_choices_and_accepts_all_encoder_keys() {
+    let tmp = Scratch::new("methods");
+    for (i, (method, budget, seed, expected)) in [
+        (Some("unknown"), None, None, "unsupported --method"),
+        (Some("random"), None, None, "explicit positive --budget"),
+        (
+            Some("random"),
+            Some(0),
+            Some(42),
+            "explicit positive --budget",
+        ),
+        (None, Some(1), None, "only valid with --method random"),
+        (None, None, Some(0), "only valid with --method random"),
+        (
+            Some("fisher"),
+            Some(1),
+            None,
+            "only valid with --method random",
+        ),
+        (
+            Some("exhaustive"),
+            None,
+            Some(0),
+            "only valid with --method random",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut o = options(&tmp, &format!("invalid-{i}"));
+        o.method = method.map(str::to_owned);
+        o.budget = budget;
+        o.seed = seed;
+        assert!(run_smoke(&o).is_err());
+        let r = report(&o);
+        assert!(r["error"].as_str().unwrap().contains(expected), "{r}");
+        assert_eq!(r["options"], serde_json::to_value(&o).unwrap());
+        assert_eq!(r["encode"]["status"], "blocked");
+        assert_eq!(r["decode"]["status"], "blocked");
+    }
+    for method in [
+        "exhaustive",
+        "fisher",
+        "hurtgen",
+        "masscenter",
+        "saupe",
+        "saupe-fisher",
+        "mc-saupe",
+        "funnel",
+        "learned",
+        "random",
+    ] {
+        let mut o = options(&tmp, method);
+        o.method = Some(method.into());
+        if method == "random" {
+            o.budget = Some(1);
+        }
+        assert!(run_smoke(&o).is_err());
+        let r = report(&o);
+        // Reaching prerequisite validation proves the method combination was accepted.
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("encmars prerequisite"),
+            "{r}"
+        );
+        assert!(r["options"].get("seed").is_none());
+        assert!(!r["encode"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "--seed"));
     }
 }
 

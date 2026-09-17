@@ -15,6 +15,20 @@ use sha2::{Digest, Sha256};
 use crate::measure::{measure, MeasureRequest, Measurement};
 use crate::provenance::Provenance;
 
+/// Every `encmars --method` key: the nine indexed providers plus opt-in `random`.
+const METHOD_KEYS: [&str; 10] = [
+    "exhaustive",
+    "fisher",
+    "hurtgen",
+    "masscenter",
+    "saupe",
+    "saupe-fisher",
+    "mc-saupe",
+    "funnel",
+    "learned",
+    "random",
+];
+
 /// The initial smoke profile is deliberately restricted to lambda 200 and modes 0,2.
 #[derive(Debug, Clone, Serialize)]
 pub struct SmokeOptions {
@@ -31,6 +45,16 @@ pub struct SmokeOptions {
     /// Encoder flag and RAYON_NUM_THREADS for both processes.
     pub threads: usize,
     pub timeout_secs: u64,
+    /// Optional `encmars --method` key; `None` omits the flag entirely, so the default
+    /// invocation encodes exactly the same bytes as before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// `--budget`: required positive with `method: Some("random")`, rejected otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<usize>,
+    /// `--seed`: only valid with `method: Some("random")` (encmars defaults it to 0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
 }
 
 /// A hash of the file bytes, not of decoded pixels or an inner stream payload.
@@ -63,7 +87,7 @@ pub struct Phase {
 pub struct SmokeReport {
     pub schema_version: u32,
     pub runner: &'static str,
-    pub scope: &'static str,
+    pub scope: String,
     pub status: String,
     pub error: Option<String>,
     pub options: SmokeOptions,
@@ -233,6 +257,33 @@ fn validate(options: &SmokeOptions) -> Result<()> {
     ensure!(options.iterations > 0, "iterations must be positive");
     ensure!(options.threads > 0, "threads must be positive");
     ensure!(options.timeout_secs > 0, "timeout-secs must be positive");
+    match &options.method {
+        Some(method) => {
+            ensure!(
+                METHOD_KEYS.contains(&method.as_str()),
+                "unsupported --method {method:?}; encmars accepts one of {METHOD_KEYS:?}"
+            );
+            if method == "random" {
+                ensure!(
+                    options.budget.is_some_and(|budget| budget > 0),
+                    "--method random requires an explicit positive --budget"
+                );
+            } else {
+                ensure!(
+                    options.budget.is_none(),
+                    "--budget is only valid with --method random"
+                );
+                ensure!(
+                    options.seed.is_none(),
+                    "--seed is only valid with --method random"
+                );
+            }
+        }
+        None => ensure!(
+            options.budget.is_none() && options.seed.is_none(),
+            "--budget/--seed are only valid with --method random"
+        ),
+    }
     let ext = options
         .input
         .extension()
@@ -349,6 +400,17 @@ pub fn run_smoke(options: &SmokeOptions) -> Result<SmokeReport> {
     ] {
         encode_args.extend([key.into(), value]);
     }
+    // Passthrough flags are appended only when explicitly requested; omission must keep
+    // the encode argv exactly what it was before this passthrough existed.
+    if let Some(method) = &options.method {
+        encode_args.extend(["--method".into(), method.clone()]);
+    }
+    if let Some(budget) = options.budget {
+        encode_args.extend(["--budget".into(), budget.to_string()]);
+    }
+    if let Some(seed) = options.seed {
+        encode_args.extend(["--seed".into(), seed.to_string()]);
+    }
     if let Some((w, h)) = options.raw_dims {
         encode_args.extend([
             "--raw-width".into(),
@@ -367,7 +429,7 @@ pub fn run_smoke(options: &SmokeOptions) -> Result<SmokeReport> {
     ];
     let mut report = SmokeReport {
         schema_version: 1, runner: "experiment-smoke",
-        scope: "One case only; partial P0 smoke, not a corpus benchmark or full experiment runner. Single-layer MARC, RD lambda 200, modes 0,2; adaptive density/residual, progressive and method overrides off. Process wall times include startup and file I/O. Provenance describes the harness; binary SHA256 identifies the external codecs. Other environment variables are inherited.",
+        scope: format!("One case only; partial P0 smoke, not a corpus benchmark or full experiment runner. Single-layer MARC, RD lambda 200, modes 0,2; adaptive density/residual and progressive off. Method passthrough: method={:?}, budget={:?}, seed={:?}; None omits the flag. Methods are grayscale-only; random's omitted seed defaults to 0 in encmars and its budget excludes RD warm-up. Process wall times include startup and file I/O. Provenance describes the harness; binary SHA256 identifies the external codecs. Other environment variables are inherited.", options.method, options.budget, options.seed),
         status: "running".into(), error: None,
         encode: phase(&options.encmars, encode_args, &options.out_dir, "encode", options.threads),
         decode: phase(&options.decmars, decode_args, &options.out_dir, "decode", options.threads),

@@ -90,6 +90,11 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - P2 scientific exit is still open: no frozen validation Pareto frontier, full-stream corpus RD curves, or promotion result yet. The general experiment runner still needs method/budget/seed sweep support.
 - **Bounded smoke (not a promotion benchmark):** kodim01 top-left 256×256 crop, lambda 200, modes0/2, threads 4, 3 repetitions, release build, decoded-file PSNR. Exhaustive 2.749 s / 8080 B / 22.41 dB; random K=64 1.425 s / 7872 B / 20.46 dB; random K=256 1.532 s / 7996 B / 21.32 dB. Not matched-rate, one image, no interval statistics. Fit counters show the fixed exhaustive RD warm-up (161,358,144 evals) is ~98% of random64's total fits, so warm-up — not retrieval — now bounds further end-to-end speedup; selected-provider warm-up remains the labeled follow-up experiment. At these budgets the PSNR loss exceeds the plan's proposed ≤0.5 dB matched-rate guardrail; random stays a control, not a promoted default.
 
+### Step 9 — smoke runner method passthrough
+
+- `marsbench experiment-smoke` accepts optional `--method`/`--budget`/`--seed`, validated against the ten encoder keys; omitted options preserve the original default bytes and report shape. Random requires explicit positive budget; budget/seed without random are rejected with a persisted report.
+- Validation: five harness and three CLI smoke tests passed, including unchanged default argv/bytes, a real random file-to-file case, and invalid-option persistence. Targeted Clippy passed after replacing the pre-existing `decmars::image_writer` type-complexity lint with a `ImageWriter` alias (decoder CLI tests unchanged).
+
 ## 2. What Mars already implements
 
 README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.

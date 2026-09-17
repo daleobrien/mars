@@ -129,6 +129,15 @@ struct ExperimentSmokeArgs {
     /// Encoder thread flag and RAYON_NUM_THREADS for both codec processes.
     #[arg(long, default_value_t = 1)]
     threads: usize,
+    /// Optional encmars search method (grayscale only); omitted by default.
+    #[arg(long)]
+    method: Option<String>,
+    /// Positive production-query budget, required only with --method random.
+    #[arg(long)]
+    budget: Option<usize>,
+    /// Random-search seed; only with --method random (encmars defaults to 0).
+    #[arg(long)]
+    seed: Option<u64>,
     /// Timeout per codec process, including startup and file I/O.
     #[arg(long, default_value_t = 60)]
     timeout_secs: u64,
@@ -149,6 +158,9 @@ fn experiment_smoke(a: ExperimentSmokeArgs) -> Result<()> {
         iterations: a.iterations,
         threads: a.threads,
         timeout_secs: a.timeout_secs,
+        method: a.method,
+        budget: a.budget,
+        seed: a.seed,
     };
     let report = mars_bench::experiment::run_smoke(&options)?;
     println!(

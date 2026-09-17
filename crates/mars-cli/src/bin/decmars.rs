@@ -74,7 +74,10 @@ struct Cli {
     debug_rects: Option<PathBuf>,
 }
 
-fn image_writer(ext: &str) -> Result<fn(&Path, &Image) -> Result<(), ImageError>> {
+/// A writer function for one output image format, shared by every decode path.
+type ImageWriter = fn(&Path, &Image) -> Result<(), ImageError>;
+
+fn image_writer(ext: &str) -> Result<ImageWriter> {
     match ext {
         "png" => Ok(write_png),
         "pgm" | "ppm" => Ok(write_pnm),
@@ -197,7 +200,7 @@ fn main() -> Result<()> {
 fn decode_progressive(
     cli: &Cli,
     bytes: &[u8],
-    write: &fn(&Path, &Image) -> Result<(), ImageError>,
+    write: &ImageWriter,
 ) -> Result<()> {
     if cli.auto || cli.progression.is_some() || cli.zoom != 1.0 {
         bail!(
