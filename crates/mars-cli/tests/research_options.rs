@@ -178,12 +178,7 @@ fn unsupported_research_options_are_errors_not_noops() {
     ] {
         rejected(&input, &output, &args, "--modes");
     }
-    rejected(
-        &input,
-        &output,
-        &["--method", "fisher", "--lambda", "50"],
-        "mutually exclusive",
-    );
+
     rejected(
         &input,
         &output,
@@ -202,9 +197,21 @@ fn supported_profiles_still_encode_and_decode() {
     let profiles: &[(&Path, &[&str])] = &[
         (&gray, &[]),
         (&gray, &["--t-rms", "0"]),
-        // Keep every indexed domain size within this tiny fixture. DomainPool currently
-        // emits (0, 0) even when a domain cannot fit; that mars-search bug is separate.
-        (&gray, &["--method", "exhaustive", "--max-size", "4"]),
+        (&gray, &["--method", "exhaustive"]),
+        (&gray, &["--method", "fisher", "--lambda", "50"]),
+        (
+            &gray,
+            &[
+                "--method",
+                "fisher",
+                "--lambda",
+                "50",
+                "--modes",
+                "0,2,3",
+                "--adaptive-density",
+                "--adaptive-residual",
+            ],
+        ),
         (&gray, &["--progressive"]),
         (&gray, &["--progressive", "--t-rms", "8"]),
         (&gray, &["--adaptive-density"]),
@@ -321,4 +328,7 @@ fn help_describes_fixed_warmup_and_capabilities() {
     assert!(help.contains("Requires mode 3"));
     assert!(help.contains("explicit mask is rejected"));
     assert!(!help.contains("seeds the internal"));
+    assert!(help.contains("production partition walk"));
+    assert!(help.contains("warmup_evals"));
+    assert!(help.contains("total_evals"));
 }

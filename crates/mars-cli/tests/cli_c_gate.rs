@@ -8,20 +8,15 @@
 //! 1. For every method, `encmars --method X` produces a `.mars` file `decmars` decodes
 //!    without error.
 //! 2. The `evals` count `encmars` reports matches what the same method/image/params would
-//!    report going straight through the library (`mars_search::SizedRetrievers::build` +
-//!    `mars_search::encode_image`, the same two calls `marsbench classical-methods` itself
-//!    makes) -- cross-validating the new CLI path against the existing measurement path,
-//!    not trusting the new wiring on inspection alone.
+//!    report through the codec's production walk with the same search provider.
+//!    Both legacy and RD counters are checked exactly, including warm-up work.
 //!
-//! Also covers the plan's own design-question resolution: `--method` and `--lambda` are
-//! mutually exclusive (`mars_search::encode_image` has no RD-pruning implementation), and
-//! `--method` on colour input is refused (grayscale-only for now) -- both checked here as
-//! explicit CLI behaviour, not left implicit.
+//! Explicit lambda now enables production RD for methods. Colour input remains refused.
 
 use std::path::Path;
 use std::process::Command;
 
-use mars_codec::encode::EncodeParams;
+use mars_codec::encode::{EncodeOptions, EncodeParams, ExhaustiveSearch, encode_image_with_search};
 use mars_core::Plane;
 
 fn encmars_bin() -> &'static str {
@@ -76,21 +71,41 @@ fn default_params() -> EncodeParams {
     }
 }
 
-/// The exact two calls `marsbench classical-methods` itself makes for one method, per
-/// `crates/mars-cli/src/bin/marsbench.rs`'s own `classical_methods_cmd`.
-fn evals_via_library(image: &Plane, method: mars_search::MethodName, params: &EncodeParams) -> u64 {
-    let contracted = mars_codec::encode::build_contracted(image);
-    let retrievers = mars_search::SizedRetrievers::build(
-        &contracted,
-        image.width() as u32,
-        image.height() as u32,
-        params.shift,
-        params.min_size,
-        params.max_size,
-        || method.new_retriever(),
-    );
-    let (_hdr, _leaves, evals, _picks) = mars_search::encode_image(image, params, &retrievers);
-    evals
+fn evals_via_library(
+    image: &Plane,
+    method: mars_search::MethodName,
+    params: &EncodeParams,
+) -> (u64, u64, u64) {
+    let options = EncodeOptions {
+        allowed_modes: [true, false, true, false],
+        ..EncodeOptions::default()
+    };
+    let outcome = encode_image_with_search(image, params, &options, |contracted| {
+        if matches!(method, mars_search::MethodName::Exhaustive) {
+            Box::new(ExhaustiveSearch)
+        } else {
+            Box::new(mars_search::IndexedSearchProvider::build(
+                image, contracted, params, &options, method,
+            ))
+        }
+    });
+    (
+        outcome.counters.search_evals,
+        outcome.counters.warmup_evals,
+        outcome.counters.total_evals(),
+    )
+}
+
+fn named_counter(stdout: &str, name: &str) -> u64 {
+    stdout
+        .split_once(&format!("{name}="))
+        .expect("counter label")
+        .1
+        .split(',')
+        .next()
+        .unwrap()
+        .parse()
+        .expect("integer counter")
 }
 
 fn evals_from_encmars_stdout(stdout: &str) -> u64 {
@@ -138,7 +153,11 @@ fn every_method_decodes_and_matches_the_library_evals_count() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let cli_evals = evals_from_encmars_stdout(&stdout);
 
-        let lib_evals = evals_via_library(&plane, method, &params);
+        let (lib_evals, warmup, total) = evals_via_library(&plane, method, &params);
+        assert_eq!(warmup, 0, "legacy encoding has no RD warm-up");
+        assert_eq!(named_counter(&stdout, "search_evals"), lib_evals);
+        assert_eq!(named_counter(&stdout, "warmup_evals"), warmup);
+        assert_eq!(named_counter(&stdout, "total_evals"), total);
         assert_eq!(
             cli_evals, lib_evals,
             "method {name}: CLI-reported evals ({cli_evals}) does not match the library \
@@ -161,7 +180,7 @@ fn every_method_decodes_and_matches_the_library_evals_count() {
 }
 
 #[test]
-fn method_and_lambda_together_is_refused() {
+fn method_and_lambda_together_decodes_and_matches_production_counters() {
     let tmp = std::env::temp_dir().join(format!("gate-cli-c-excl-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).expect("scratch dir");
     let input = tmp.join("in.pgm");
@@ -176,8 +195,33 @@ fn method_and_lambda_together_is_refused() {
         .output()
         .expect("encmars runs");
     assert!(
-        !output.status.success(),
-        "--method and --lambda together should be refused"
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let image = mars_core::io::read_image(&input, None).expect("read fixture");
+    let params = EncodeParams {
+        lambda: Some(200.0),
+        ..default_params()
+    };
+    let (search, warmup, total) =
+        evals_via_library(&image.planes()[0], mars_search::MethodName::Fisher, &params);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(evals_from_encmars_stdout(&stdout), search);
+    assert_eq!(named_counter(&stdout, "search_evals"), search);
+    assert_eq!(named_counter(&stdout, "warmup_evals"), warmup);
+    assert_eq!(named_counter(&stdout, "total_evals"), total);
+    assert!(warmup > 0);
+    assert_eq!(total, search + warmup);
+    let decoded = Command::new(decmars_bin())
+        .arg(&out)
+        .arg(tmp.join("out.png"))
+        .output()
+        .expect("decmars runs");
+    assert!(
+        decoded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decoded.stderr)
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

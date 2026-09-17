@@ -72,11 +72,20 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - Restricted initial profile: lambda 200, modes0/2, fixed8, native resolution, one case. Not the proposed resumable sweep/repeated-timing runner and not a promotion benchmark.
 - Validation: four harness tests and two CLI integration tests passed (raw/PGM/RGB PNG, missing prerequisites, no overwrite, failed/timed-out cases). Manual Tiny64 smoke completed with report under `target/research-file-smoke-01/` (local generated artifact).
 
+### Step 7 — shared production search (P1 implementation)
+
+- Added codec-owned `SearchProvider`, full fitted candidates/moments, `EncodeOutcome`, and separately labeled search/warm-up counters. Default exhaustive bytes match four pre-refactor pinned stream hashes; old tuple APIs retain historical search-only eval counts.
+- `mars-search::IndexedSearchProvider` owns immutable per-size indexes, including doubled-stride density indexes. All nine methods can now use the production grayscale threshold/RD walk. RD warm-up stays exhaustive at RMS 8 and is counted, not silently omitted.
+- `encmars --method fisher --lambda 200 --modes 0,2` is now supported; method alone retains threshold 8. RD masks, density and adaptive residual compose with method selection. Color/method and progressive/method combinations remain unsupported.
+- Explicit mode masks are checked against final leaves before output: impossible masks (no usable fractal candidate, DC border) fail with an actionable request to enable mode 0. No hidden exhaustive fallback or out-of-mask success. Default codec/DC fallback behavior remains unchanged.
+- Validation: pinned provider tests, all-method fitted-moment/stream/thread comparisons, tiny/odd geometry, CLI method matrix, strict-mask rejection, default byte identity and residual round-trips passed. Fisher adaptive residual support uses explicit modes0/3, retaining a nonzero-residual assertion.
+- Targeted production-library/binary Clippy found the existing `decmars::image_writer` type-complexity lint; no codec/search compile errors. Full end-to-end speed/memory/repeated timing acceptance remains unmeasured; P1 performance promotion is not claimed.
+
 ## 2. What Mars already implements
 
 README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.
 
-**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. The general file-to-file runner, shared production retrieval interface, random/APCC methods, postprocessor, and sparse multi-domain format remain proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
+**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. A restricted file-to-file smoke and shared production retrieval interface are implemented (steps 6/7); the full experiment runner, random/APCC methods, postprocessor and sparse multi-domain format remain proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
 
 | Area | Existing implementation | Consequence for this plan |
 |---|---|---|
@@ -91,17 +100,17 @@ README status/layout and warm-up wording were corrected in execution step 3. Use
 | Additional coding | Color, progressive output, adaptive domain density | Existing compatibility restrictions must become explicit capability checks. |
 | HV partitions | `hv-split-plan.md` | Proposal only; square leaf geometry and implicit quadtree syntax still dominate the implementation. |
 
-### Critical integration gap
+### Production search integration
 
-`mars-search` depends on `mars-codec`, but `mars_search::encode_image` is a separate RMS-threshold encoder. Production `encode.rs::walk` and `walk_rd` still call exhaustive search directly; `build_rate_snapshot` also runs the exhaustive threshold walk and discards its fit count. The CLI rejects `--method` with explicit `--lambda`, color input, or `--progressive`. Execution step 3 rejects explicit mode selection and density outside RD instead of accepting no-op options.
+**Implemented in execution step 7:** `mars-search → mars-codec` remains the dependency direction. Production `walk`/`walk_rd` consume a codec-owned provider; `IndexedSearchProvider` adapts the existing retrieval methods. The separate `mars_search::encode_image` remains available for diagnostic/legacy callers, but no longer owns CLI method partitioning. Warm-up stays exhaustive and is counted separately.
 
-Therefore, adding APCC to `MethodName` alone would **not** make it available to the main RD encoder.
+The CLI now accepts method plus explicit lambda for grayscale RD. Color/method and progressive/method remain rejected; new methods must register a provider and pass production integration tests, not only extend an enum.
 
 ### Current defaults and compatibility
 
 - Plain `encmars` now selects RD at lambda 200, modes 0/2, fixed residual step 8, sizes 4–16, stride 4, color 4:4:4, and automatic threads. Density and progressive output remain off. Library/benchmark defaults were not changed to this CLI profile; `EncodeOptions::default()` still allows all four modes.
 - Explicit `--t-rms`, `--chroma-t-rms`, or `--method` selects the legacy path unless explicit lambda overrides the thresholds. **RD warm-up remains hard-coded to RMS 8** in `build_rate_snapshot`; user thresholds do not seed that pass. Execution step 3 corrected the CLI help/README without changing this baseline algorithm.
-- `--adaptive-residual` requires explicit `--lambda` and conflicts with `--method`. It does not enable mode 3: request e.g. `--lambda 200 --modes 0,2,3 --adaptive-residual`. Progressive containers are grayscale-only and incompatible with `--method`; color iteration callbacks are not color progressive-container support.
+- `--adaptive-residual` requires explicit `--lambda` and now supports `--method` on grayscale RD. It does not enable mode 3: request e.g. `--lambda 200 --modes 0,2,3 --adaptive-residual`. Progressive containers are grayscale-only and incompatible with `--method`; color iteration callbacks are not color progressive-container support.
 - `ResidualQstep` validates [1, 65535] and stores binary32 bits. Quantization, scoring, and reconstruction use the wire-rounded step. The adaptive policy is `clamp(sqrt(6 * lambda / ln(2)), 1, 65535)`; fixed8 remains default. Color planes can carry separate steps. Keep the full `mars_format::Header`/`DecodeHeader` when decoding: passing only `.geometry` loses step metadata and implies legacy step 8.
 - O7 expanded `MARS` headers from 20 to 24 bytes and `MPRG` from 31 to 35 bytes **without changing version byte 0 or adding a legacy-layout fallback**. Old Mars 2 streams require re-encoding with this decoder; `MARC`'s unchanged outer layout does not make its embedded old streams compatible. Pin layout revision and decoder build as well as version byte. Mars 1 `.ifs` syntax is separate and unchanged; it cannot carry affine/residual modes or explicit residual steps.
 
@@ -201,7 +210,7 @@ Requirements:
 
 ### Architecture
 
-Introduce a codec-owned search-provider interface, implemented by an adapter in `mars-search`. Do not add a reverse `mars-codec → mars-search` dependency.
+The codec-owned `SearchProvider` and `mars-search::IndexedSearchProvider` adapter are implemented in execution step 7. Keep the remaining instrumentation/performance gates below; do not add a reverse `mars-codec → mars-search` dependency.
 
 Suggested ownership:
 
@@ -323,7 +332,7 @@ Mars already searches a full square quadtree and prunes bottom-up. Its costs are
 Consequently, the current solution is optimal only over evaluated choices under its additive surrogate—not all domains, partitions, stream lengths, or final decoded distortion.
 
 - Log estimated versus actual total bits and category costs (partition, modes, coordinates, coefficients, residuals).
-- Count the fixed `t_rms=8` warm-up explicitly: its evaluations are currently discarded by `build_rate_snapshot`. Do not claim user `t_rms` controls it despite current CLI help wording.
+- Preserve the fixed `t_rms=8` exhaustive warm-up; execution step 7 exposes its evaluations in `EncodeCounters` and the method CLI. Legacy tuple APIs still return search-only evals for compatibility. Expand explicit counters to remaining benchmark/color paths before total-work comparisons.
 - Audit residual distortion against quantized decoded predictions, clipping/truncation, and iterative reconstruction. Current residual scoring uses continuous source-domain prediction error; wire-rounded qstep consistency does not make that final-image distortion.
 - Keep fixed8 versus lambda-adaptive quantisation as a separate factor with identical allowed modes. Step22's unfinished three-arm result is a starting diagnostic, not a passed residual improvement gate.
 - Compare threshold partitions versus existing RD partitions with the **same retrieval provider** and mode set.
@@ -519,7 +528,7 @@ Small existing round-trip (creates output under `target/`; build first):
 ./target/release/marsbench metrics fixtures/mars1/tiny64.raw target/random-plan-smoke.pgm --raw-dims 64x64 --coded target/random-plan-smoke.mars
 ```
 
-The filename is arbitrary; this smoke command uses **existing Fisher**, not the proposed random method. For the existing RD path replace `--method fisher --t-rms 8` with `--lambda 200 --modes 0,2`; do not combine method and lambda before P1. Rebuild before mixing binaries/streams from different header layouts. Tiny64 cannot supply the pinned five-scale MS-SSIM and is not scientific corpus evidence.
+The filename is arbitrary; this smoke command uses **existing Fisher**, not the proposed random method. For production RD use `--method fisher --lambda 200 --modes 0,2`, now supported by P1. Omit `--method` or use `--method exhaustive` for the exhaustive control. Rebuild before mixing binaries/streams from different header layouts. Tiny64 cannot supply the pinned five-scale MS-SSIM and is not scientific corpus evidence.
 
 A new file-to-file smoke is available (output directory must not already exist; parent must exist):
 

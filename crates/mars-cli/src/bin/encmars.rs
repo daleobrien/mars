@@ -10,17 +10,13 @@ use clap::{Parser, ValueEnum};
 use mars_codec::color::{
     ColorEncodeParams, Subsampling, encode_color_image_with_residual_quantisation, wrap_gray_stream,
 };
-use mars_codec::encode::{EncodeOptions, EncodeParams, ResidualQuantisation};
+use mars_codec::encode::{
+    EncodeOptions, EncodeParams, ExhaustiveSearch, ResidualQuantisation, encode_image_with_search,
+};
 use mars_core::io::read_image;
 
-/// `mars-search`'s nine candidate-restriction methods (Step 9's six classical ports plus
-/// `Exhaustive`, and Step 13's `Funnel`), named to match `mars_search::MethodName::key()`
-/// exactly so a script can join a `--method` run against `marsbench`'s own output by the
-/// same string. **Not** the same code path as `mars-codec`'s own exhaustive walk --
-/// `mars-codec::encode`'s own search (what every other `encmars` invocation runs) is a
-/// distinct, independently-implemented exhaustive scan kept for cross-validation, not an
-/// instance of `mars_search::MethodName::Exhaustive`. `--help` says which is which so a
-/// reader is not left to guess from the shared name.
+/// Candidate providers for the codec's production partition walk. Names match
+/// `mars_search::MethodName::key()`; exhaustive uses the codec's own search for byte identity.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum MethodArg {
     Exhaustive,
@@ -116,7 +112,7 @@ struct Cli {
     /// the initial Kodak measurement regressed. Requires --lambda; stored in the stream
     /// so decmars needs no matching option. Requires mode 3, e.g. --modes 0,2,3.
     /// Applies to grayscale, colour and progressive.
-    #[arg(long, requires = "lambda", conflicts_with = "method")]
+    #[arg(long, requires = "lambda")]
     adaptive_residual: bool,
 
     /// Smallest range-block size: a power of two in 1..=128, no larger than --max-size.
@@ -158,36 +154,32 @@ struct Cli {
     /// (it could corrupt the bitstream; D43's originally-claimed -6.82% BD-rate number is
     /// withdrawn, see D48). Default off, matching every `encmars` invocation before this
     /// flag existed -- byte-identical output either way when omitted. Requires the RD
-    /// path; rejected with --method, or with legacy thresholds unless --lambda selects RD.
+    /// path; with thresholds or --method, supply explicit --lambda to select RD.
     #[arg(long, default_value_t = false)]
     adaptive_density: bool,
 
     /// Step 15's per-leaf mode mask, a diagnostic/comparison knob: comma-separated mode
     /// numbers to allow, from 0 (flat), 1 (affine), 2 (fractal), 3 (fractal + residual) --
     /// e.g. `--modes 0,1,2` disables mode 3, `--modes 2` forces fractal-only. Only affects
-    /// the RD path (the default); an explicit mask is rejected on the legacy/--method
-    /// path. Default on RD: 0,2 (flat and fractal), the better measured combination on
-    /// kodim01/02. Use --modes 0,1,2,3 to enable all four modes.
+    /// the RD path (the default); an explicit mask is rejected on the legacy path.
+    /// With --method, supply --lambda to select RD. Default on RD: 0,2 (flat and fractal),
+    /// the better measured combination on
+    /// kodim01/02. Use --modes 0,1,2,3 to enable all four modes. Explicit masks are strict:
+    /// if the final partition needs a mode outside the mask, encoding fails without
+    /// writing output. Enable mode 0 for mandatory DC fallback at borders or where
+    /// the selected search has no usable domain candidate.
     #[arg(long, value_delimiter = ',')]
     modes: Vec<u8>,
 
-    /// Run `mars-search`'s candidate-restriction search (Step 9's classical speed-ups
-    /// plus Step 13's novel `funnel` method) instead of `mars-codec`'s own exhaustive
-    /// walk -- a diagnostic/reproduction tool (isolating one method's candidate set,
-    /// reproducing `marsbench`'s own evals/transforms numbers from the command line), not
-    /// a quality control most users reach for; `exhaustive` here is a *different*
-    /// implementation of the same idea as the default path, kept for cross-validation,
-    /// not a faster or slower version of it. **Mutually exclusive with `--lambda`**:
-    /// `mars-search::encode_image` only runs the legacy top-down `--t-rms` partition (the
-    /// same one selected by explicit --t-rms without --lambda) -- it has no
-    /// RD-pruning implementation of its own, so `--method X --lambda Y` would silently
-    /// ignore one of the two; this is refused explicitly rather than left as a silent
-    /// interaction for a user to discover. **Grayscale input only** for now -- colour's
-    /// per-plane YCbCr/subsampling wrapping (`mars_codec::color`) is not wired to this
-    /// path; given a colour image with `--method` set, `encmars` refuses rather than
-    /// silently encoding only the luma plane. `learned`'s weights are baked into the
-    /// `mars-search` binary already (Step 17); no separate training step is needed to use
-    /// it here.
+    /// Select a candidate-search provider inside the codec's production partition walk.
+    /// Method alone retains legacy threshold partitioning at RMS 8; explicit --lambda
+    /// enables RD, including --modes, --adaptive-density and --adaptive-residual.
+    /// `exhaustive` uses the codec's own exhaustive provider, producing identical bytes
+    /// to no-method encoding with the same threshold/lambda and options. Other methods
+    /// use mars-search's indexed candidate providers. `learned` has baked-in weights.
+    /// Grayscale only; mutually exclusive with --progressive for now.
+    /// Reported `evals` counts production search only; `warmup_evals` and `total_evals`
+    /// separately expose RD rate-estimation work.
     #[arg(long, value_enum)]
     method: Option<MethodArg>,
 
@@ -224,7 +216,7 @@ struct Cli {
 impl Cli {
     fn effective_lambda(&self) -> Option<f64> {
         // Only an explicitly selected legacy path suppresses the RD default. Keeping
-        // the parsed lambda optional preserves --method conflicts and threshold precedence.
+        // the parsed lambda optional preserves method-alone legacy and explicit RD precedence.
         self.lambda.or_else(|| {
             (self.t_rms.is_none() && self.chroma_t_rms.is_none() && self.method.is_none())
                 .then_some(200.0)
@@ -242,6 +234,52 @@ impl Cli {
         } else {
             &self.modes
         }
+    }
+
+    fn validate_leaf_modes(&self, leaves: &[mars_codec::ifs::Leaf]) -> Result<()> {
+        if !self.modes.is_empty() && leaves.iter().any(|leaf| !self.modes.contains(&leaf.mode)) {
+            let modes = self
+                .modes
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            bail!(
+                "--modes {modes} cannot represent this image with selected search; enable mode 0 for DC fallback"
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_container_modes(&self, bytes: &[u8]) -> Result<()> {
+        if self.modes.is_empty() {
+            return Ok(());
+        }
+        // color::read_container is private. Inspect each length-prefixed MARS plane
+        // from our own MARC encoder output without decoding pixels or changing bytes.
+        let header = bytes.get(..7).context("encoded MARC header truncated")?;
+        if &header[..4] != b"MARC" || header[4] != 0 {
+            bail!("unexpected encoded MARC header");
+        }
+        let mut remaining = &bytes[7..];
+        for _ in 0..header[6] {
+            let length = remaining
+                .get(..4)
+                .context("encoded MARC plane length truncated")?;
+            let length = u32::from_le_bytes([length[0], length[1], length[2], length[3]]) as usize;
+            remaining = &remaining[4..];
+            let stream = remaining
+                .get(..length)
+                .context("encoded MARC plane truncated")?;
+            let (_, leaves) = mars_codec::mars_format::read(stream)
+                .context("reading encoded plane to validate --modes")?;
+            self.validate_leaf_modes(&leaves)?;
+            remaining = &remaining[length..];
+        }
+        if !remaining.is_empty() {
+            bail!("unexpected trailing encoded MARC data");
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<()> {
@@ -287,23 +325,19 @@ impl Cli {
         if self.progressive && self.method.is_some() {
             bail!("--progressive and --method are mutually exclusive");
         }
-        if self.method.is_some() && self.lambda.is_some() {
-            bail!(
-                "--method and --lambda are mutually exclusive: methods only support legacy threshold partitioning"
-            );
-        }
+
         if self.modes.iter().any(|&mode| mode > 3) {
             bail!("--modes must contain only mode numbers 0-3");
         }
         if self.effective_lambda().is_none() {
             if !self.modes.is_empty() {
                 bail!(
-                    "--modes requires the RD path; unsupported with legacy thresholds or --method"
+                    "--modes requires the RD path; supply --lambda with legacy thresholds or --method"
                 );
             }
             if self.adaptive_density {
                 bail!(
-                    "--adaptive-density requires the RD path; unsupported with legacy thresholds or --method"
+                    "--adaptive-density requires the RD path; supply --lambda with legacy thresholds or --method"
                 );
             }
         }
@@ -411,27 +445,6 @@ fn main() -> Result<()> {
         );
     }
 
-    if let Some(method_arg) = cli.method {
-        if image.planes().len() != 1 {
-            bail!(
-                "{}: --method only supports grayscale input for now (got {} planes) -- \
-                 see --help for --method",
-                cli.input.display(),
-                image.planes().len()
-            );
-        }
-        return run_with_method(&cli, method_arg, &image);
-    }
-
-    if cli.progressive && image.planes().len() != 1 {
-        bail!(
-            "{}: --progressive only supports grayscale input for now (got {} planes) -- \
-             see --help for --progressive",
-            cli.input.display(),
-            image.planes().len()
-        );
-    }
-
     let base = EncodeParams {
         min_size: cli.min_size,
         max_size: cli.max_size,
@@ -443,30 +456,60 @@ fn main() -> Result<()> {
         zero_threshold: cli.zero_threshold,
         lambda: cli.effective_lambda(),
     };
-    let chroma = EncodeParams {
-        t_rms: cli.chroma_t_rms.unwrap_or(cli.effective_t_rms()),
-        ..base
-    };
     let mut allowed_modes = [false; 4];
     for &mode in cli.effective_modes() {
         allowed_modes[usize::from(mode)] = true;
     }
+    let options = EncodeOptions {
+        allowed_modes,
+        adaptive_density: cli.adaptive_density,
+        residual_quantisation: residual_policy(&cli),
+    };
 
+    if let Some(method_arg) = cli.method {
+        if image.planes().len() != 1 {
+            bail!(
+                "{}: --method only supports grayscale input for now (got {} planes) -- \
+                 see --help for --method",
+                cli.input.display(),
+                image.planes().len()
+            );
+        }
+        return run_with_method(&cli, method_arg, &image, &base, &options);
+    }
+
+    if cli.progressive && image.planes().len() != 1 {
+        bail!(
+            "{}: --progressive only supports grayscale input for now (got {} planes) -- \
+             see --help for --progressive",
+            cli.input.display(),
+            image.planes().len()
+        );
+    }
+
+    let chroma = EncodeParams {
+        t_rms: cli.chroma_t_rms.unwrap_or(cli.effective_t_rms()),
+        ..base
+    };
     if cli.progressive {
-        return run_progressive(&cli, &base, allowed_modes, &image);
+        return run_progressive(&cli, &base, &options, &image);
     }
 
     let params = ColorEncodeParams {
         y: base,
         chroma,
         subsampling: cli.subsampling.into(),
-        adaptive_density: cli.adaptive_density,
-        allowed_modes,
+        adaptive_density: options.adaptive_density,
+        allowed_modes: options.allowed_modes,
     };
 
     let (width, height) = (image.width(), image.height());
-    let (bytes, stats) =
-        encode_color_image_with_residual_quantisation(&image, &params, residual_policy(&cli));
+    let (bytes, stats) = encode_color_image_with_residual_quantisation(
+        &image,
+        &params,
+        options.residual_quantisation,
+    );
+    cli.validate_container_modes(&bytes)?;
 
     std::fs::write(&cli.output, &bytes)
         .with_context(|| format!("writing {}", cli.output.display()))?;
@@ -497,46 +540,34 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// CLI-C's own path: `mars_search::encode_image` instead of `mars_codec::encode`'s own
-/// walk. Grayscale-only (validated by the caller), legacy top-down `--t-rms` partition
-/// only (`--lambda` validated absent by the caller) -- `mars-search`'s `encode_image` has
-/// no RD-pruning implementation to switch to. Writes the same `MARC` single-plane
-/// container every other grayscale `encmars` invocation does
-/// (`mars_codec::color::wrap_gray_stream`), so `decmars` reads it identically either way.
+/// Select only the search provider; partitioning and serialization use the production
+/// codec, with the same validated parameters and options as the no-method path.
 fn run_with_method(
     cli: &Cli,
     method_arg: MethodArg,
     image: &mars_core::image::Image,
+    params: &EncodeParams,
+    options: &EncodeOptions,
 ) -> Result<()> {
     let method: mars_search::MethodName = method_arg.into();
     let plane = &image.planes()[0];
-    let params = EncodeParams {
-        min_size: cli.min_size,
-        max_size: cli.max_size,
-        shift: cli.shift,
-        bits_alfa: cli.bits_alfa,
-        bits_beta: cli.bits_beta,
-        max_alfa: cli.max_alfa,
-        t_rms: cli.effective_t_rms(),
-        zero_threshold: cli.zero_threshold,
-        lambda: None,
-    };
+    let outcome = encode_image_with_search(plane, params, options, |contracted| {
+        if matches!(method_arg, MethodArg::Exhaustive) {
+            Box::new(ExhaustiveSearch)
+        } else {
+            Box::new(mars_search::IndexedSearchProvider::build(
+                plane, contracted, params, options, method,
+            ))
+        }
+    });
+    cli.validate_leaf_modes(&outcome.leaves)?;
+    let transforms = outcome.leaves.len() as u64;
+    let evals = outcome.counters.search_evals;
+    let warmup_evals = outcome.counters.warmup_evals;
+    let total_evals = outcome.counters.total_evals();
 
-    let contracted = mars_codec::encode::build_contracted(plane);
-    let retrievers = mars_search::SizedRetrievers::build(
-        &contracted,
-        plane.width() as u32,
-        plane.height() as u32,
-        params.shift,
-        params.min_size,
-        params.max_size,
-        || method.new_retriever(),
-    );
-    let (hdr, leaves, evals, _picks) = mars_search::encode_image(plane, &params, &retrievers);
-    let transforms = leaves.len() as u64;
-
-    let plane_bytes = mars_codec::mars_format::write(&hdr, &leaves)
-        .context("mars-search's encode_image produced a header mars_format::write rejected")?;
+    let plane_bytes = mars_codec::mars_format::write(&outcome.header, &outcome.leaves)
+        .context("serializing the production partition with the selected search provider")?;
     let bytes = wrap_gray_stream(plane_bytes);
 
     std::fs::write(&cli.output, &bytes)
@@ -546,6 +577,7 @@ fn run_with_method(
     let bpp = 8.0 * bytes.len() as f64 / (width * height) as f64;
     println!(
         "{width}x{height} gray -> {} ({} bytes, {bpp:.3} bpp, method {}, {evals} evals, \
+         search_evals={evals}, warmup_evals={warmup_evals}, total_evals={total_evals}, \
          {transforms} transforms, {:.2} evals/transform)",
         cli.output.display(),
         bytes.len(),
@@ -568,19 +600,13 @@ fn residual_policy(cli: &Cli) -> ResidualQuantisation {
 fn run_progressive(
     cli: &Cli,
     base: &EncodeParams,
-    allowed_modes: [bool; 4],
+    options: &EncodeOptions,
     image: &mars_core::image::Image,
 ) -> Result<()> {
     let plane = &image.planes()[0];
-    let (hdr, leaves, evals, _stats) = mars_codec::encode::encode_image_with_options(
-        plane,
-        base,
-        &EncodeOptions {
-            allowed_modes,
-            adaptive_density: cli.adaptive_density,
-            residual_quantisation: residual_policy(cli),
-        },
-    );
+    let (hdr, leaves, evals, _stats) =
+        mars_codec::encode::encode_image_with_options(plane, base, options);
+    cli.validate_leaf_modes(&leaves)?;
     let bytes = mars_codec::progressive::encode(plane, &hdr, &leaves)
         .context("building the progressive container")?;
 

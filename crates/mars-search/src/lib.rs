@@ -27,7 +27,8 @@ pub mod saupe_fisher;
 pub mod tables;
 
 use mars_codec::encode::{
-    cross_term_permuted, domain_sums, permute_range, Contracted, EncodeParams, RawMoments,
+    cross_term_permuted, domain_sums, permute_range, Candidate as FittedCandidate, Contracted,
+    EncodeOptions, EncodeParams, RawMoments, SearchOutcome, SearchProvider, SearchRequest,
 };
 use mars_codec::ifs::{Header, Leaf};
 use mars_codec::isometry;
@@ -183,6 +184,36 @@ pub fn search_block(
     bits_alfa: u32,
     bits_beta: u32,
 ) -> (Option<(Candidate, u32, u32, f64)>, u64) {
+    let outcome = search_block_fitted(retriever, contracted, range, max_alfa, bits_alfa, bits_beta);
+    (
+        outcome.candidate.map(|c| {
+            (
+                Candidate {
+                    dom_row: c.dom_row,
+                    dom_col: c.dom_col,
+                    isometry: c.isometry,
+                },
+                c.qalfa,
+                c.qbeta,
+                c.rms,
+            )
+        }),
+        outcome.evals,
+    )
+}
+
+/// Search with the codec's exact fitter, retaining the winning fit's integer moments.
+/// Candidate order and strict minimum-RMS tie breaking are unchanged from
+/// [`search_block`]. Each candidate, including duplicates, counts as one evaluation;
+/// an empty candidate set returns no fit and zero evaluations.
+pub fn search_block_fitted(
+    retriever: &dyn CandidateRetriever,
+    contracted: &Contracted,
+    range: &RangeBlock,
+    max_alfa: f64,
+    bits_alfa: u32,
+    bits_beta: u32,
+) -> SearchOutcome {
     let (t0, t2) = range.t0_t2();
     let size = range.size as usize;
     let s0 = i64::from(range.size) * i64::from(range.size);
@@ -211,7 +242,7 @@ pub fn search_block(
     }
 
     let eval_start = timing.then(std::time::Instant::now);
-    let mut best: Option<(Candidate, u32, u32, f64)> = None;
+    let mut best: Option<FittedCandidate> = None;
     let mut evals = 0u64;
     for c in candidates {
         let (dr_half, dc_half) = ((c.dom_row / 2) as usize, (c.dom_col / 2) as usize);
@@ -236,10 +267,18 @@ pub fn search_block(
         evals += 1;
         let better = match &best {
             None => true,
-            Some((_, _, _, brms)) => rms < *brms,
+            Some(b) => rms < b.rms,
         };
         if better {
-            best = Some((c, qalfa, qbeta, rms));
+            best = Some(FittedCandidate {
+                dom_row: c.dom_row,
+                dom_col: c.dom_col,
+                isometry: c.isometry,
+                qalfa,
+                qbeta,
+                rms,
+                moments,
+            });
         }
     }
     if let Some(s) = eval_start {
@@ -249,7 +288,10 @@ pub fn search_block(
         );
         diag::EVALS.fetch_add(evals, std::sync::atomic::Ordering::Relaxed);
     }
-    (best, evals)
+    SearchOutcome {
+        candidate: best,
+        evals,
+    }
 }
 
 /// A root-causing diagnostic for Gate C's D33 finding (single-threaded Fisher encode
@@ -421,6 +463,92 @@ impl SizedRetrievers {
     }
 }
 
+/// Owned, prebuilt search indexes for the codec's threshold and RD production walks.
+/// All indexing finishes in [`Self::build`]; concurrent searches only read the indexes.
+/// Partitioning, DC fallback, mode selection, residuals, and warmup remain codec-owned.
+pub struct IndexedSearchProvider {
+    base_shift: u32,
+    base: SizedRetrievers,
+    doubled: Option<(u32, SizedRetrievers)>,
+}
+
+impl IndexedSearchProvider {
+    /// Prepare the configured and border-split sizes for one image and method.
+    /// Adaptive RD density gets a separate doubled-stride index: filtering an already
+    /// pruned base-stride candidate list would not perform the same coarse-pool search.
+    /// The result owns its indexes and borrows neither the image nor the contracted plane.
+    /// Use it only with the image, geometry, and options supplied here; sizes must be
+    /// legal powers of two and the base shift must be positive.
+    pub fn build(
+        image: &Plane,
+        contracted: &Contracted,
+        params: &EncodeParams,
+        options: &EncodeOptions,
+        method: MethodName,
+    ) -> Self {
+        let build = |shift| {
+            SizedRetrievers::build(
+                contracted,
+                image.width() as u32,
+                image.height() as u32,
+                shift,
+                params.min_size,
+                params.max_size,
+                || method.new_retriever(),
+            )
+        };
+        let base = build(params.shift);
+        let doubled = (params.lambda.is_some() && options.adaptive_density).then(|| {
+            let shift = params.shift.saturating_mul(2);
+            (shift, build(shift))
+        });
+        Self {
+            base_shift: params.shift,
+            base,
+            doubled,
+        }
+    }
+}
+
+impl SearchProvider for IndexedSearchProvider {
+    fn search(&self, request: &SearchRequest<'_>) -> SearchOutcome {
+        let indexes = if request.shift == self.base_shift {
+            &self.base
+        } else {
+            let (shift, indexes) = self
+                .doubled
+                .as_ref()
+                .expect("search requested a stride not prepared by IndexedSearchProvider::build");
+            assert_eq!(
+                request.shift, *shift,
+                "search stride differs from the prepared index"
+            );
+            indexes
+        };
+        let size = request.size as usize;
+        let stride = request.image.width();
+        let mut pixels = Vec::with_capacity(size * size);
+        for row in request.row as usize..request.row as usize + size {
+            let start = row * stride + request.col as usize;
+            pixels.extend_from_slice(&request.image.as_slice()[start..start + size]);
+        }
+        let range = RangeBlock {
+            row: request.row,
+            col: request.col,
+            size: request.size,
+            pixels: &pixels,
+        };
+        search_block_fitted(
+            indexes.get(request.size),
+            request.contracted,
+            &range,
+            request.params.max_alfa,
+            request.params.bits_alfa,
+            request.params.bits_beta,
+        )
+    }
+}
+
 /// One leaf's chosen encoding, in the same shape `mars_bench::recall::MethodPick` uses
 /// (row/col/size locate the range block, the rest is the method's chosen fit) — kept as
 /// a plain struct here rather than a tuple (`clippy::type_complexity`) and rather than a
@@ -509,13 +637,14 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64, Vec<Pick>)
     if size == 1 {
         let pixel =
             u32::from(ctx.image.as_slice()[row as usize * ctx.image.width() + col as usize]);
+        let max_qbeta = (1u32 << hdr.bits_beta) - 1;
         let leaf = Leaf {
             row,
             col,
             size,
             mode: 0,
             qalfa: 0,
-            qbeta: pixel & ((1 << hdr.bits_beta) - 1),
+            qbeta: quantise(f64::from(pixel) / 255.0 * f64::from(max_qbeta), max_qbeta),
             isometry: 0,
             dom_row: 0,
             dom_col: 0,

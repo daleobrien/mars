@@ -395,6 +395,48 @@ impl Contracted {
     }
 }
 
+/// One legal range block to search, with the codec's effective domain-search stride.
+/// Providers return fitted candidates without changing partition or mode objectives.
+pub struct SearchRequest<'a> {
+    pub image: &'a Plane,
+    pub contracted: &'a Contracted,
+    pub params: &'a EncodeParams,
+    pub row: u32,
+    pub col: u32,
+    pub size: u32,
+    pub shift: u32,
+}
+
+/// The selected fitted candidate and the provider's search evaluation count.
+pub struct SearchOutcome {
+    pub candidate: Option<Candidate>,
+    pub evals: u64,
+}
+
+/// Shared search backend for the codec's parallel partition walks.
+pub trait SearchProvider: Sync {
+    /// Search a range block using the supplied effective stride and fit parameters.
+    fn search(&self, request: &SearchRequest<'_>) -> SearchOutcome;
+}
+
+/// The existing exhaustive search, with unchanged fitting and tie-breaking.
+pub struct ExhaustiveSearch;
+
+impl SearchProvider for ExhaustiveSearch {
+    fn search(&self, request: &SearchRequest<'_>) -> SearchOutcome {
+        let (candidate, evals) = search_with_shift(
+            request.image,
+            request.contracted,
+            request.row,
+            request.col,
+            request.size,
+            request.params,
+            request.shift,
+        );
+        SearchOutcome { candidate, evals }
+    }
+}
+
 /// Public entry point for [`search`], for callers outside this crate that need the
 /// ground-truth per-block result without running the full quadtree `walk` — Step 7's GPU
 /// differential test (`mars-gpu`/`marsbench`) is the reason this exists: it needs to zip
@@ -741,6 +783,43 @@ pub fn encode_image_with_options(
     params: &EncodeParams,
     options: &EncodeOptions,
 ) -> (Header, Vec<Leaf>, u64, ModeStats) {
+    let outcome = encode_image_with_search(image, params, options, |_| Box::new(ExhaustiveSearch));
+    (outcome.header, outcome.leaves, outcome.counters.search_evals, outcome.mode_stats)
+}
+
+/// Search work split between the chosen backend and the fixed exhaustive RD warmup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EncodeCounters {
+    pub search_evals: u64,
+    pub warmup_evals: u64,
+}
+
+impl EncodeCounters {
+    /// All search evaluations, including the RD rate-model warmup.
+    pub fn total_evals(&self) -> u64 {
+        self.search_evals + self.warmup_evals
+    }
+}
+
+/// Encoded plane with full reconstruction metadata and separately attributed work.
+pub struct EncodeOutcome {
+    pub header: Header,
+    pub leaves: Vec<Leaf>,
+    pub counters: EncodeCounters,
+    pub mode_stats: ModeStats,
+}
+
+/// Encode with a provider built once from the contracted plane (e.g. owning an index).
+/// Only the final partition walk uses this provider; RD warmup remains exhaustive.
+///
+/// # Panics
+/// Panics if a supplied lambda is negative or non-finite.
+pub fn encode_image_with_search(
+    image: &Plane,
+    params: &EncodeParams,
+    options: &EncodeOptions,
+    make_search: impl FnOnce(&Contracted) -> Box<dyn SearchProvider>,
+) -> EncodeOutcome {
     if let Some(lambda) = params.lambda {
         assert!(
             lambda.is_finite() && lambda >= 0.0,
@@ -769,12 +848,14 @@ pub fn encode_image_with_options(
         },
     };
     let contracted = Contracted::build(image);
+    let provider = make_search(&contracted);
 
     if let Some(lambda) = params.lambda {
-        let rate = build_rate_snapshot(image, &hdr, &contracted, params);
+        let (rate, warmup_evals) = build_rate_snapshot(image, &hdr, &contracted, params);
         let ctx = Ctx {
             image,
             contracted: &contracted,
+            provider: provider.as_ref(),
             hdr: &hdr,
             params,
             rate: Some(&rate),
@@ -782,12 +863,18 @@ pub fn encode_image_with_options(
             adaptive_density,
         };
         let result = walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda);
-        return (hdr, result.leaves, result.evals, result.stats);
+        return EncodeOutcome {
+            header: hdr,
+            leaves: result.leaves,
+            counters: EncodeCounters { search_evals: result.evals, warmup_evals },
+            mode_stats: result.stats,
+        };
     }
 
     let ctx = Ctx {
         image,
         contracted: &contracted,
+        provider: provider.as_ref(),
         hdr: &hdr,
         params,
         rate: None,
@@ -795,7 +882,12 @@ pub fn encode_image_with_options(
         adaptive_density: false,
     };
     let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
-    (hdr, leaves, evals, ModeStats::default())
+    EncodeOutcome {
+        header: hdr,
+        leaves,
+        counters: EncodeCounters { search_evals: evals, warmup_evals: 0 },
+        mode_stats: ModeStats::default(),
+    }
 }
 
 /// Step 14's fixed warm-up threshold, deliberately independent of the run's own `lambda`
@@ -814,7 +906,7 @@ fn build_rate_snapshot(
     hdr: &Header,
     contracted: &Contracted,
     params: &EncodeParams,
-) -> RateModels {
+) -> (RateModels, u64) {
     let warmup_params = EncodeParams {
         t_rms: RD_WARMUP_T_RMS,
         lambda: None,
@@ -823,15 +915,17 @@ fn build_rate_snapshot(
     let warmup_ctx = Ctx {
         image,
         contracted,
+        provider: &ExhaustiveSearch,
         hdr,
         params: &warmup_params,
         rate: None,
         allowed_modes: [true; 4],
         adaptive_density: false,
     };
-    let (leaves, _evals) = walk(&warmup_ctx, 0, 0, hdr.virtual_size());
-    RateModels::from_leaves(hdr, &leaves)
-        .expect("a warm-up partition from `walk` always writes as a valid `.mars` tree")
+    let (leaves, evals) = walk(&warmup_ctx, 0, 0, hdr.virtual_size());
+    let rate = RateModels::from_leaves(hdr, &leaves)
+        .expect("a warm-up partition from `walk` always writes as a valid `.mars` tree");
+    (rate, evals)
 }
 
 /// The read-only context one `walk` recursion shares — bundled so the recursive calls
@@ -845,6 +939,7 @@ fn build_rate_snapshot(
 struct Ctx<'a> {
     image: &'a Plane,
     contracted: &'a Contracted,
+    provider: &'a dyn SearchProvider,
     hdr: &'a Header,
     params: &'a EncodeParams,
     rate: Option<&'a RateModels>,
@@ -914,7 +1009,15 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64) {
         return (vec![leaf], 0);
     }
 
-    let (candidate, block_evals) = search(ctx.image, ctx.contracted, row, col, size, ctx.params);
+    let SearchOutcome { candidate, evals: block_evals } = ctx.provider.search(&SearchRequest {
+        image: ctx.image,
+        contracted: ctx.contracted,
+        params: ctx.params,
+        row,
+        col,
+        size,
+        shift: ctx.params.shift,
+    });
     let best_rms = candidate.map_or(f64::INFINITY, |c| c.rms);
 
     if best_rms > ctx.params.t_rms && size > hdr.min_size {
@@ -1456,13 +1559,21 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
     // the density decision never depends on the search's own result (which would make the
     // "which stride did we search at" question circular). `false` (every pre-Step-16
     // caller) preserves `search(..)`'s original fixed-`params.shift` behaviour exactly.
-    let (candidate, block_evals) = if ctx.adaptive_density {
+    let shift = if ctx.adaptive_density {
         let rms = block_rms(ctx.image, row, col, size);
-        let shift = adaptive_shift(ctx.params.shift, rms);
-        search_with_shift(ctx.image, ctx.contracted, row, col, size, ctx.params, shift)
+        adaptive_shift(ctx.params.shift, rms)
     } else {
-        search(ctx.image, ctx.contracted, row, col, size, ctx.params)
+        ctx.params.shift
     };
+    let SearchOutcome { candidate, evals: block_evals } = ctx.provider.search(&SearchRequest {
+        image: ctx.image,
+        contracted: ctx.contracted,
+        params: ctx.params,
+        row,
+        col,
+        size,
+        shift,
+    });
     let (leaf, leaf_d, leaf_r) =
         best_mode_leaf(ctx, row, col, size, candidate, rate, lambda, size_class);
 
@@ -2290,13 +2401,14 @@ mod tests {
         // The exact same snapshot-construction call both mode-mask arms use internally
         // (`encode_image_rd_with_modes`) -- built once, shared explicitly here so there is
         // no possibility of the two arms below seeing different snapshots.
-        let rate = build_rate_snapshot(&image, &hdr, &contracted, &params);
+        let (rate, _) = build_rate_snapshot(&image, &hdr, &contracted, &params);
         let lambda = params.lambda.unwrap();
 
         let run = |allowed_modes: [bool; 4]| -> RdResult {
             let ctx = Ctx {
                 image: &image,
                 contracted: &contracted,
+                provider: &ExhaustiveSearch,
                 hdr: &hdr,
                 params: &params,
                 rate: Some(&rate),

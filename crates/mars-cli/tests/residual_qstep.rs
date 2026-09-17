@@ -172,7 +172,10 @@ fn adaptive_progressive_prefixes_match_layer_flags_and_full_ifs_decode() {
     let bytes = encode(&input, &encoded, &["--adaptive-residual", "--progressive"]);
     assert!(progressive::is_progressive(&bytes));
     // The progressive header stores the same wire-rounded f32 after its layer lengths.
-    assert_eq!(&bytes[31..35], &(hdr.residual_qstep.get() as f32).to_le_bytes());
+    assert_eq!(
+        &bytes[31..35],
+        &(hdr.residual_qstep.get() as f32).to_le_bytes()
+    );
     let offsets = progressive::layer_end_offsets(&bytes).expect("parse layer offsets");
     assert_eq!(offsets[3], bytes.len());
     for (i, end) in offsets.into_iter().enumerate() {
@@ -269,7 +272,7 @@ fn nonfinite_lambda_is_rejected_with_and_without_adaptive_residual() {
 }
 
 #[test]
-fn adaptive_residual_requires_lambda_and_conflicts_with_method() {
+fn adaptive_residual_requires_lambda_and_supports_method() {
     let tmp = Scratch::new("invalid-combinations");
     let input = tmp.path("in.pgm");
     write_texture(&input, false);
@@ -279,16 +282,21 @@ fn adaptive_residual_requires_lambda_and_conflicts_with_method() {
         &["--adaptive-residual"],
         &["required", "--lambda"],
     );
-    assert_rejected(
-        &input,
-        &tmp.path("method.mars"),
-        &[
-            "--adaptive-residual",
-            "--lambda",
-            "50",
-            "--method",
-            "exhaustive",
-        ],
-        &["cannot be used with", "--adaptive-residual", "--method"],
-    );
+    let output = tmp.path("method.mars");
+    // Fisher may return no positive-contrast candidate for some blocks. This test
+    // verifies adaptive residual support, so explicitly permit the required DC fallback.
+    run(Command::new(env!("CARGO_BIN_EXE_encmars"))
+        .arg(&input)
+        .arg(&output)
+        .args([
+            "--lambda", "50", "--modes", "0,3", "--min-size", "4", "--max-size", "4",
+            "--threads", "1", "--adaptive-residual", "--method", "fisher",
+        ]));
+    let bytes = std::fs::read(&output).expect("read encoded stream");
+    let planes = parse_planes(&bytes, 0, 1);
+    let (hdr, leaves) = &planes[0];
+    assert_eq!(hdr.residual_qstep, ResidualQstep::from_lambda(50.0));
+    assert_nonzero_residual(leaves);
+    let expected = Image::gray(ifs::decode_iterative(hdr, leaves, ITERATIONS));
+    assert_eq!(decode(&output, &tmp.path("method.png"), &[]), expected);
 }

@@ -39,8 +39,13 @@ legacy threshold encoding. Library/benchmark defaults are unchanged.
 - `--t-rms 8`: restore legacy threshold partitioning. `--chroma-t-rms` also selects
   that path unless `--lambda` is supplied; explicit lambda takes precedence and ignores
   the thresholds. The rate-estimation warm-up uses fixed RMS 8.
-- `--method fisher` (and other search methods): still grayscale/legacy-only;
-  cannot be combined with explicit `--lambda`.
+- `--method fisher --lambda 200 --modes 0,2`: use indexed search with production
+  grayscale RD partitioning. All nine existing methods support this path; method alone
+  retains legacy threshold 8. Color/method and progressive/method remain unsupported.
+  Method output separates search fits, exhaustive warm-up fits, and total fits.
+- Explicit masks are strict: if a block needs mandatory DC fallback but mode 0 was
+  excluded, encoding fails before writing output. Prefer `0,2` or `0,2,3` over a
+  fractal-only mask when using restricted search or tiny/border-heavy images.
 - Explicit `--modes` and `--adaptive-density` require RD, rather than silently doing
   nothing on the legacy/method path. Numeric options are checked before reading input;
   domain stride must be even and contrast limits must be representable in the header.
