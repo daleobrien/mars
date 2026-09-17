@@ -57,6 +57,14 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - Validation: seven tiny codec regressions and nine all-method search geometry tests passed, including singletons, odd dimensions, color 8×8 4:2:0, serialization and one/two-thread identity. Existing codec golden encoder/decoder checks also passed.
 - Ordinary decoded stream semantics are unchanged where decoding previously succeeded; newly encoded size-1 border DC values intentionally change. Candidate scan order remains row-major. No format change.
 
+### Step 5 — usable decoder controls and output failures
+
+- Added `progressive::decode_with_iterations`; existing `decode` retains ten iterations. `decmars --iterations` now controls every progressive layer rather than being ignored.
+- Decoder CLI rejects zero iterations, nonfinite/nonpositive zoom, and explicit threshold without auto. Requests beyond an ordinary available progressive prefix return a clear error.
+- Progression frame write failures now fail the command; regular `--debug-rects` actually writes the existing quadtree visualization.
+- Validation: six decoder CLI tests, three progressive iteration tests, three existing progressive CLI tests and five residual CLI tests passed. Manual Tiny64 progressive encode → decode at 1/10 iterations → file metrics succeeded (75 bytes, 48.7107 dB at 10 iterations; smoke only, not corpus evidence).
+- `cargo test --locked --offline -p mars-cli` timed out at 120 seconds in `cli_a_gate::omitting_adaptive_density_matches_explicit_false_byte_for_byte`, which runs two full-Kodak exhaustive four-mode encodes. It is not a full-suite pass; no assertions or corpus fixture were weakened to bypass it.
+
 ## 2. What Mars already implements
 
 README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.

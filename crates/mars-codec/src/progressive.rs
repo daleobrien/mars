@@ -59,9 +59,7 @@ const MAGIC: [u8; 4] = *b"MPRG";
 const VERSION: u8 = 0;
 /// Magic, version, geometry, dimensions, four layer lengths and binary32 qstep.
 const HEADER_LEN: usize = 4 + 1 + 6 + 4 + 16 + 4;
-/// Fixed-point iteration count for every [`crate::ifs::decode_iterative`] call this module
-/// makes — the same convention every other test/bench call site in this workspace uses
-/// (`grep -rn "decode_iterative(" crates/`).
+/// Default fixed-point iteration count used by [`decode`].
 pub const DECODE_ITERATIONS: u32 = 10;
 
 /// Whether `data` starts with this module's own magic bytes -- for a caller (CLI-E's
@@ -101,6 +99,8 @@ const MODE_ALPHABET: u32 = 4;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProgressiveError {
+    #[error("iterations must be positive")]
+    InvalidIterations,
     #[error("not a progressive Mars stream: bad magic")]
     BadMagic,
     #[error("residual qstep must be finite and in [1, 65535]")]
@@ -592,6 +592,19 @@ pub fn layer_end_offsets(data: &[u8]) -> Result<[usize; 4], ProgressiveError> {
 /// Bytes belonging to a partially-present layer are ignored, not treated as an error: the
 /// caller gets back the image built from the highest layer count fully available.
 pub fn decode(data: &[u8]) -> Result<Decoded, ProgressiveError> {
+    decode_with_iterations(data, DECODE_ITERATIONS)
+}
+
+/// Decode all fully present layers using a positive fixed-point iteration count.
+/// Like [`decode`], incomplete trailing layers are ignored. Iteration starts from
+/// the flat grey seed; base and partition-only layers settle after one iteration.
+pub fn decode_with_iterations(
+    data: &[u8],
+    iterations: u32,
+) -> Result<Decoded, ProgressiveError> {
+    if iterations == 0 {
+        return Err(ProgressiveError::InvalidIterations);
+    }
     let parsed = parse_header(data)?;
     let hdr = parsed.hdr;
     let offsets = cumulative_offsets(&parsed.layer_lens)?;
@@ -618,7 +631,7 @@ pub fn decode(data: &[u8]) -> Result<Decoded, ProgressiveError> {
         .collect();
 
     if avail < offsets[1] {
-        let image = render(&hdr, &states, 1);
+        let image = render(&hdr, &states, 1, iterations);
         return Ok(Decoded { image, layers: 1 });
     }
 
@@ -637,7 +650,7 @@ pub fn decode(data: &[u8]) -> Result<Decoded, ProgressiveError> {
     states = l2_states;
 
     if avail < offsets[2] {
-        let image = render(&hdr, &states, 2);
+        let image = render(&hdr, &states, 2, iterations);
         return Ok(Decoded { image, layers: 2 });
     }
 
@@ -651,7 +664,7 @@ pub fn decode(data: &[u8]) -> Result<Decoded, ProgressiveError> {
     }
 
     if avail < offsets[3] {
-        let image = render(&hdr, &states, 3);
+        let image = render(&hdr, &states, 3, iterations);
         return Ok(Decoded { image, layers: 3 });
     }
 
@@ -665,7 +678,7 @@ pub fn decode(data: &[u8]) -> Result<Decoded, ProgressiveError> {
         }
     }
 
-    let image = render(&hdr, &states, 4);
+    let image = render(&hdr, &states, 4, iterations);
     Ok(Decoded { image, layers: 4 })
 }
 
@@ -753,7 +766,7 @@ fn read_fractal(
 /// a real [`Leaf`] list and calling [`crate::ifs::decode_iterative`] — the one and only
 /// place any progressive layer touches pixels, and the reason this design never divides a
 /// leaf's footprint by a pyramid level (D46).
-fn render(hdr: &Header, states: &[LeafState], layer_reached: u8) -> Plane {
+fn render(hdr: &Header, states: &[LeafState], layer_reached: u8, iterations: u32) -> Plane {
     let leaves: Vec<Leaf> = states
         .iter()
         .map(|s| match s.final_mode {
@@ -824,7 +837,7 @@ fn render(hdr: &Header, states: &[LeafState], layer_reached: u8) -> Plane {
             _ => unreachable!("LeafState::final_mode is only ever constructed as 0..=3"),
         })
         .collect();
-    crate::ifs::decode_iterative(hdr, &leaves, DECODE_ITERATIONS)
+    crate::ifs::decode_iterative(hdr, &leaves, iterations)
 }
 
 #[cfg(test)]

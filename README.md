@@ -48,6 +48,19 @@ legacy threshold encoding. Library/benchmark defaults are unchanged.
   remain opt-in. To try the latter, include mode 3:
   `--lambda 200 --modes 0,2,3 --adaptive-residual`.
 
+Progressive streams also honor decoder iteration counts:
+
+```bash
+encmars input.pgm output.mars --progressive
+decmars output.mars decoded.png --layer 4 --iterations 20
+```
+
+For regular streams, `decmars --auto --iterations 40` stops when the pixel-change
+threshold is reached or the iteration limit is exhausted. `--progression frames/`
+writes iteration images; failures writing frames are reported as command failures.
+`--debug-rects tree.png` writes native-resolution leaf boundaries for regular streams.
+Progressive streams still reject auto/progression/zoom/debug-rects combinations.
+
 ## Measurement setup
 
 ```bash
