@@ -50,6 +50,13 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - Corrected CLI help and README: RD warm-up is fixed at RMS 8. README now describes the implemented codec rather than an empty crate.
 - Validation: encoder unit tests plus research-options, residual-qstep and classical CLI integration tests passed (17 tests). No corpus performance claim.
 
+### Step 4 — tiny/odd geometry and indexed search (P0.2)
+
+- Reproduced and fixed singleton contracted-plane chunking, DC decoder reads from nonexistent domains, and incorrectly masked size-1 border brightness. Zero-alpha residuals still retain their orientation and coefficients.
+- Oversized indexed domain pools are empty; smaller boundary sizes are indexed; empty mass-center queries terminate; flat Saupe descriptors are finite and KD-tree equal-key sorting is stable.
+- Validation: seven tiny codec regressions and nine all-method search geometry tests passed, including singletons, odd dimensions, color 8×8 4:2:0, serialization and one/two-thread identity. Existing codec golden encoder/decoder checks also passed.
+- Ordinary decoded stream semantics are unchanged where decoding previously succeeded; newly encoded size-1 border DC values intentionally change. Candidate scan order remains row-major. No format change.
+
 ## 2. What Mars already implements
 
 README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.
@@ -133,8 +140,8 @@ input file → encode → serialize → actual coded file
 | Contrast header precision | Fitting still uses `params.max_alfa`; header stores a 1/32-quantized value; decoder uses header value. Residual-step wire rounding is handled, contrast normalization is not. | Test nonrepresentable parameters. Normalize before all fitting/scoring or reject them explicitly. |
 | Contractivity | Actual contrast is `qalfa / 2^bits_alfa * (int_max_alfa / 32)`. Default maximum coefficient is 15/16, but other accepted settings can allow ≥1. | Validate dequantized coefficients for the selected profile; distinguish noncontractive legacy settings. Fixed residuals do not increase the continuous map's Lipschitz constant, but integer iterations still need stopping/cycle diagnostics. |
 | Domain-grid phase | Density's finer-than-header-grid branch is already removed: only base/doubled stride is used. Independently, contracted samples use even-origin 2×2 averages and lookup divides coordinates by two. | Retain the density serialization regression. Test odd stride/origins against direct decoder sampling; use positive even stride in the baseline until phase-aware sampling is validated. |
-| Flat/tied features | Zero-energy normalization and non-total sort comparison patterns remain search-audit concerns, not demonstrated fixes. | Constant blocks, duplicate keys, finite stable sorting, deterministic DC policy. |
-| Empty/tiny pools and decoding | Production exhaustive search already uses checked subtraction and returns no candidate when domains cannot fit. `mars-search::DomainPool` uses saturating subtraction and can enumerate an invalid origin; boundary leaves can fall below indexed sizes. Contracted-plane chunking and decoder domain reads also need tiny-image coverage. | Checked geometry before work, guaranteed termination, indexed no-candidate handling, odd/non-power-of-two round-trips, and DC leaves whose nominal domain does not fit. Do not confuse safe exhaustive enumeration with safe end-to-end geometry. |
+| Flat/tied features | Execution step 4 handles zero-energy Saupe features, stable KD-tree equal keys, and bounded empty mass-center search. | All-method constant/tiny deterministic tests pass; extend coverage when introducing new feature/index methods. |
+| Empty/tiny pools and decoding | **Resolved for tested profiles in execution step 4:** legal empty pools, smaller boundary indexes, singleton contraction, DC decoding and border quantisation have focused round-trip regressions. | Keep geometry tests across all methods and threads. This is not a claim that arbitrary library parameters or every color/progressive geometry have been validated. |
 
 These are source-audit findings, not all reproduced defects. Fix only after a failing focused test identifies the behavior. Keep fixes in isolated changes, then establish a corrected baseline before comparing algorithms.
 

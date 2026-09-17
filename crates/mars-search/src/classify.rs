@@ -246,7 +246,7 @@ fn shrunk_block(b: &Block, factor: usize) -> Block {
 
 /// `ComputeSaupeVectors()`: zero-mean, unit-L2-norm feature vector, after an optional
 /// `ShrunkBlock` box-downsample when `average_factor > 1` (`ComputeFeatVectDimSaupe`,
-/// [`feature_dims`]).
+/// [`feature_dims`]). Constant blocks have the zero vector (no contrast to normalise).
 pub fn compute_saupe_vector(b: &Block, average_factor: usize) -> Vec<f32> {
     let shrunk;
     let block = if average_factor > 1 {
@@ -259,7 +259,11 @@ pub fn compute_saupe_vector(b: &Block, average_factor: usize) -> Vec<f32> {
     let sum: f64 = block.data.iter().sum();
     let sum2: f64 = block.data.iter().map(|v| v * v).sum();
     let s = sum / n;
-    let v = (sum2 - sum * sum / n).sqrt();
+    let energy = sum2 - sum * sum / n;
+    if energy <= 0.0 {
+        return vec![0.0; block.data.len()];
+    }
+    let v = energy.sqrt();
     block.data.iter().map(|&x| ((x - s) / v) as f32).collect()
 }
 

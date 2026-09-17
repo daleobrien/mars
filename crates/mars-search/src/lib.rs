@@ -55,12 +55,18 @@ impl<'a> DomainPool<'a> {
     /// method's indexing function iterates over (`index_func.c`'s
     /// `i < image_height - 2*size + 1; i += SHIFT`).
     pub fn domain_positions(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
-        let max_row = self.image_height.saturating_sub(2 * self.size);
-        let max_col = self.image_width.saturating_sub(2 * self.size);
-        let shift = self.shift.max(1);
-        (0..=max_row)
-            .step_by(shift as usize)
-            .flat_map(move |r| (0..=max_col).step_by(shift as usize).map(move |c| (r, c)))
+        let bounds = self.size.checked_mul(2).and_then(|diameter| {
+            Some((
+                self.image_height.checked_sub(diameter)?,
+                self.image_width.checked_sub(diameter)?,
+            ))
+        });
+        let shift = self.shift.max(1) as usize;
+        bounds.into_iter().flat_map(move |(max_row, max_col)| {
+            (0..=max_row)
+                .step_by(shift)
+                .flat_map(move |r| (0..=max_col).step_by(shift).map(move |c| (r, c)))
+        })
     }
 
     /// The `size x size` block of contracted (`D = 4x` box-sum) samples at one domain
@@ -360,7 +366,7 @@ impl MethodName {
 }
 
 /// One method, indexed once per size that a partition might ever produce a leaf at
-/// (`min_size..=max_size`, every power of two). Built once per image by
+/// (`min_size..=max_size`, plus smaller sizes needed by border splits). Built once per image by
 /// [`encode_image`]/the `mars-bench` driver, then reused across every range block of a
 /// matching size during the quadtree walk.
 pub struct SizedRetrievers {
@@ -369,9 +375,10 @@ pub struct SizedRetrievers {
 }
 
 impl SizedRetrievers {
-    /// Build and index one fresh retriever per size in `[min_size, max_size]`, via
-    /// `make(size) -> Box<dyn CandidateRetriever>` (not yet indexed) — this crate's
-    /// method constructors (`fisher::Fisher::new()`, etc.) all provide one.
+    /// Build and index one fresh retriever per power-of-two size in
+    /// `[min_size, max_size]`, plus sizes down to 2 when image borders are not aligned
+    /// to `min_size`. Size 1 is always coded directly, without searching.
+    /// `make() -> Box<dyn CandidateRetriever>` supplies each unindexed retriever.
     pub fn build(
         contracted: &Contracted,
         image_width: u32,
@@ -384,7 +391,11 @@ impl SizedRetrievers {
         let max_tip = (max_size as f64).log2().round() as usize;
         let mut by_tip: Vec<Option<Box<dyn CandidateRetriever>>> =
             (0..=max_tip).map(|_| None).collect();
-        let mut size = min_size;
+        let mut size = if image_width % min_size != 0 || image_height % min_size != 0 {
+            2
+        } else {
+            min_size.max(2)
+        };
         while size <= max_size {
             let tip = (size as f64).log2().round() as usize;
             let pool = DomainPool {

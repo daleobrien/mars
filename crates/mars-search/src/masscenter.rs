@@ -33,7 +33,8 @@ fn flip_iso_for_classification(isom: u8) -> u8 {
 
 /// Ring cells for the expanding search: keeps widening `(r, t)` — starting from the
 /// caller's own `(r0, t0)` — until at least one `(a, b)` in the `t x t` ring satisfies
-/// `nonempty`, then returns every `(a, b)` in that final ring. Mirrors
+/// `nonempty`, then returns every `(a, b)` in that final ring. Returns an empty vector
+/// if a full-grid probe finds no occupied cell. Mirrors
 /// `MassCenterCoding`'s / `Mc_SaupeCoding`'s identical two-pass (probe, then gather) loop
 /// structure, parameterised over each method's own starting `(r0, t0)` (§ Step 9 brief:
 /// "port each method's own start values exactly, don't assume they match").
@@ -45,6 +46,9 @@ pub fn expanding_ring(
     t0: i64,
     mut nonempty: impl FnMut(usize, usize) -> bool,
 ) -> Vec<(usize, usize)> {
+    if n_p_class == 0 {
+        return Vec::new();
+    }
     let n = n_p_class as i64;
     let mut r = r0;
     let mut t = t0;
@@ -62,6 +66,10 @@ pub fn expanding_ring(
         }
         if found {
             break;
+        }
+        // Once the wrapped window spans every bin, no wider search can find a domain.
+        if t >= n {
+            return Vec::new();
         }
         r += 1;
         t += 1;

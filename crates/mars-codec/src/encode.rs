@@ -350,6 +350,10 @@ impl Contracted {
         let (stride, rows) = (w / 2, h / 2);
         let px = image.as_slice();
         let mut data = vec![0i32; stride * rows];
+        // A one-pixel-wide image has no complete 2x2 domains and no row chunks.
+        if stride == 0 {
+            return Self { data, stride };
+        }
         data.par_chunks_mut(stride)
             .enumerate()
             .for_each(|(i, row_out)| {
@@ -887,9 +891,9 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64) {
         return split(ctx, row, col, half);
     }
 
-    // §5.3 / coding_func.c `tip == 0`: a size-1 block is a raw, truncated pixel — no
-    // search, no evals, and it can never exceed `min_size` (a power of two >= 2) so it is
-    // always a leaf.
+    // Forced border subdivision can reach size 1 below min_size. No domain search
+    // is needed, but qbeta must use the same scaled DC convention as larger leaves,
+    // not mask off the pixel's high bits.
     if size == 1 {
         let pixel =
             u32::from(ctx.image.as_slice()[row as usize * ctx.image.width() + col as usize]);
@@ -899,7 +903,7 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64) {
             size,
             mode: 0,
             qalfa: 0,
-            qbeta: pixel & ((1 << hdr.bits_beta) - 1),
+            qbeta: best_beta(i64::from(pixel), 1, hdr.bits_beta),
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
@@ -1413,11 +1417,8 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
         .expect("walk_rd always runs with a rate snapshot (params.lambda is Some)");
     let size_class = size.trailing_zeros();
 
-    // §5.3: a size-1 block is a raw, truncated pixel -- no search, no evals, always a
-    // leaf. Its truncation error is technically nonzero whenever `bits_beta < 8`, but
-    // this project's configs all keep `min_size >= 2` (docs/decisions.md), so size == 1
-    // is never actually reached; D is approximated as 0 here rather than computed exactly
-    // for a path that never executes.
+    // Odd borders reach size 1 even with min_size >= 2. Match the threshold walk's
+    // DC quantisation and price the reconstructed pixel rather than assuming zero D.
     if size == 1 {
         let pixel =
             u32::from(ctx.image.as_slice()[row as usize * ctx.image.width() + col as usize]);
@@ -1427,7 +1428,7 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
             size,
             mode: 0,
             qalfa: 0,
-            qbeta: pixel & ((1 << hdr.bits_beta) - 1),
+            qbeta: best_beta(i64::from(pixel), 1, hdr.bits_beta),
             isometry: 0,
             dom_row: 0,
             dom_col: 0,
@@ -1435,13 +1436,17 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
             qgy: 0,
             residual: Vec::new(),
         };
+        let decoded = (0.5
+            + f64::from(leaf.qbeta) / f64::from((1u32 << hdr.bits_beta) - 1) * 255.0)
+            .clamp(0.0, 255.0) as u8;
+        let d = (f64::from(pixel) - f64::from(decoded)).powi(2);
         let r = event_bits(rate, &leaf_events(hdr, &leaf, size_class));
         let mut stats = ModeStats::default();
         stats.leaf_modes[0] += 1;
         return RdResult {
             leaves: vec![leaf],
             evals: 0,
-            d: 0.0,
+            d,
             r,
             stats,
         };

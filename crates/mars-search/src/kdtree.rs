@@ -11,11 +11,9 @@
 //! `0`) for equal keys, which under `qsort`'s *unspecified* order-among-equals makes the
 //! reference's own left/right split among tied points implementation-defined — the Step 9
 //! brief explicitly says search behaviour need not reproduce this bit-for-bit any more.
-//! This port keeps the same never-equal comparator (so the *algorithm* — including which
-//! points land left vs right when many share a cut-dimension value — matches the
-//! reference's logic) but drives it through Rust's stable sort, which makes the result a
-//! deterministic function of input order, satisfying this project's determinism rule
-//! (§2.3) — a strictly *stronger* guarantee than the C original had.
+//! This port uses a valid comparator and stable sort, retaining input order for tied
+//! coordinates. Unlike the C comparator, this also satisfies Rust's sorting contract
+//! for constant blocks and other repeated feature vectors.
 
 const BUCKETSIZE: usize = 10;
 
@@ -82,17 +80,10 @@ fn build_rec(points: &[Vec<f32>], dim: usize, mut idx: Vec<usize>) -> KdNode {
         };
     }
 
-    // `compare()`'s never-equal comparator (module doc): `p1 < p2 -> Less`, otherwise
-    // `Greater` (including ties) — ported deliberately, driven through Rust's stable
-    // sort for determinism.
     idx.sort_by(|&a, &b| {
-        let p1 = points[a][cutdim];
-        let p2 = points[b][cutdim];
-        if p1 < p2 {
-            std::cmp::Ordering::Less
-        } else {
-            std::cmp::Ordering::Greater
-        }
+        points[a][cutdim]
+            .partial_cmp(&points[b][cutdim])
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let cutval = (points[idx[num / 2 - 1]][cutdim] + points[idx[num / 2]][cutdim]) / 2.0;

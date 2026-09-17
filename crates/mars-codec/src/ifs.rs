@@ -434,13 +434,19 @@ fn decode_leaf(header: &impl DecodeHeader, leaf: &Leaf, img: &[u8], stride: usiz
 
     for u in 0..size {
         for v in 0..size {
-            let dr = leaf.dom_row as usize + 2 * u;
-            let dc = leaf.dom_col as usize + 2 * v;
-            let d = (f64::from(img[dr * stride + dc])
-                + f64::from(img[(dr + 1) * stride + dc])
-                + f64::from(img[dr * stride + dc + 1])
-                + f64::from(img[(dr + 1) * stride + dc + 1]))
-                / 4.0;
+            // Zero-alpha leaves have no domain, including on images smaller than
+            // 2*size. Keep residual addition and mapping below for mode 3.
+            let d = if leaf.qalfa == 0 {
+                0.0
+            } else {
+                let dr = leaf.dom_row as usize + 2 * u;
+                let dc = leaf.dom_col as usize + 2 * v;
+                (f64::from(img[dr * stride + dc])
+                    + f64::from(img[(dr + 1) * stride + dc])
+                    + f64::from(img[dr * stride + dc + 1])
+                    + f64::from(img[(dr + 1) * stride + dc + 1]))
+                    / 4.0
+            };
             let (i, j) = crate::isometry::map(leaf.isometry, u, v, size);
             // §10.1: the 0.5 is added to the product, not to the sum — `+` is
             // left-associative in the C, and reassociating changes the truncated result.
