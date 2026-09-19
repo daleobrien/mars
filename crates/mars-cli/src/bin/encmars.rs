@@ -291,6 +291,14 @@ struct Cli {
     /// pass a `.png` path.
     #[arg(long, value_name = "PATH", requires = "human_adaptive")]
     debug_regions: Option<PathBuf>,
+
+    /// Human-adaptive subdivision floor: blocks overlapping no detected region stop
+    /// subdividing at this (coarser) size, while blocks inside a region keep --min-size.
+    /// Saves bits away from the face. Must be a power of two in --min-size..=--max-size.
+    /// Not applied (and reported as such) when no face is detected, because there is then no
+    /// region to be outside of.
+    #[arg(long, value_name = "SIZE", requires = "human_adaptive")]
+    outside_min_size: Option<u32>,
 }
 
 impl Cli {
@@ -478,6 +486,24 @@ impl Cli {
             }
             if !self.face_confidence.is_finite() || !(0.0..=1.0).contains(&self.face_confidence) {
                 bail!("--face-confidence must be in 0.0..=1.0");
+            }
+            if let Some(outside) = self.outside_min_size {
+                if !outside.is_power_of_two() || outside > u32::from(u8::MAX) {
+                    bail!("--outside-min-size must be a power of two in 1..=128");
+                }
+                if outside < self.min_size {
+                    bail!(
+                        "--outside-min-size must not be finer than --min-size ({}): the header \
+                         records the finest floor in the stream",
+                        self.min_size
+                    );
+                }
+                if outside > self.max_size {
+                    bail!(
+                        "--outside-min-size must not exceed --max-size ({})",
+                        self.max_size
+                    );
+                }
             }
         }
         Ok(())
@@ -765,6 +791,29 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         cli.feature_lambda_scale,
     );
 
+    let mut regions: Vec<LambdaRegion> = plan.iter().map(|planned| planned.region).collect();
+    // `--outside-min-size`: one further full-image region carrying a coarse subdivision
+    // floor. The face regions carry no floor of their own, and the finest cap among the
+    // regions a block overlaps wins, so blocks outside every face keep the coarse floor
+    // while the faces themselves still refine to `--min-size`. Skipped when nothing was
+    // detected: with no region to be outside of, applying it would silently coarsen the
+    // whole image because detection failed.
+    let outside = match (cli.outside_min_size, regions.is_empty()) {
+        (Some(outside), false) => {
+            regions.push(LambdaRegion {
+                row: 0,
+                col: 0,
+                height: image.height() as u32,
+                width: image.width() as u32,
+                // Lambda no-op: this region only caps the subdivision size.
+                scale: 1.0,
+                min_size: Some(outside),
+            });
+            Some(outside)
+        }
+        _ => None,
+    };
+
     if let Some(path) = &cli.debug_regions {
         let annotated = mars_cli::overlay::draw_regions(image, &plan);
         mars_cli::overlay::write_image(&annotated, path)
@@ -774,12 +823,17 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         .iter()
         .filter(|planned| planned.kind == RegionKind::Face)
         .count();
+    let outside_note = match (cli.outside_min_size, outside) {
+        (Some(size), Some(_)) => format!(", outside min-size {size}"),
+        (Some(size), None) => format!(", --outside-min-size {size} not applied (no regions)"),
+        (None, _) => String::new(),
+    };
     let overlay = match &cli.debug_regions {
         Some(path) => format!(", overlay -> {}", path.display()),
         None => String::new(),
     };
     println!(
-        "human-adaptive: {faces_found} face(s), {} region(s){overlay}",
+        "human-adaptive: {faces_found} face(s), {} region(s){outside_note}{overlay}",
         plan.len()
     );
     if cli.debug_regions.is_some() {
@@ -796,7 +850,7 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         }
     }
 
-    Ok(plan.into_iter().map(|planned| planned.region).collect())
+    Ok(regions)
 }
 
 #[cfg(not(feature = "face-detect"))]
@@ -943,5 +997,43 @@ mod tests {
             Cli::try_parse_from(["encmars", "in.png", "out.mars", "--scrfd-model", "m.onnx"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn outside_min_size_must_be_a_power_of_two_between_min_and_max() {
+        // Defaults here are --min-size 4 and --max-size 16.
+        assert!(parse(&["--human-adaptive", "--outside-min-size", "4"])
+            .validate()
+            .is_ok());
+        assert!(parse(&["--human-adaptive", "--outside-min-size", "16"])
+            .validate()
+            .is_ok());
+        assert!(parse(&[
+            "--human-adaptive",
+            "--outside-min-size",
+            "16",
+            "--max-size",
+            "32"
+        ])
+        .validate()
+        .is_ok());
+        // Not a power of two.
+        assert!(parse(&["--human-adaptive", "--outside-min-size", "12"])
+            .validate()
+            .is_err());
+        // Finer than --min-size: the header records the finest floor, so a finer one could
+        // not be represented without mis-parsing on the way back in.
+        assert!(parse(&["--human-adaptive", "--outside-min-size", "2"])
+            .validate()
+            .is_err());
+        // Coarser than --max-size.
+        assert!(parse(&["--human-adaptive", "--outside-min-size", "32"])
+            .validate()
+            .is_err());
+        // Meaningless without --human-adaptive, and clap refuses it.
+        assert!(Cli::try_parse_from([
+            "encmars", "in.png", "out.mars", "--outside-min-size", "16"
+        ])
+        .is_err());
     }
 }

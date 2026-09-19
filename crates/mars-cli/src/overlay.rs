@@ -135,6 +135,7 @@ mod tests {
                 width,
                 // Irrelevant to drawing; the plan's real scales come from the CLI flags.
                 scale: 1.0,
+                min_size: None,
             },
         }
     }

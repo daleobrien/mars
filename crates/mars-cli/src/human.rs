@@ -70,6 +70,9 @@ fn padded_region(
         height: (max_y - min_y) as u32,
         width: (max_x - min_x) as u32,
         scale,
+        // Face regions override lambda only; the subdivision floor is the caller's
+        // `--outside-min-size`, applied through a separate full-image region.
+        min_size: None,
     })
 }
 

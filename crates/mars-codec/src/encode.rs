@@ -25,6 +25,10 @@ use crate::rate::RateModels;
 /// What the encoder needs beyond the header fields `docs/mars1-format.md` already names.
 #[derive(Debug, Clone, Copy)]
 pub struct EncodeParams {
+    /// The *finest* block size in the stream. The header records it, and `mars_format`
+    /// emits a split flag exactly where `size > min_size`, so it is a format-level field:
+    /// [`LambdaRegion::min_size`] can make a region stop subdividing *above* this floor,
+    /// but never below it.
     pub min_size: u32,
     pub max_size: u32,
     pub shift: u32,
@@ -83,9 +87,11 @@ pub struct EncodeOptions {
     pub rd_candidates: usize,
     /// Spatially varying lambda: each [`LambdaRegion`] scales the run's base lambda for
     /// blocks overlapping it, so a region can spend more bits where errors are most
-    /// visible (e.g. a detected face). Empty (the default) leaves every block at the base
-    /// lambda, byte-identical to every caller that predates this field. Only consulted on
-    /// the RD (`params.lambda: Some`) path -- the legacy `walk` makes no `J = D + lambda*R`
+    /// visible (e.g. a detected face). A region may also cap the minimum block size
+    /// ([`LambdaRegion::min_size`]), which bounds subdivision as well as weighting it.
+    /// Empty (the default) leaves every block at the base lambda and the global minimum,
+    /// byte-identical to every caller that predates this field. Only consulted on the RD
+    /// (`params.lambda: Some`) path -- the legacy `walk` makes no `J = D + lambda*R`
     /// decision to bias.
     pub lambda_regions: Vec<LambdaRegion>,
 }
@@ -102,13 +108,20 @@ impl Default for EncodeOptions {
     }
 }
 
-/// One axis-aligned rectangle in plane pixel coordinates whose RD trade-off is scaled by
-/// `scale` -- the multiplier applied to the run's base lambda for blocks overlapping it.
+/// One axis-aligned rectangle in plane pixel coordinates that overrides the RD parameters
+/// of the blocks overlapping it: the lambda scale, and optionally the minimum block size.
 ///
 /// `scale < 1.0` weights distortion more heavily inside the rectangle, so [`walk_rd`]
 /// prefers finer blocks there (lower error, more bits); `scale > 1.0` does the opposite.
 /// A region is a *preference*, not a hard bound: RD still chooses per node, so a region can
 /// never force a partition the rate term would not otherwise accept.
+///
+/// `min_size` is the harder knob: blocks overlapping the region stop subdividing at that
+/// size (see [`min_size_for_block`]). The finest cap among the regions a block overlaps
+/// wins, and `None` means the run's global `min_size` -- so a region *without* an override
+/// removes any coarser cap inside itself. That is what makes "coarser everywhere except the
+/// face" expressible: one full-image region carrying the coarse cap, plus the face regions
+/// carrying none.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LambdaRegion {
     pub row: u32,
@@ -117,6 +130,11 @@ pub struct LambdaRegion {
     pub width: u32,
     /// Multiplier on the base lambda. `1.0` is a no-op.
     pub scale: f64,
+    /// Minimum block size inside this region. `None` leaves the run's global `min_size` in
+    /// force. It may not be finer than the header's `min_size`, which the format requires:
+    /// a split flag is emitted exactly when `size > hdr.min_size`, so a finer floor could
+    /// not be represented in the stream.
+    pub min_size: Option<u32>,
 }
 
 /// Effective lambda multiplier for a `size x size` block at `(row, col)`.
@@ -141,14 +159,7 @@ pub fn lambda_scale_for_block(regions: &[LambdaRegion], row: u32, col: u32, size
         if region.scale >= best {
             continue;
         }
-        let top = u64::from(row.max(region.row));
-        let left = u64::from(col.max(region.col));
-        let bottom = u64::from((row + size).min(region.row.saturating_add(region.height)));
-        let right = u64::from((col + size).min(region.col.saturating_add(region.width)));
-        if bottom <= top || right <= left {
-            continue;
-        }
-        let coverage = (((bottom - top) * (right - left)) as f64 / block_area).min(1.0);
+        let coverage = (clipped_area(region, row, col, size) as f64 / block_area).min(1.0);
         // The region's scale, diluted by how little of the block it actually covers.
         let candidate = 1.0 - (1.0 - region.scale) * coverage;
         if candidate < best {
@@ -156,6 +167,54 @@ pub fn lambda_scale_for_block(regions: &[LambdaRegion], row: u32, col: u32, size
         }
     }
     best
+}
+
+/// The number of pixels a `size x size` block at `(row, col)` shares with `region`.
+/// Touching edges share nothing.
+fn clipped_area(region: &LambdaRegion, row: u32, col: u32, size: u32) -> u64 {
+    let top = u64::from(row).max(u64::from(region.row));
+    let left = u64::from(col).max(u64::from(region.col));
+    let bottom =
+        (u64::from(row) + u64::from(size)).min(u64::from(region.row) + u64::from(region.height));
+    let right =
+        (u64::from(col) + u64::from(size)).min(u64::from(region.col) + u64::from(region.width));
+    if bottom <= top || right <= left {
+        return 0;
+    }
+    (bottom - top) * (right - left)
+}
+
+/// The finest minimum block size allowed for a `size x size` block at `(row, col)`.
+///
+/// A region's [`LambdaRegion::min_size`] caps how far the blocks it *overlaps* may
+/// subdivide; `None` means `global_min`, so a region with no override removes any coarser
+/// cap inside itself. The smallest cap among the overlapping regions wins -- which is what
+/// lets one full-image region set a coarse floor while the face regions inside it keep the
+/// global one. A block overlapping no region keeps `global_min`.
+///
+/// The result is never finer than `global_min`: `mars_format` emits a split flag exactly
+/// when `size > hdr.min_size`, so a finer floor could not be represented in the stream.
+///
+/// The floor is a cap on *subdivision*, not on block size: a node that stops here emits
+/// "do not split", and a node that overlaps a region may still subdivide past the floor,
+/// so refinement can extend one level beyond a region's edge.
+pub fn min_size_for_block(
+    regions: &[LambdaRegion],
+    row: u32,
+    col: u32,
+    size: u32,
+    global_min: u32,
+) -> u32 {
+    if regions.is_empty() {
+        return global_min;
+    }
+    regions
+        .iter()
+        .filter(|region| clipped_area(region, row, col, size) > 0)
+        .map(|region| region.min_size.unwrap_or(global_min))
+        .min()
+        .unwrap_or(global_min)
+        .max(global_min)
 }
 
 /// The six integer moments of one candidate fit, kept alongside the winning candidate so
@@ -1918,8 +1977,12 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
         (leaf, d, r, outcome.evals)
     };
 
-    if size <= hdr.min_size {
-        // Never split below min_size -- mars_format never emits a split flag here either.
+    // Human-adaptive minimum size: the finest floor among the regions this block overlaps.
+    // Never finer than the header's floor -- `mars_format` emits a split flag exactly when
+    // `size > hdr.min_size`, so a finer floor could not be represented in the stream.
+    let floor = min_size_for_block(ctx.lambda_regions, row, col, size, hdr.min_size);
+    if size <= floor {
+        // Never split at or below the floor -- no split flag is emitted there either.
         let mut stats = ModeStats::default();
         stats.leaf_modes[leaf.mode as usize] += 1;
         return RdResult {
@@ -3067,6 +3130,7 @@ mod tests {
             height: 64,
             width: 64,
             scale: 0.5,
+            min_size: None,
         };
         let eye = LambdaRegion {
             row: 0,
@@ -3074,6 +3138,7 @@ mod tests {
             height: 16,
             width: 16,
             scale: 0.25,
+            min_size: None,
         };
         let both = [face, eye];
         // Fully inside the eye (and the face): the deeper, smaller scale wins.
@@ -3090,6 +3155,7 @@ mod tests {
             height: 100,
             width: 4,
             scale: 0.5,
+            min_size: None,
         }];
         assert!((lambda_scale_for_block(&strip, 0, 0, 8) - 0.75).abs() < 1e-12);
 
@@ -3101,6 +3167,7 @@ mod tests {
             height: 8,
             width: 8,
             scale: 1.0,
+            min_size: None,
         }];
         assert_eq!(lambda_scale_for_block(&no_op, 0, 0, 8), 1.0);
     }
@@ -3122,6 +3189,7 @@ mod tests {
                 height: 24,
                 width: 40,
                 scale: 1.0,
+                min_size: None,
             }],
             ..EncodeOptions::default()
         };
@@ -3144,6 +3212,7 @@ mod tests {
                 height: 64,
                 width: 64,
                 scale: 0.5,
+                min_size: None,
             }],
             ..EncodeOptions::default()
         };
@@ -3180,6 +3249,7 @@ mod tests {
                     height: 64,
                     width: 64,
                     scale: 0.0002,
+                    min_size: None,
                 }],
                 ..EncodeOptions::default()
             },
@@ -3189,6 +3259,162 @@ mod tests {
             "a whole-image low-scale region must buy detail ({} vs {})",
             regioned.len(),
             plain.len()
+        );
+    }
+
+    /// `min_size_for_block`: the *finest* cap among the regions a block overlaps wins, a
+    /// region with no override contributes the global floor, and a block overlapping nothing
+    /// keeps it too.
+    #[test]
+    fn min_size_for_block_takes_the_finest_cap_among_overlapping_regions() {
+        let face = LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 16,
+            width: 16,
+            scale: 1.0,
+            min_size: None,
+        };
+        let background = LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 64,
+            width: 64,
+            scale: 1.0,
+            min_size: Some(16),
+        };
+        let regions = [face, background];
+        // Inside the face the absent override pulls the floor back to the global minimum,
+        // even though the coarse background covers the same pixels.
+        assert_eq!(min_size_for_block(&regions, 0, 0, 8, 4), 4);
+        // Outside the face but inside the background: the coarse cap applies.
+        assert_eq!(min_size_for_block(&regions, 32, 32, 8, 4), 16);
+        // Overlapping no region keeps the global floor.
+        assert_eq!(min_size_for_block(&regions, 200, 200, 8, 4), 4);
+        // Touching a region's edge is not overlapping it.
+        assert_eq!(min_size_for_block(&[face], 16, 0, 8, 4), 4);
+        // A cap finer than the global minimum is clamped up to it.
+        let too_fine = LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 8,
+            width: 8,
+            scale: 1.0,
+            min_size: Some(2),
+        };
+        assert_eq!(min_size_for_block(&[too_fine], 0, 0, 8, 4), 4);
+    }
+
+    /// The floor must reach [`walk_rd`], not just the helper: with a coarse cap outside a
+    /// 32x32 region and `lambda` 0, nothing below the cap may appear outside the region.
+    /// The fixture is a high-frequency sinusoid, which RD subdivides even at `lambda` 0 --
+    /// a block-periodic or uncorrelated fixture does not, and would leave this vacuous.
+    #[test]
+    fn a_coarse_outside_floor_stops_subdivision_outside_the_region() {
+        let mut data = vec![0u8; 64 * 64];
+        for row in 0..64 {
+            for col in 0..64 {
+                let v = 128.0 + 100.0 * (std::f64::consts::TAU * col as f64 / 12.0).sin();
+                data[row * 64 + col] = v.round() as u8;
+            }
+        }
+        let image = Plane::from_vec(64, 64, data);
+        let params = rd_params(0.0);
+        let options = EncodeOptions {
+            lambda_regions: vec![
+                // The protected region: no floor of its own, so it keeps the global
+                // minimum. Aligned to the coarse size, so whatever it lets subdivide stays
+                // inside it.
+                LambdaRegion {
+                    row: 0,
+                    col: 0,
+                    height: 32,
+                    width: 32,
+                    scale: 1.0,
+                    min_size: None,
+                },
+                // The background: everything outside the region above stops at 16.
+                LambdaRegion {
+                    row: 0,
+                    col: 0,
+                    height: 64,
+                    width: 64,
+                    scale: 1.0,
+                    min_size: Some(16),
+                },
+            ],
+            ..EncodeOptions::default()
+        };
+        let (_, leaves, _, _) = encode_image_with_options(&image, &params, &options);
+        let (_, plain, _, _) =
+            encode_image_with_options(&image, &params, &EncodeOptions::default());
+
+        assert!(
+            leaves.iter().any(|leaf| leaf.size < 16),
+            "the region must still subdivide below the outside floor"
+        );
+        for leaf in &leaves {
+            if leaf.size < 16 {
+                assert!(
+                    leaf.row + leaf.size <= 32 && leaf.col + leaf.size <= 32,
+                    "a leaf below the outside floor escaped the region: {leaf:?}"
+                );
+            }
+        }
+        assert!(
+            leaves.len() < plain.len(),
+            "the outside floor must reduce the leaf count ({} vs {})",
+            leaves.len(),
+            plain.len()
+        );
+    }
+
+    /// Format safety: the floor produces leaves *above* `hdr.min_size`, which the stream may
+    /// only express by writing an explicit "do not split" where a split flag could have
+    /// been -- the reader must reproduce those leaves exactly.
+    #[test]
+    fn a_coarse_outside_floor_round_trips_through_the_format() {
+        let image = textured_image(64, 64);
+        let params = rd_params(200.0);
+        let options = EncodeOptions {
+            lambda_regions: vec![
+                LambdaRegion {
+                    row: 0,
+                    col: 0,
+                    height: 16,
+                    width: 16,
+                    scale: 1.0,
+                    min_size: None,
+                },
+                LambdaRegion {
+                    row: 0,
+                    col: 0,
+                    height: 64,
+                    width: 64,
+                    scale: 1.0,
+                    min_size: Some(16),
+                },
+            ],
+            ..EncodeOptions::default()
+        };
+        let (hdr, leaves, _, _) = encode_image_with_options(&image, &params, &options);
+        assert_eq!(
+            hdr.min_size, params.min_size,
+            "the header keeps the finest floor in the stream"
+        );
+        assert!(
+            leaves.iter().any(|leaf| leaf.size > hdr.min_size),
+            "the floor must produce leaves above min_size for this to test anything"
+        );
+
+        let bytes =
+            crate::mars_format::write(&hdr, &leaves).expect("the writer accepts the partition");
+        let (read_hdr, read_leaves) =
+            crate::mars_format::read(&bytes).expect("the reader parses it");
+        assert_eq!(read_hdr, hdr);
+        assert_eq!(
+            read_leaves, leaves,
+            "the reader must reproduce the writer's leaves exactly"
         );
     }
 }
