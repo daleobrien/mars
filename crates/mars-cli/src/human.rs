@@ -70,8 +70,8 @@ fn padded_region(
         height: (max_y - min_y) as u32,
         width: (max_x - min_x) as u32,
         scale,
-        // Face regions override lambda only; the subdivision floor is the caller's
-        // `--outside-min-size`, applied through a separate full-image region.
+        // Face regions override lambda only; the subdivision floor is applied separately by
+        // the caller (`outside_min_size_regions`).
         min_size: None,
     })
 }
@@ -197,10 +197,101 @@ pub fn regions_from_faces(
         .collect()
 }
 
+/// The full-image region that carries a coarse subdivision floor: `scale` 1.0 so it affects
+/// only the floor, never lambda.
+fn full_image_region(width: u32, height: u32, min_size: u32) -> LambdaRegion {
+    LambdaRegion {
+        row: 0,
+        col: 0,
+        height,
+        width,
+        scale: 1.0,
+        min_size: Some(min_size),
+    }
+}
+
+/// `base` expanded by `pad` pixels on every side and clamped to the image, carrying
+/// `min_size` as its subdivision floor.
+fn expand_region(
+    base: &LambdaRegion,
+    pad: u32,
+    width: u32,
+    height: u32,
+    min_size: u32,
+) -> LambdaRegion {
+    let row = base.row.saturating_sub(pad);
+    let col = base.col.saturating_sub(pad);
+    let right = (base.col + base.width).saturating_add(pad).min(width);
+    let bottom = (base.row + base.height).saturating_add(pad).min(height);
+    LambdaRegion {
+        row,
+        col,
+        height: bottom.saturating_sub(row),
+        width: right.saturating_sub(col),
+        scale: 1.0,
+        min_size: Some(min_size),
+    }
+}
+
+/// The graded subdivision-floor regions for `--outside-min-size-ramp`.
+///
+/// The floor starts at `--min-size` (`S`) just outside a face box and doubles with distance,
+/// each band being as wide as the floor it applies:
+///
+/// ```text
+/// [0, S)         -> S
+/// [S, 3S)        -> 2S
+/// [3S, 7S)       -> 4S
+/// [(2^k - 1)S, (2^(k+1) - 1)S) -> 2^k S
+/// ```
+///
+/// so with `--min-size 8`: 8 for the first 8 px, 16 for the next 16 px out to 24, 32 for the
+/// next 32 px out to 56, and so on, capped at `--max-size` (a full-image region at that floor
+/// covers everything past the last band). `min_size_for_block` keeps the *smallest* cap among
+/// the regions a block overlaps, so concentric rings express the staircase with no codec
+/// change at all. Distances are the same rectangular (L-infinity) metric the region system
+/// uses everywhere else, so a face near an image edge ramps over the same distance as one in
+/// the centre.
+///
+/// A plan with no face box is a no-op -- nothing to be outside of.
+pub fn outside_min_size_regions(
+    plan: &[HumanRegion],
+    width: u32,
+    height: u32,
+    min_size: u32,
+    max_size: u32,
+) -> Vec<LambdaRegion> {
+    let faces: Vec<LambdaRegion> = plan
+        .iter()
+        .filter(|planned| planned.kind == RegionKind::Face)
+        .map(|planned| planned.region)
+        .collect();
+    if faces.is_empty() {
+        return Vec::new();
+    }
+    let mut regions = Vec::new();
+    let mut cap = min_size;
+    // The ring for `cap` covers every block within `pad` pixels of a face box; the next band
+    // is twice as wide, so `pad` becomes `2 * pad + min_size`.
+    let mut pad = min_size;
+    while cap < max_size {
+        for face in &faces {
+            let region = expand_region(face, pad, width, height, cap);
+            if region.width > 0 && region.height > 0 {
+                regions.push(region);
+            }
+        }
+        cap *= 2;
+        pad = pad.saturating_mul(2).saturating_add(min_size);
+    }
+    regions.push(full_image_region(width, height, max_size));
+    regions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mars_codec::encode::lambda_scale_for_block;
+    use mars_codec::encode::{lambda_scale_for_block, min_size_for_block};
 
     /// A 100x100 face with eyes 40px apart, centred in a 200x200 image.
     fn centred_face() -> FaceDetection {
@@ -363,5 +454,83 @@ mod tests {
             ],
             "one face box, then the eyes, nose and mouth boxes"
         );
+    }
+
+    /// The floor starts at `--min-size` itself and doubles per band, each band as wide as the
+    /// floor it applies. `centred_face`'s box covers cols 50..150, rows 40..160 in 200x200.
+    #[test]
+    fn the_outside_floor_doubles_with_distance_from_the_face() {
+        let plan = plan_regions(&[centred_face()], 200, 200, 0.5, 0.25, 0.25);
+        // --min-size 4, --max-size 16: bands [0,4)->4, [4,12)->8, [12,..)->16.
+        let regions = outside_min_size_regions(&plan, 200, 200, 4, 16);
+        assert_eq!(regions.len(), 3, "two rings plus the full-image max floor");
+        assert!(
+            regions
+                .iter()
+                .any(|r| r.min_size == Some(16) && (r.width, r.height) == (200, 200)),
+            "the coarsest floor is the full-image max region: {regions:?}"
+        );
+        assert_eq!(
+            regions[0].scale, 1.0,
+            "a floor region must not touch lambda"
+        );
+
+        let floor = |row, col, size| min_size_for_block(&regions, row, col, size, 4);
+        // Just left of the face box, inside the first band (which reaches col 46) -> min-size.
+        assert_eq!(floor(100, 45, 4), 4);
+        // Past the first band but inside the second (col 38) -> doubled.
+        assert_eq!(floor(100, 40, 4), 8);
+        // Near the left edge, outside every ring -> the saturated max floor.
+        assert_eq!(floor(100, 20, 4), 16);
+    }
+
+    /// The user's `--min-size 8` case: 8 for the first 8 px, 16 for the next 16 px out to 24,
+    /// then 32 -- each band as wide as its own floor.
+    #[test]
+    fn each_outside_band_is_as_wide_as_its_floor() {
+        let plan = plan_regions(&[centred_face()], 200, 200, 0.5, 0.25, 0.25);
+        let regions = outside_min_size_regions(&plan, 200, 200, 8, 64);
+        let floor = |row, col, size| min_size_for_block(&regions, row, col, size, 8);
+        // Face box cols 50..150: ring 8 reaches col 42, ring 16 reaches col 26, ring 32 covers
+        // the rest of the width in this 200 px image.
+        assert_eq!(floor(100, 45, 4), 8, "within 8 px of the box: min-size");
+        assert_eq!(floor(100, 35, 4), 16, "8..24 px out: 16");
+        assert_eq!(floor(100, 10, 4), 32, "24..56 px out: 32");
+    }
+
+    /// With no room to grow (`--min-size == --max-size`) the only floor is the full image.
+    #[test]
+    fn no_room_to_grow_gives_a_single_full_image_floor() {
+        let plan = plan_regions(&[centred_face()], 200, 200, 0.5, 0.25, 0.25);
+        let regions = outside_min_size_regions(&plan, 200, 200, 16, 16);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].min_size, Some(16));
+    }
+
+    /// No face box means nothing to be outside of, so no floor is generated -- the caller must
+    /// not coarsen the whole image because detection failed. Feature boxes alone do not anchor
+    /// the ramp either.
+    #[test]
+    fn a_plan_with_no_faces_yields_no_outside_regions() {
+        assert!(outside_min_size_regions(&[], 200, 200, 4, 32).is_empty());
+        let features: Vec<HumanRegion> = plan_regions(&[centred_face()], 200, 200, 0.5, 0.25, 0.25)
+            .into_iter()
+            .filter(|planned| planned.kind != RegionKind::Face)
+            .collect();
+        assert!(outside_min_size_regions(&features, 200, 200, 4, 32).is_empty());
+    }
+
+    /// A ring can extend past the image; it must be clamped rather than underflow or spill.
+    #[test]
+    fn outside_rings_stay_inside_the_image() {
+        let plan = plan_regions(&[centred_face()], 200, 200, 0.5, 0.25, 0.25);
+        let regions = outside_min_size_regions(&plan, 200, 200, 4, 64);
+        assert!(!regions.is_empty());
+        for region in &regions {
+            assert!(
+                region.col + region.width <= 200 && region.row + region.height <= 200,
+                "{region:?} exceeds the 200x200 image"
+            );
+        }
     }
 }

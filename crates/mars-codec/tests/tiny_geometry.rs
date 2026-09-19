@@ -118,6 +118,7 @@ fn color_8x8_420_roundtrips_through_the_existing_wrapper() {
         lambda_regions: Vec::new(),
         color_regions: Vec::new(),
         color_desaturate: 1.0,
+        color_desaturate_ramp: None,
     };
     let (bytes, _) = color::encode_color_image_with_residual_quantisation(
         &img,

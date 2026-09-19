@@ -102,10 +102,14 @@ pub fn upsample_nearest(plane: &Plane, width: usize, height: usize) -> Plane {
 /// grayscale pixel. [`mars_core::metrics::ycbcr`] emits exactly this for gray input.
 const NEUTRAL_CHROMA: u8 = 128;
 
-/// Scale the chroma of every pixel outside `regions` toward neutral by `desaturate`, keeping
-/// the colour inside them: `0.0` leaves the outside unchanged, `1.0` makes it fully neutral
-/// (grayscale), and values in between keep that fraction of the colour. This is "colour only
-/// inside the face boxes, partly or fully desaturated elsewhere".
+/// Scale the chroma of every pixel outside `regions` toward neutral, keeping the colour
+/// inside them. Without a `ramp` a uniform `desaturate` applies to the whole outside: `0.0`
+/// leaves it unchanged, `1.0` makes it fully neutral (grayscale), and values in between keep
+/// that fraction of the colour. With a `ramp` fraction the amount instead grows linearly with
+/// distance from the regions: `desaturate` at the region edge, reaching full neutral at that
+/// fraction of the way to the furthest pixel -- `1.0` at the image edge, `0.5` half-way. A
+/// `ramp` of `0.0` (or less) is no fade at all, i.e. the uniform case. Pixels inside a region
+/// always keep full colour.
 ///
 /// A fully neutral pixel is `Cb == Cr == 128`, which inverts to `R == G == B`, so
 /// [`decode_color_image`] reconstructs it as grayscale with no format or decoder change at
@@ -114,38 +118,132 @@ const NEUTRAL_CHROMA: u8 = 128;
 /// The rectangles are in luma pixel coordinates, which are the chroma planes' coordinates
 /// at this point too: the caller masks *before* any 4:2:0 subsampling, so a desaturated area
 /// stays desaturated through the box filter. A pixel covered by at least one region keeps its
-/// colour, so overlapping or adjacent boxes compose by union. An empty list, or a
-/// `desaturate` of `0.0` or less, is a no-op. `desaturate` is clamped to `0.0..=1.0`.
+/// colour, so overlapping or adjacent boxes compose by union. An empty list, or a uniform
+/// `desaturate` of `0.0` or less, is a no-op. `desaturate` is clamped to `0.0..=1.0`; the ramp
+/// fraction is clamped the same way. Distances use the same rectangular (L-infinity) metric
+/// the region system uses elsewhere.
 fn desaturate_chroma_outside(
     cb: &mut Plane,
     cr: &mut Plane,
     regions: &[LambdaRegion],
     desaturate: f64,
+    ramp: Option<f64>,
 ) {
-    let keep = (1.0 - desaturate).clamp(0.0, 1.0);
-    if regions.is_empty() || keep >= 1.0 {
+    if regions.is_empty() {
         return;
     }
+    let base = desaturate.clamp(0.0, 1.0);
     let (width, height) = (cb.width(), cb.height());
     let colour_cb = cb.as_slice().to_vec();
     let colour_cr = cr.as_slice().to_vec();
-    if keep <= 0.0 {
-        cb.as_mut_slice().fill(NEUTRAL_CHROMA);
-        cr.as_mut_slice().fill(NEUTRAL_CHROMA);
-    } else {
-        let scale = |v: u8| -> u8 {
-            (f64::from(NEUTRAL_CHROMA) + (f64::from(v) - f64::from(NEUTRAL_CHROMA)) * keep)
-                .round()
-                .clamp(0.0, 255.0) as u8
-        };
-        for v in cb.as_mut_slice() {
-            *v = scale(*v);
+
+    match ramp.filter(|fraction| *fraction > 0.0) {
+        None => {
+            let keep = (1.0 - base).clamp(0.0, 1.0);
+            if keep >= 1.0 {
+                return;
+            }
+            if keep <= 0.0 {
+                cb.as_mut_slice().fill(NEUTRAL_CHROMA);
+                cr.as_mut_slice().fill(NEUTRAL_CHROMA);
+            } else {
+                for v in cb.as_mut_slice() {
+                    *v = scale_toward_neutral(*v, keep);
+                }
+                for v in cr.as_mut_slice() {
+                    *v = scale_toward_neutral(*v, keep);
+                }
+            }
         }
-        for v in cr.as_mut_slice() {
-            *v = scale(*v);
+        Some(fraction) => {
+            // Full neutral lands at `fraction` of the way from the regions to the furthest
+            // pixel, so `1.0` reaches it exactly at the image edge.
+            let denom =
+                fraction.clamp(0.0, 1.0) * f64::from(furthest_distance(regions, width, height));
+            // The regions cover the whole plane: nothing is outside them, and the ramp only
+            // shapes the outside, so there is nothing to do.
+            if denom <= 0.0 {
+                return;
+            }
+            for y in 0..height {
+                for x in 0..width {
+                    let d = f64::from(distance_to_regions(regions, x, y));
+                    let amount = base + (1.0 - base) * (d / denom).min(1.0);
+                    let keep = (1.0 - amount).clamp(0.0, 1.0);
+                    let i = y * width + x;
+                    cb.as_mut_slice()[i] = scale_toward_neutral(cb.as_slice()[i], keep);
+                    cr.as_mut_slice()[i] = scale_toward_neutral(cr.as_slice()[i], keep);
+                }
+            }
         }
     }
-    // Restore the colour inside each region, which the whole-plane pass above also touched.
+    // Restore the colour inside each region, which the passes above also touched.
+    restore_colour(cb, cr, regions, &colour_cb, &colour_cr, width, height);
+}
+
+/// Scale one chroma sample toward neutral (`128`) by `keep`, the fraction of colour retained.
+fn scale_toward_neutral(value: u8, keep: f64) -> u8 {
+    (f64::from(NEUTRAL_CHROMA) + (f64::from(value) - f64::from(NEUTRAL_CHROMA)) * keep)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+/// Rectangular (L-infinity) distance in pixels from `(x, y)` to the nearest pixel of
+/// `region`: zero inside it, the Chebyshev distance to its bounding box outside.
+fn linf_distance(region: &LambdaRegion, x: usize, y: usize) -> u32 {
+    let left = region.col as usize;
+    let top = region.row as usize;
+    let right = left + region.width as usize; // exclusive
+    let bottom = top + region.height as usize; // exclusive
+    let dx = if x < left {
+        left - x
+    } else if x >= right {
+        x - right + 1
+    } else {
+        0
+    };
+    let dy = if y < top {
+        top - y
+    } else if y >= bottom {
+        y - bottom + 1
+    } else {
+        0
+    };
+    dx.max(dy) as u32
+}
+
+/// The distance from `(x, y)` to the nearest of `regions`, which are assumed non-empty.
+fn distance_to_regions(regions: &[LambdaRegion], x: usize, y: usize) -> u32 {
+    regions
+        .iter()
+        .map(|region| linf_distance(region, x, y))
+        .min()
+        .unwrap_or(0)
+}
+
+/// The largest distance any pixel in a `width x height` plane has to the nearest region -- the
+/// normaliser for an auto (`0`) desaturation ramp, which puts full neutral at the image edge.
+fn furthest_distance(regions: &[LambdaRegion], width: usize, height: usize) -> u32 {
+    let mut furthest = 0;
+    for y in 0..height {
+        for x in 0..width {
+            furthest = furthest.max(distance_to_regions(regions, x, y));
+        }
+    }
+    furthest
+}
+
+/// Copy back the pre-pass colour inside each region, undoing the whole-plane desaturation
+/// there.
+fn restore_colour(
+    cb: &mut Plane,
+    cr: &mut Plane,
+    regions: &[LambdaRegion],
+    colour_cb: &[u8],
+    colour_cr: &[u8],
+    width: usize,
+    height: usize,
+) {
     for region in regions {
         let x0 = (region.col as usize).min(width);
         let y0 = (region.row as usize).min(height);
@@ -223,6 +321,16 @@ pub struct ColorEncodeParams {
     /// area still compresses to nothing and decodes as `R == G == B`. Clamped to `0.0..=1.0`.
     /// Only consulted when `color_regions` is non-empty, and `0.0` is a no-op there too.
     pub color_desaturate: f64,
+    /// Distance-graded variant of [`Self::color_desaturate`]: when set to a fraction in
+    /// `(0.0, 1.0]`, the amount grows linearly from `color_desaturate` at the edge of
+    /// `color_regions` to full neutral (`1.0`) at that fraction of the way to the image edge --
+    /// the furthest pixel from the region set. So `1.0` reaches full only at the edge (the
+    /// gentlest fade), `0.5` half-way, and `0.0` (or `None`) is no fade at all, leaving the
+    /// outside uniformly `color_desaturate`. With `color_desaturate == 0.0` and a `1.0` ramp
+    /// the face keeps full colour and the corners go gray (a vignette). Distances use the same
+    /// rectangular (L-infinity) metric the regions do. Only consulted when `color_regions` is
+    /// non-empty.
+    pub color_desaturate_ramp: Option<f64>,
 }
 
 /// Per-plane stats from a colour encode, for measurement (bpp attribution, evals).
@@ -331,13 +439,18 @@ pub fn encode_color_image_with_residual_quantisation(
                 &mut cr,
                 &params.color_regions,
                 params.color_desaturate,
+                params.color_desaturate_ramp,
             );
             // Exact neutral chroma needs a DC step of 1.0. Below 8 bits,
             // `qbeta/((1<<bits_beta)-1)*255` steps past 128 (127 -> 127, 128 -> 129), so the
             // desaturated background would reconstruct with a one-level colour cast instead
-            // of being gray. Raise only the chroma planes, and only when a mask is in use.
-            let chroma_params = if params.color_regions.is_empty() || params.color_desaturate <= 0.0
-            {
+            // of being gray. Raise only the chroma planes, and only when a mask is in use --
+            // with a ramp the far pixels go fully neutral even at a zero `color_desaturate`,
+            // so the ramp alone is enough to need the raise.
+            let mask_active = !params.color_regions.is_empty()
+                && (params.color_desaturate > 0.0
+                    || matches!(params.color_desaturate_ramp, Some(f) if f > 0.0));
+            let chroma_params = if !mask_active {
                 params.chroma
             } else {
                 EncodeParams {
@@ -784,6 +897,7 @@ mod tests {
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
             color_desaturate: 1.0,
+            color_desaturate_ramp: None,
         };
         let (bytes, _stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -805,6 +919,7 @@ mod tests {
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
             color_desaturate: 1.0,
+            color_desaturate_ramp: None,
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -848,6 +963,7 @@ mod tests {
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
             color_desaturate: 1.0,
+            color_desaturate_ramp: None,
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let (bytes_again, _) = encode_color_image(&img, &cfg);
@@ -874,6 +990,7 @@ mod tests {
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
             color_desaturate: 1.0,
+            color_desaturate_ramp: None,
         };
         let cfg_420 = ColorEncodeParams {
             y: params(4.0),
@@ -885,6 +1002,7 @@ mod tests {
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
             color_desaturate: 1.0,
+            color_desaturate_ramp: None,
         };
         let (bytes_444, stats_444) = encode_color_image(&img, &cfg_444);
         let (bytes_420, stats_420) = encode_color_image(&img, &cfg_420);
@@ -928,6 +1046,7 @@ mod tests {
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
             color_desaturate: 1.0,
+            color_desaturate_ramp: None,
         };
         let (bytes_420, _stats) = encode_color_image(&img, &cfg_420);
 
@@ -968,6 +1087,7 @@ mod tests {
                 min_size: None,
             }],
             color_desaturate: 1.0,
+            color_desaturate_ramp: None,
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -1024,7 +1144,7 @@ mod tests {
         let regions = std::slice::from_ref(&region);
         let mut cb = CorePlane::from_vec(2, 1, vec![100, 100]);
         let mut cr = CorePlane::from_vec(2, 1, vec![200, 200]);
-        desaturate_chroma_outside(&mut cb, &mut cr, regions, 0.5);
+        desaturate_chroma_outside(&mut cb, &mut cr, regions, 0.5, None);
         assert_eq!(
             (cb.get(0, 0), cr.get(0, 0)),
             (100, 200),
@@ -1037,7 +1157,7 @@ mod tests {
             "outside keeps half the colour"
         );
 
-        desaturate_chroma_outside(&mut cb, &mut cr, regions, 1.0);
+        desaturate_chroma_outside(&mut cb, &mut cr, regions, 1.0, None);
         assert_eq!(
             (cb.get(1, 0), cr.get(1, 0)),
             (128, 128),
@@ -1046,12 +1166,158 @@ mod tests {
 
         let mut cb = CorePlane::from_vec(2, 1, vec![100, 100]);
         let mut cr = CorePlane::from_vec(2, 1, vec![200, 200]);
-        desaturate_chroma_outside(&mut cb, &mut cr, regions, 0.0);
+        desaturate_chroma_outside(&mut cb, &mut cr, regions, 0.0, None);
         assert_eq!(
             (cb.get(1, 0), cr.get(1, 0)),
             (100, 200),
             "0.0 leaves the outside unchanged"
         );
+    }
+
+    /// With a ramp the desaturation grows with distance from the region: nothing at the edge
+    /// (base 0), full neutral `ramp` pixels out.
+    #[test]
+    fn the_desaturate_ramp_fades_from_the_region_edge_to_full() {
+        let region = LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 1,
+            width: 1,
+            scale: 1.0,
+            min_size: None,
+        };
+        let regions = std::slice::from_ref(&region);
+        let width = 6;
+        let mut cb = CorePlane::from_vec(width, 1, vec![100; width]);
+        let mut cr = CorePlane::from_vec(width, 1, vec![200; width]);
+        // width 6, one-pixel region at col 0: the furthest pixel is at distance 5, so a 0.8
+        // ramp reaches full neutral at distance 4.
+        desaturate_chroma_outside(&mut cb, &mut cr, regions, 0.0, Some(0.8));
+        // x=0 is inside the region -> full colour restored.
+        assert_eq!((cb.get(0, 0), cr.get(0, 0)), (100, 200));
+        // d=1, t=1/4, keep 0.75: 128 + (100 - 128) * 0.75 = 107 and 128 + 72 * 0.75 = 182.
+        assert_eq!((cb.get(1, 0), cr.get(1, 0)), (107, 182));
+        // d=4 -> t=1 -> fully neutral; farther stays neutral.
+        assert_eq!((cb.get(4, 0), cr.get(4, 0)), (128, 128));
+        assert_eq!((cb.get(5, 0), cr.get(5, 0)), (128, 128));
+        // The fade is monotone: chroma never moves *away* from neutral with distance.
+        for x in 1..width {
+            assert!(
+                cb.get(x, 0).abs_diff(128) <= cb.get(x - 1, 0).abs_diff(128),
+                "distance from neutral must not grow with distance from the region"
+            );
+            assert!(cr.get(x, 0).abs_diff(128) <= cr.get(x - 1, 0).abs_diff(128));
+        }
+    }
+
+    /// `Some(1.0)` spreads the fade across the whole distance to the furthest pixel, so full
+    /// neutral lands exactly there and nowhere closer.
+    #[test]
+    fn a_full_ramp_reaches_the_furthest_pixel() {
+        let region = LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 1,
+            width: 1,
+            scale: 1.0,
+            min_size: None,
+        };
+        let regions = std::slice::from_ref(&region);
+        let width = 4;
+        let mut cb = CorePlane::from_vec(width, 1, vec![100; width]);
+        let mut cr = CorePlane::from_vec(width, 1, vec![200; width]);
+        desaturate_chroma_outside(&mut cb, &mut cr, regions, 0.0, Some(1.0));
+        // distances 0,1,2,3; furthest = 3; only x=3 is fully neutral.
+        assert_eq!(cb.get(3, 0), 128);
+        assert_eq!(cb.get(0, 0), 100, "the region keeps its colour");
+        // x=1: t=1/3, keep 2/3.
+        let expected: f64 = 128.0 + (100.0 - 128.0) * (2.0 / 3.0);
+        assert_eq!(cb.get(1, 0), expected.round() as u8);
+        assert!(cb.get(1, 0) < cb.get(2, 0) && cb.get(2, 0) < cb.get(3, 0));
+    }
+
+    /// `Some(0.0)` is no fade at all: the outside keeps its colour, exactly like no ramp.
+    #[test]
+    fn a_zero_ramp_is_no_fade() {
+        let region = LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 1,
+            width: 1,
+            scale: 1.0,
+            min_size: None,
+        };
+        let regions = std::slice::from_ref(&region);
+        let mut cb = CorePlane::from_vec(4, 1, vec![100; 4]);
+        let mut cr = CorePlane::from_vec(4, 1, vec![200; 4]);
+        desaturate_chroma_outside(&mut cb, &mut cr, regions, 0.0, Some(0.0));
+        assert!(cb.as_slice().iter().all(|&v| v == 100));
+        assert!(cr.as_slice().iter().all(|&v| v == 200));
+    }
+
+    /// A ramp cannot add to an already fully neutral outside, so base 1.0 makes it a no-op.
+    #[test]
+    fn a_ramp_does_not_change_a_fully_neutral_outside() {
+        let img = gradient_image(64, 64);
+        let cfg = |ramp: Option<f64>| ColorEncodeParams {
+            y: params(1.0),
+            chroma: params(1.0),
+            subsampling: Subsampling::Yuv444,
+            adaptive_density: false,
+            allowed_modes: [true; 4],
+            rd_candidates: 1,
+            lambda_regions: Vec::new(),
+            color_regions: vec![LambdaRegion {
+                row: 0,
+                col: 0,
+                height: 32,
+                width: 64,
+                scale: 1.0,
+                min_size: None,
+            }],
+            color_desaturate: 1.0,
+            color_desaturate_ramp: ramp,
+        };
+        assert_eq!(
+            encode_color_image(&img, &cfg(None)).0,
+            encode_color_image(&img, &cfg(Some(1.0))).0,
+            "a ramp over a fully neutral outside must not change the stream"
+        );
+    }
+
+    /// A zero base with a ramp is *not* the no-op a zero base alone is: it fades to neutral
+    /// with distance, so the stream must differ from a uniform zero, which is itself
+    /// byte-identical to no mask at all.
+    #[test]
+    fn a_zero_base_with_a_ramp_still_changes_the_stream() {
+        let img = gradient_image(64, 64);
+        let cfg = |ramp: Option<f64>| ColorEncodeParams {
+            y: params(1.0),
+            chroma: params(1.0),
+            subsampling: Subsampling::Yuv444,
+            adaptive_density: false,
+            allowed_modes: [true; 4],
+            rd_candidates: 1,
+            lambda_regions: Vec::new(),
+            color_regions: vec![LambdaRegion {
+                row: 0,
+                col: 0,
+                height: 32,
+                width: 64,
+                scale: 1.0,
+                min_size: None,
+            }],
+            color_desaturate: 0.0,
+            color_desaturate_ramp: ramp,
+        };
+        let no_ramp = encode_color_image(&img, &cfg(None)).0;
+        let ramp = encode_color_image(&img, &cfg(Some(1.0))).0;
+        assert_ne!(no_ramp, ramp, "the ramp must reach the encoder");
+        let no_mask = ColorEncodeParams {
+            color_regions: Vec::new(),
+            ..cfg(None)
+        };
+        assert_eq!(no_ramp, encode_color_image(&img, &no_mask).0);
     }
 
     /// End to end through the container: partial desaturation reduces the colour outside
@@ -1076,6 +1342,7 @@ mod tests {
                 min_size: None,
             }],
             color_desaturate,
+            color_desaturate_ramp: None,
         };
         // Mean distance from neutral chroma over the lower (outside) half.
         let outside_chroma = |cfg: &ColorEncodeParams| -> f64 {

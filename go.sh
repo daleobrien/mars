@@ -16,8 +16,11 @@ cargo build \
   --lambda 100 \
   --debug-regions regions.png \
   --color eyes \
-  --outside-min-size 16 \
-  --desaturate 0.33 \
+  --min-size 8 \
+  --max-size 64 \
+  --outside-min-size-ramp \
+  --desaturate 0.3 \
+  --desaturate-ramp 0 \
   --eye-lambda-scale 0.1 \
   --scrfd-model ./models/det_10g.onnx
 

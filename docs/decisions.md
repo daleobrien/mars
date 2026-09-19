@@ -3346,3 +3346,48 @@ full colour.
   image on a detection failure. On grayscale input it has no effect and says so.
 
 No measurement/gate accompanies this entry; it adds a capability, not a number.
+
+## D53 · 2026-09-20 · `encmars --human-adaptive`: distance-graded `--outside-min-size-ramp` and `--desaturate-ramp`, so detail and colour fall off with distance from the faces
+
+User-requested extension to `--human-adaptive`: two options that make the existing
+face-relative knobs *graded* by distance rather than uniform.
+
+**`--outside-min-size-ramp`** (a flag, requires `--human-adaptive`) grows the subdivision
+floor away from the faces instead of leaving it at `--min-size` everywhere. The floor is
+`--min-size` (`S`) for the first `S` pixels from a face box, then doubles per band, each band
+as wide as the floor it applies -- `[0, S) -> S`, `[S, 3S) -> 2S`, `[3S, 7S) -> 4S`, and so on
+-- capped at `--max-size` (a full-image region at that floor covers everything past the last
+band). So `--min-size 8 --max-size 64` gives 8 for the first 8 px, 16 for the next 16, 32 for
+the next 32, then 64. It is parameter-free by design: `--min-size` and `--max-size` already
+fix both ends, and the earlier parameterised form (`--outside-min-size`, plus a distance and a
+far cap) was removed once the self-similar rule showed it needed no knobs. It is built as
+concentric rectangular rings around each face (`human::outside_min_size_regions`), plus the
+full-image `--max-size` floor; `min_size_for_block` already keeps the *smallest* cap among the
+regions a block overlaps, so nesting the rings expresses the staircase with no codec change at
+all. Distances use the same L-infinity metric as `LambdaRegion` coverage, so a face near an
+edge ramps identically to one in the centre. A power-of-two step is used because the floor is
+a quadtree level.
+
+**`--desaturate-ramp <FRACTION>`** (requires `--color`, in `0.0..=1.0`) makes `--desaturate`
+grow with distance instead of applying uniformly: the amount rises linearly from
+`--desaturate` at the chosen region edge to full neutral (`1.0`) at `FRACTION` of the way to
+the image edge -- the furthest pixel from the region set. `1.0` reaches full only at the edge
+(the gentlest fade), `0.5` half-way, and `0.0` is no fade at all (the outside stays uniformly
+`--desaturate`, so it is the pre-ramp behaviour). `--desaturate 0 --desaturate-ramp 1.0` is
+the vignette that leaves the face untouched and fades to gray across the image. This is the
+one codec change: `desaturate_chroma_outside` now takes an `Option<f64>` ramp and, when set
+above zero, computes a per-pixel L-infinity distance to the region union
+(`ColorEncodeParams::color_desaturate_ramp`). Because the far pixels go exactly neutral even
+at a zero base, the chroma `bits_beta` raise from D52 triggers on the ramp alone. Pixels
+inside a region are still restored to full colour, so the ramp shapes only the outside and a
+zero base is continuous across the region boundary.
+
+**What this rules out / reverses.** Both remain no-ops when no face is detected (an empty
+region set), following the `--color` rule (D52): detection failure must not silently coarsen or
+grayscale the whole image. `--outside-min-size-ramp` with `--min-size == --max-size` has no
+room to grow and collapses to the single full-image floor; `--desaturate-ramp 0.0` and a ramp
+over an already fully neutral outside (`--desaturate 1.0`) are both byte-identical to no ramp.
+The ramp is a preference in the same sense as the regions themselves: RD still chooses per
+node, and the floor is a cap on subdivision, not on block size.
+
+No measurement/gate accompanies this entry; it adds capability, not a number.

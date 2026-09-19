@@ -77,6 +77,7 @@ fn round_trip_psnr_y_and_bytes(img: &Image, subsampling: Subsampling) -> (f64, u
         lambda_regions: Vec::new(),
         color_regions: Vec::new(),
         color_desaturate: 1.0,
+        color_desaturate_ramp: None,
     };
     let (bytes, _stats) = encode_color_image(img, &cfg);
     let decoded = decode_color_image(&bytes, 10).expect("decode of what we just encoded");
@@ -138,6 +139,7 @@ fn gray_image_round_trips_through_the_colour_container() {
         lambda_regions: Vec::new(),
         color_regions: Vec::new(),
         color_desaturate: 1.0,
+        color_desaturate_ramp: None,
     };
     let (bytes, _stats) = encode_color_image(&img, &cfg);
     let decoded = decode_color_image(&bytes, 10).unwrap();

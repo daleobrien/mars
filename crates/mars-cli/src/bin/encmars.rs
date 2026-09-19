@@ -349,22 +349,24 @@ struct Cli {
     #[arg(long, value_name = "PATH", requires = "human_adaptive")]
     debug_regions: Option<PathBuf>,
 
-    /// Human-adaptive subdivision floor: blocks overlapping no detected region stop
-    /// subdividing at this (coarser) size, while blocks inside a region keep --min-size.
-    /// Saves bits away from the face. Must be a power of two in --min-size..=--max-size.
-    /// Not applied (and reported as such) when no face is detected, because there is then no
+    /// Human-adaptive graded subdivision floor: the further a block is from a detected face,
+    /// the coarser it is allowed to stay. Blocks stop subdividing at --min-size within
+    /// --min-size pixels of a face box, then the floor doubles per band, each band as wide as
+    /// the floor it applies -- --min-size for the first --min-size pixels, 2x that for the next
+    /// twice-as-wide band, and so on, up to --max-size. Saves bits away from the face without a
+    /// hard step at its edge. Not applied when no face is detected, because there is then no
     /// region to be outside of.
-    #[arg(long, value_name = "SIZE", requires = "human_adaptive")]
-    outside_min_size: Option<u32>,
+    #[arg(long, requires = "human_adaptive")]
+    outside_min_size_ramp: bool,
 
     /// With --human-adaptive: keep colour only inside the chosen detected regions and encode
     /// everything else as grayscale. `face` keeps each whole face box in colour; `features`
     /// keeps the eyes, nose, and mouth boxes; `eyes` keeps only the eyes. Chroma outside the
     /// chosen regions is neutralised before encoding, so the decoder reconstructs those
     /// pixels as R == G == B (a full-detail luma image) and the chroma planes compress to
-    /// almost nothing; inside the chosen regions the colour is unchanged. Like
-    /// --outside-min-size, it is not applied when no face is detected -- an empty region set
-    /// is a no-op rather than a silent whole-image grayscale on a detection failure. Has no
+    /// almost nothing; inside the chosen regions the colour is unchanged. Like the other
+    /// --human-adaptive options, it is not applied when no face is detected -- an empty region
+    /// set is a no-op rather than a silent whole-image grayscale on a detection failure. Has no
     /// effect on grayscale input (no chroma). `--colour` is accepted as an alias.
     #[arg(
         long = "color",
@@ -381,6 +383,17 @@ struct Cli {
     /// colour is untouched either way. Has no effect on grayscale input (no chroma).
     #[arg(long, value_name = "AMOUNT", requires = "color")]
     desaturate: Option<f64>,
+
+    /// With --color: scale --desaturate with distance from the chosen regions instead of
+    /// applying it uniformly outside them. The amount grows from --desaturate at the region
+    /// edge to full desaturation at this fraction of the way to the image edge (the furthest
+    /// pixel from the regions): `1.0` reaches full only at the edge, `0.5` half-way, and
+    /// `0.0` is no fade at all (the outside stays uniformly --desaturate). Must be in
+    /// 0.0..=1.0. So `--desaturate 0 --desaturate-ramp 1.0` leaves the face untouched and
+    /// fades to grayscale across the image (a vignette). Has no effect on grayscale input
+    /// (no chroma).
+    #[arg(long, value_name = "FRACTION", requires = "color")]
+    desaturate_ramp: Option<f64>,
 }
 
 impl Cli {
@@ -574,22 +587,9 @@ impl Cli {
             if !self.face_confidence.is_finite() || !(0.0..=1.0).contains(&self.face_confidence) {
                 bail!("--face-confidence must be in 0.0..=1.0");
             }
-            if let Some(outside) = self.outside_min_size {
-                if !outside.is_power_of_two() || outside > u32::from(u8::MAX) {
-                    bail!("--outside-min-size must be a power of two in 1..=128");
-                }
-                if outside < self.min_size {
-                    bail!(
-                        "--outside-min-size must not be finer than --min-size ({}): the header \
-                         records the finest floor in the stream",
-                        self.min_size
-                    );
-                }
-                if outside > self.max_size {
-                    bail!(
-                        "--outside-min-size must not exceed --max-size ({})",
-                        self.max_size
-                    );
+            if let Some(ramp) = self.desaturate_ramp {
+                if !ramp.is_finite() || !(0.0..=1.0).contains(&ramp) {
+                    bail!("--desaturate-ramp must be in 0.0..=1.0");
                 }
             }
             if let Some(amount) = self.desaturate {
@@ -694,6 +694,7 @@ fn main() -> Result<()> {
         lambda_regions: human.lambda_regions,
         color_regions: human.color_regions,
         color_desaturate: cli.desaturate.unwrap_or(1.0),
+        color_desaturate_ramp: cli.desaturate_ramp,
     };
 
     let (width, height) = (image.width(), image.height());
@@ -898,33 +899,30 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
     );
 
     let mut lambda_regions: Vec<LambdaRegion> = plan.iter().map(|planned| planned.region).collect();
-    // `--outside-min-size`: one further full-image region carrying a coarse subdivision
-    // floor. The face regions carry no floor of their own, and the finest cap among the
-    // regions a block overlaps wins, so blocks outside every face keep the coarse floor
-    // while the faces themselves still refine to `--min-size`. Skipped when nothing was
-    // detected: with no region to be outside of, applying it would silently coarsen the
-    // whole image because detection failed.
-    let outside = match (cli.outside_min_size, lambda_regions.is_empty()) {
-        (Some(outside), false) => {
-            lambda_regions.push(LambdaRegion {
-                row: 0,
-                col: 0,
-                height: image.height() as u32,
-                width: image.width() as u32,
-                // Lambda no-op: this region only caps the subdivision size.
-                scale: 1.0,
-                min_size: Some(outside),
-            });
-            Some(outside)
+    // `--outside-min-size-ramp`: a subdivision floor that doubles with distance from the faces
+    // (see `human::outside_min_size_regions`). The face regions carry no floor of their own, and
+    // the finest cap among the regions a block overlaps wins, so blocks outside every face keep
+    // the graded floor while the faces themselves still refine to `--min-size`. Skipped when
+    // nothing was detected: with no region to be outside of, applying it would silently coarsen
+    // the whole image because detection failed.
+    let outside = match (cli.outside_min_size_ramp, lambda_regions.is_empty()) {
+        (true, false) => {
+            lambda_regions.extend(mars_cli::human::outside_min_size_regions(
+                &plan,
+                image.width() as u32,
+                image.height() as u32,
+                cli.min_size,
+                cli.max_size,
+            ));
+            Some((cli.min_size, cli.max_size))
         }
         _ => None,
     };
 
     // `--color`: the chosen boxes are the only regions that keep colour. This set is built
-    // from the plan alone -- deliberately not the full-image `--outside-min-size` region
-    // above, which would leave nothing outside it to neutralise. Empty when nothing was
-    // detected, which `ColorEncodeParams::color_regions` treats as a no-op rather than
-    // "grayscale everywhere".
+    // from the plan alone -- deliberately not the full-image outside floor above, which would
+    // leave nothing outside it to neutralise. Empty when nothing was detected, which
+    // `ColorEncodeParams::color_regions` treats as a no-op rather than "grayscale everywhere".
     let color_regions: Vec<LambdaRegion> = match cli.color {
         Some(arg) => plan
             .iter()
@@ -943,10 +941,12 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         .iter()
         .filter(|planned| planned.kind == RegionKind::Face)
         .count();
-    let outside_note = match (cli.outside_min_size, outside) {
-        (Some(size), Some(_)) => format!(", outside min-size {size}"),
-        (Some(size), None) => format!(", --outside-min-size {size} not applied (no regions)"),
-        (None, _) => String::new(),
+    let outside_note = match (cli.outside_min_size_ramp, outside) {
+        (true, Some((near, far))) => {
+            format!(", outside min-size {near}->{far} doubling with distance")
+        }
+        (true, None) => ", --outside-min-size-ramp not applied (no regions)".to_string(),
+        (false, _) => String::new(),
     };
     let color_note = match (cli.color, color_regions.is_empty()) {
         (Some(arg), false) => format!(
@@ -957,15 +957,32 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         (Some(arg), true) => format!(", --color {} not applied (no face detected)", arg.key()),
         (None, _) => String::new(),
     };
-    let fade_note = match cli.desaturate {
-        Some(amount) if !color_regions.is_empty() && amount < 1.0 => {
-            if amount <= 0.0 {
-                ", --desaturate 0.0: outside colour unchanged, mask has no effect".to_string()
-            } else {
-                format!(", outside colour down {}%", (amount * 100.0).round())
-            }
+    let fade_note = if color_regions.is_empty() {
+        String::new()
+    } else if let Some(fraction) = cli.desaturate_ramp {
+        let from = cli.desaturate.unwrap_or(1.0);
+        if from >= 1.0 {
+            ", outside colour already fully neutral (--desaturate-ramp has no effect)".to_string()
+        } else if fraction <= 0.0 {
+            ", --desaturate-ramp 0.0: no fade, the outside stays uniform".to_string()
+        } else {
+            format!(
+                ", outside colour {}% fading to grayscale {}% of the way to the edge",
+                (from * 100.0).round(),
+                (fraction * 100.0).round()
+            )
         }
-        _ => String::new(),
+    } else {
+        match cli.desaturate {
+            Some(amount) if amount < 1.0 => {
+                if amount <= 0.0 {
+                    ", --desaturate 0.0: outside colour unchanged, mask has no effect".to_string()
+                } else {
+                    format!(", outside colour down {}%", (amount * 100.0).round())
+                }
+            }
+            _ => String::new(),
+        }
     };
     let overlay = match &cli.debug_regions {
         Some(path) => format!(", overlay -> {}", path.display()),
@@ -1233,40 +1250,72 @@ mod tests {
     }
 
     #[test]
-    fn outside_min_size_must_be_a_power_of_two_between_min_and_max() {
-        // Defaults here are --min-size 4 and --max-size 16.
-        assert!(parse(&["--human-adaptive", "--outside-min-size", "4"])
-            .validate()
-            .is_ok());
-        assert!(parse(&["--human-adaptive", "--outside-min-size", "16"])
-            .validate()
-            .is_ok());
-        assert!(parse(&[
-            "--human-adaptive",
-            "--outside-min-size",
-            "16",
-            "--max-size",
-            "32"
-        ])
-        .validate()
-        .is_ok());
-        // Not a power of two.
-        assert!(parse(&["--human-adaptive", "--outside-min-size", "12"])
-            .validate()
-            .is_err());
-        // Finer than --min-size: the header records the finest floor, so a finer one could
-        // not be represented without mis-parsing on the way back in.
-        assert!(parse(&["--human-adaptive", "--outside-min-size", "2"])
-            .validate()
-            .is_err());
-        // Coarser than --max-size.
-        assert!(parse(&["--human-adaptive", "--outside-min-size", "32"])
-            .validate()
-            .is_err());
-        // Meaningless without --human-adaptive, and clap refuses it.
+    fn the_outside_min_size_ramp_is_a_flag_that_requires_human_adaptive() {
+        // It is a plain flag now: no value, and meaningless without --human-adaptive.
         assert!(
-            Cli::try_parse_from(["encmars", "in.png", "out.mars", "--outside-min-size", "16"])
+            Cli::try_parse_from(["encmars", "in.png", "out.mars", "--outside-min-size-ramp"])
                 .is_err()
         );
+        let cli = parse(&["--human-adaptive", "--outside-min-size-ramp"]);
+        assert!(cli.outside_min_size_ramp);
+        assert!(cli.validate().is_ok());
+        // The parameterised form it replaced is gone: the old option is no longer accepted.
+        assert!(Cli::try_parse_from([
+            "encmars",
+            "in.png",
+            "out.mars",
+            "--human-adaptive",
+            "--outside-min-size",
+            "16"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn the_desaturate_ramp_requires_the_colour_mask() {
+        // Like --desaturate, the ramp only means something with --color.
+        assert!(Cli::try_parse_from([
+            "encmars",
+            "in.png",
+            "out.mars",
+            "--human-adaptive",
+            "--desaturate-ramp",
+            "0.5"
+        ])
+        .is_err());
+        // A 0.0..=1.0 fraction is accepted; `1.0` is the vignette to the image edge.
+        let cli = parse(&[
+            "--human-adaptive",
+            "--color",
+            "face",
+            "--desaturate",
+            "0",
+            "--desaturate-ramp",
+            "1.0",
+        ]);
+        assert_eq!(cli.desaturate_ramp, Some(1.0));
+        assert_eq!(cli.desaturate, Some(0.0));
+        assert!(cli.validate().is_ok());
+        // Out of range is refused rather than clamped silently (the `=` form keeps clap from
+        // reading a leading `-` as another flag).
+        for (bad, arg) in [
+            ("1.5", "--desaturate-ramp=1.5"),
+            ("-0.1", "--desaturate-ramp=-0.1"),
+        ] {
+            let cli = Cli::try_parse_from([
+                "encmars",
+                "in.png",
+                "out.mars",
+                "--human-adaptive",
+                "--color",
+                "face",
+                arg,
+            ])
+            .unwrap_or_else(|e| panic!("--desaturate-ramp {bad} should parse: {e}"));
+            assert!(
+                cli.validate().is_err(),
+                "--desaturate-ramp {bad} should be refused"
+            );
+        }
     }
 }
