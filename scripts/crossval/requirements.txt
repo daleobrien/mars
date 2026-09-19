@@ -4,4 +4,10 @@
 numpy==2.3.3
 scipy==1.16.2
 scikit-image==0.25.2
-Pillow==11.3.0
+# Required by scripts/crossval/reference_metrics.py (`sewar.full_ref.msssim`) and imported
+# by `just crossval-setup`'s readiness check, but previously missing from this list.
+sewar==0.4.6
+# Bumped from 11.3.0: every Pillow release before 12.3.0 carries at least one published
+# advisory (the default branch had 18 open Dependabot alerts, all Pillow). Only
+# `Image.open(...).convert("L")` is used here, which is unchanged across the major bump.
+Pillow==12.3.0
