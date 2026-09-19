@@ -13,10 +13,11 @@ cargo build \
    ${input_image} \
    output.mars \
   --human-adaptive \
-  --lambda 500 \
+  --lambda 100 \
   --debug-regions regions.png \
+  --color-features-only \
   --outside-min-size 16 \
-  --scrfd-model ./models/det_10g.onnx 
+  --scrfd-model ./models/det_10g.onnx
 
 ./target/release/decmars \
    output.mars \

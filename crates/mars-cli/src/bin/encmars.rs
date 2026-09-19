@@ -299,6 +299,34 @@ struct Cli {
     /// region to be outside of.
     #[arg(long, value_name = "SIZE", requires = "human_adaptive")]
     outside_min_size: Option<u32>,
+
+    /// With --human-adaptive: keep colour only inside the detected face boxes and encode
+    /// everything outside them as grayscale. Chroma outside the faces is neutralised before
+    /// encoding, so the decoder reconstructs those pixels as R == G == B (a full-detail
+    /// luma image) and the chroma planes compress to almost nothing; inside the faces the
+    /// colour is unchanged. Like --outside-min-size, it is not applied when no face is
+    /// detected -- an empty region set is a no-op rather than a silent whole-image
+    /// grayscale on a detection failure. Has no effect on grayscale input (no chroma).
+    #[arg(
+        long,
+        default_value_t = false,
+        requires = "human_adaptive",
+        conflicts_with = "color_features_only"
+    )]
+    color_faces_only: bool,
+
+    /// With --human-adaptive: keep colour only inside the detected eye, nose, and mouth
+    /// boxes and encode everything else -- including the rest of the face -- as grayscale.
+    /// The feature-region alternative to --color-faces-only; the two are mutually exclusive.
+    /// Chroma outside is neutralised exactly as for --color-faces-only, and it is likewise
+    /// not applied when no face is detected. Has no effect on grayscale input (no chroma).
+    #[arg(
+        long,
+        default_value_t = false,
+        requires = "human_adaptive",
+        conflicts_with = "color_faces_only"
+    )]
+    color_features_only: bool,
 }
 
 impl Cli {
@@ -535,6 +563,12 @@ fn main() -> Result<()> {
             image.planes().len()
         );
     }
+    if (cli.color_faces_only || cli.color_features_only) && image.planes().len() == 1 {
+        println!(
+            "--color-faces-only/--color-features-only: no effect on grayscale input \
+             (only luma is encoded)"
+        );
+    }
 
     let base = EncodeParams {
         min_size: cli.min_size,
@@ -551,13 +585,13 @@ fn main() -> Result<()> {
     for &mode in cli.effective_modes() {
         allowed_modes[usize::from(mode)] = true;
     }
-    let lambda_regions = human_adaptive_regions(&cli, &image)?;
+    let human = human_adaptive_regions(&cli, &image)?;
     let options = EncodeOptions {
         allowed_modes,
         adaptive_density: cli.adaptive_density,
         residual_quantisation: residual_policy(&cli),
         rd_candidates: cli.rd_candidates,
-        lambda_regions: lambda_regions.clone(),
+        lambda_regions: human.lambda_regions.clone(),
     };
 
     if let Some(method_arg) = cli.method {
@@ -596,7 +630,8 @@ fn main() -> Result<()> {
         adaptive_density: options.adaptive_density,
         allowed_modes: options.allowed_modes,
         rd_candidates: cli.rd_candidates,
-        lambda_regions,
+        lambda_regions: human.lambda_regions,
+        color_regions: human.color_regions,
     };
 
     let (width, height) = (image.width(), image.height());
@@ -764,18 +799,27 @@ fn run_progressive(
     Ok(())
 }
 
-/// Build the region-local lambda set for `--human-adaptive`, or an empty set when the flag
-/// is off. Detection itself is behind the `face-detect` feature; without that feature the
-/// flag fails with a build instruction rather than silently encoding without adaptation.
+/// What `--human-adaptive` hands the encoder: the luma-space lambda regions that shape the
+/// RD walk, and -- for `--color-faces-only` / `--color-features-only` -- the boxes whose
+/// colour is kept.
+#[derive(Debug, Default)]
+struct HumanAdaptive {
+    lambda_regions: Vec<LambdaRegion>,
+    color_regions: Vec<LambdaRegion>,
+}
+
+/// Build the region-local parameters for `--human-adaptive`, or empty sets when the flag is
+/// off. Detection itself is behind the `face-detect` feature; without that feature the flag
+/// fails with a build instruction rather than silently encoding without adaptation.
 ///
 /// `--debug-regions` writes an overlay of the same plan the encoder is handed, so the file
 /// shows exactly which rectangles were active.
 #[cfg(feature = "face-detect")]
-fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<Vec<LambdaRegion>> {
+fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<HumanAdaptive> {
     use mars_cli::human::RegionKind;
 
     if !cli.human_adaptive {
-        return Ok(Vec::new());
+        return Ok(HumanAdaptive::default());
     }
     let model = cli
         .scrfd_model
@@ -791,16 +835,17 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         cli.feature_lambda_scale,
     );
 
-    let mut regions: Vec<LambdaRegion> = plan.iter().map(|planned| planned.region).collect();
+    let mut lambda_regions: Vec<LambdaRegion> =
+        plan.iter().map(|planned| planned.region).collect();
     // `--outside-min-size`: one further full-image region carrying a coarse subdivision
     // floor. The face regions carry no floor of their own, and the finest cap among the
     // regions a block overlaps wins, so blocks outside every face keep the coarse floor
     // while the faces themselves still refine to `--min-size`. Skipped when nothing was
     // detected: with no region to be outside of, applying it would silently coarsen the
     // whole image because detection failed.
-    let outside = match (cli.outside_min_size, regions.is_empty()) {
+    let outside = match (cli.outside_min_size, lambda_regions.is_empty()) {
         (Some(outside), false) => {
-            regions.push(LambdaRegion {
+            lambda_regions.push(LambdaRegion {
                 row: 0,
                 col: 0,
                 height: image.height() as u32,
@@ -812,6 +857,28 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
             Some(outside)
         }
         _ => None,
+    };
+
+    // `--color-faces-only` / `--color-features-only` (mutually exclusive): the chosen boxes
+    // are the only regions that keep colour. This set is built from the plan alone --
+    // deliberately not the full-image `--outside-min-size` region above, which would leave
+    // nothing outside it to neutralise. Empty when nothing was detected, which
+    // `ColorEncodeParams::color_regions` treats as a no-op rather than "grayscale
+    // everywhere".
+    let color_kind = if cli.color_faces_only {
+        Some((RegionKind::Face, "face", "--color-faces-only"))
+    } else if cli.color_features_only {
+        Some((RegionKind::Feature, "feature", "--color-features-only"))
+    } else {
+        None
+    };
+    let color_regions: Vec<LambdaRegion> = match color_kind {
+        Some((kind, _, _)) => plan
+            .iter()
+            .filter(|planned| planned.kind == kind)
+            .map(|planned| planned.region)
+            .collect(),
+        None => Vec::new(),
     };
 
     if let Some(path) = &cli.debug_regions {
@@ -828,12 +895,19 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         (Some(size), None) => format!(", --outside-min-size {size} not applied (no regions)"),
         (None, _) => String::new(),
     };
+    let color_note = match (color_kind, color_regions.is_empty()) {
+        (Some((_, label, _)), false) => {
+            format!(", colour kept in {} {label} region(s)", color_regions.len())
+        }
+        (Some((_, _, flag)), true) => format!(", {flag} not applied (no face detected)"),
+        (None, _) => String::new(),
+    };
     let overlay = match &cli.debug_regions {
         Some(path) => format!(", overlay -> {}", path.display()),
         None => String::new(),
     };
     println!(
-        "human-adaptive: {faces_found} face(s), {} region(s){outside_note}{overlay}",
+        "human-adaptive: {faces_found} face(s), {} region(s){outside_note}{color_note}{overlay}",
         plan.len()
     );
     if cli.debug_regions.is_some() {
@@ -850,21 +924,24 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         }
     }
 
-    Ok(regions)
+    Ok(HumanAdaptive {
+        lambda_regions,
+        color_regions,
+    })
 }
 
 #[cfg(not(feature = "face-detect"))]
 fn human_adaptive_regions(
     cli: &Cli,
     _image: &mars_core::image::Image,
-) -> Result<Vec<LambdaRegion>> {
+) -> Result<HumanAdaptive> {
     if cli.human_adaptive {
         bail!(
             "--human-adaptive needs the `face-detect` build feature (ONNX Runtime); \
              rebuild with `cargo build -p mars-cli --features face-detect`"
         );
     }
-    Ok(Vec::new())
+    Ok(HumanAdaptive::default())
 }
 
 #[cfg(test)]
@@ -996,6 +1073,32 @@ mod tests {
         assert!(
             Cli::try_parse_from(["encmars", "in.png", "out.mars", "--scrfd-model", "m.onnx"])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn color_masks_require_human_adaptive_and_are_mutually_exclusive() {
+        for flag in ["--color-faces-only", "--color-features-only"] {
+            // Meaningless on its own, and clap refuses it (the same shape as --scrfd-model).
+            assert!(
+                Cli::try_parse_from(["encmars", "in.png", "out.mars", flag]).is_err(),
+                "{flag} should require --human-adaptive"
+            );
+            assert!(parse(&["--human-adaptive", flag]).validate().is_ok());
+        }
+        assert!(parse(&["--human-adaptive", "--color-faces-only"]).color_faces_only);
+        assert!(parse(&["--human-adaptive", "--color-features-only"]).color_features_only);
+        // The two are alternatives, not a combination.
+        assert!(
+            Cli::try_parse_from([
+                "encmars",
+                "in.png",
+                "out.mars",
+                "--human-adaptive",
+                "--color-faces-only",
+                "--color-features-only",
+            ])
+            .is_err()
         );
     }
 

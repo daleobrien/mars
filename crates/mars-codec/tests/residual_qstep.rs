@@ -139,6 +139,7 @@ fn color_planes_serialize_fixed_default_and_explicit_per_plane_lambda_steps() {
             adaptive_density: false, allowed_modes: [true; 4],
             rd_candidates: 1,
             lambda_regions: Vec::new(),
+            color_regions: Vec::new(),
         };
         let (bytes, _) = color::encode_color_image_with_residual_quantisation(&img, &cfg, policy);
         if policy == ResidualQuantisation::default() {
@@ -198,6 +199,7 @@ fn gray_color_wrapper_preserves_explicit_policy_and_fixed_default() {
         allowed_modes: [true, false, true, true],
         rd_candidates: 1,
         lambda_regions: Vec::new(),
+        color_regions: Vec::new(),
     };
     for policy in [ResidualQuantisation::default(), ResidualQuantisation::LambdaAdaptive] {
         let (bytes, _) = color::encode_color_image_with_residual_quantisation(&img, &cfg, policy);

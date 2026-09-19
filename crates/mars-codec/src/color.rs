@@ -95,6 +95,57 @@ pub fn upsample_nearest(plane: &Plane, width: usize, height: usize) -> Plane {
 }
 
 // ---------------------------------------------------------------------------
+// Region-limited colour (chroma masking)
+// ---------------------------------------------------------------------------
+
+/// BT.601's neutral chroma value: `Cb == Cr == 128` inverts to `R == G == B`, i.e. a
+/// grayscale pixel. [`mars_core::metrics::ycbcr`] emits exactly this for gray input.
+const NEUTRAL_CHROMA: u8 = 128;
+
+/// Force `cb` and `cr` to neutral outside every rectangle in `regions`, keeping the colour
+/// inside them. This is the "colour only inside the face boxes, grayscale elsewhere"
+/// transform: the neutral area compresses to almost nothing, and because `Cb == Cr == 128`
+/// inverts to `R == G == B`, [`decode_color_image`] reconstructs those pixels as grayscale
+/// with no format or decoder change at all.
+///
+/// The rectangles are in luma pixel coordinates, which are the chroma planes' coordinates
+/// at this point too: the caller masks *before* any 4:2:0 subsampling, so a neutralised area
+/// stays neutral through the box filter. A pixel covered by at least one region keeps its
+/// colour, so overlapping or adjacent boxes compose by union. An empty list is a no-op,
+/// leaving the planes exactly as `ycbcr` produced them.
+fn neutralise_chroma_outside(cb: &mut Plane, cr: &mut Plane, regions: &[LambdaRegion]) {
+    if regions.is_empty() {
+        return;
+    }
+    let (width, height) = (cb.width(), cb.height());
+    let colour_cb = cb.as_slice().to_vec();
+    let colour_cr = cr.as_slice().to_vec();
+    let cb_out = cb.as_mut_slice();
+    let cr_out = cr.as_mut_slice();
+    cb_out.fill(NEUTRAL_CHROMA);
+    cr_out.fill(NEUTRAL_CHROMA);
+    for region in regions {
+        let x0 = (region.col as usize).min(width);
+        let y0 = (region.row as usize).min(height);
+        let x1 = (region.col as usize)
+            .saturating_add(region.width as usize)
+            .min(width);
+        let y1 = (region.row as usize)
+            .saturating_add(region.height as usize)
+            .min(height);
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        for y in y0..y1 {
+            let start = y * width + x0;
+            let end = y * width + x1;
+            cb_out[start..end].copy_from_slice(&colour_cb[start..end]);
+            cr_out[start..end].copy_from_slice(&colour_cr[start..end]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Independent per-plane quality control
 // ---------------------------------------------------------------------------
 
@@ -130,6 +181,20 @@ pub struct ColorEncodeParams {
     /// detail is low, and the regions are defined from luma-space detections. Empty (the
     /// default) reproduces every pre-existing caller byte-for-byte.
     pub lambda_regions: Vec<LambdaRegion>,
+    /// Regions (luma pixel coordinates) that **keep their colour**; chroma outside their
+    /// union is forced to neutral before encoding ([`neutralise_chroma_outside`]), so the
+    /// decoder reconstructs those pixels as grayscale (`R == G == B`). This is what
+    /// `encmars --human-adaptive --color-faces-only` (whole face boxes) and
+    /// `--color-features-only` (eyes/nose/mouth boxes) fill: colour inside those regions, a
+    /// luma-only (grayscale) image with the same detail everywhere else. Empty (the
+    /// default) leaves chroma untouched and reproduces every pre-existing caller
+    /// byte-for-byte. An empty set because nothing was detected is deliberately a no-op, not
+    /// "grayscale everywhere" -- see `docs/decisions.md` D52. Ignored for grayscale input.
+    /// When non-empty, the chroma planes' `bits_beta` is raised to at least 8 (in
+    /// [`encode_color_image_with_residual_quantisation`]) so that neutral reconstructs
+    /// exactly; below 8 bits the DC step skips 128 and the background would keep a
+    /// one-level colour cast. Luma is unaffected.
+    pub color_regions: Vec<LambdaRegion>,
 }
 
 /// Per-plane stats from a colour encode, for measurement (bpp attribution, evals).
@@ -232,7 +297,20 @@ pub fn encode_color_image_with_residual_quantisation(
             (container, stats)
         }
         ColorSpace::Rgb => {
-            let [y, cb, cr] = ycbcr(img);
+            let [y, mut cb, mut cr] = ycbcr(img);
+            neutralise_chroma_outside(&mut cb, &mut cr, &params.color_regions);
+            // Exact neutral chroma needs a DC step of 1.0. Below 8 bits,
+            // `qbeta/((1<<bits_beta)-1)*255` steps past 128 (127 -> 127, 128 -> 129), so the
+            // neutralised background would reconstruct with a one-level colour cast instead
+            // of being gray. Raise only the chroma planes, and only when a mask is in use.
+            let chroma_params = if params.color_regions.is_empty() {
+                params.chroma
+            } else {
+                EncodeParams {
+                    bits_beta: params.chroma.bits_beta.max(8),
+                    ..params.chroma
+                }
+            };
             let (mode, cb_enc, cr_enc) = match params.subsampling {
                 Subsampling::Yuv444 => (MODE_RGB_444, cb, cr),
                 Subsampling::Yuv420 => (MODE_RGB_420, downsample_box(&cb), downsample_box(&cr)),
@@ -241,9 +319,9 @@ pub fn encode_color_image_with_residual_quantisation(
             let (y_hdr, y_leaves, y_evals, _) =
                 encode_image_with_options(&y, &params.y, &y_options);
             let (cb_hdr, cb_leaves, cb_evals, _) =
-                encode_image_with_options(&cb_enc, &params.chroma, &chroma_options);
+                encode_image_with_options(&cb_enc, &chroma_params, &chroma_options);
             let (cr_hdr, cr_leaves, cr_evals, _) =
-                encode_image_with_options(&cr_enc, &params.chroma, &chroma_options);
+                encode_image_with_options(&cr_enc, &chroma_params, &chroma_options);
 
             let y_bytes = mars_format::write(&y_hdr, &y_leaves).expect("valid header");
             let cb_bytes = mars_format::write(&cb_hdr, &cb_leaves).expect("valid header");
@@ -670,6 +748,7 @@ mod tests {
             allowed_modes: [true; 4],
             rd_candidates: 1,
             lambda_regions: Vec::new(),
+            color_regions: Vec::new(),
         };
         let (bytes, _stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -689,6 +768,7 @@ mod tests {
             allowed_modes: [true; 4],
             rd_candidates: 1,
             lambda_regions: Vec::new(),
+            color_regions: Vec::new(),
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -730,6 +810,7 @@ mod tests {
             allowed_modes: [true; 4],
             rd_candidates: 3,
             lambda_regions: Vec::new(),
+            color_regions: Vec::new(),
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let (bytes_again, _) = encode_color_image(&img, &cfg);
@@ -754,6 +835,7 @@ mod tests {
             allowed_modes: [true; 4],
             rd_candidates: 1,
             lambda_regions: Vec::new(),
+            color_regions: Vec::new(),
         };
         let cfg_420 = ColorEncodeParams {
             y: params(4.0),
@@ -763,6 +845,7 @@ mod tests {
             allowed_modes: [true; 4],
             rd_candidates: 1,
             lambda_regions: Vec::new(),
+            color_regions: Vec::new(),
         };
         let (bytes_444, stats_444) = encode_color_image(&img, &cfg_444);
         let (bytes_420, stats_420) = encode_color_image(&img, &cfg_420);
@@ -804,6 +887,7 @@ mod tests {
             allowed_modes: [true; 4],
             rd_candidates: 1,
             lambda_regions: Vec::new(),
+            color_regions: Vec::new(),
         };
         let (bytes_420, _stats) = encode_color_image(&img, &cfg_420);
 
@@ -816,6 +900,73 @@ mod tests {
         assert_eq!(used, 5);
         assert_eq!(frame_count, 5);
         assert_eq!((decoded.width(), decoded.height()), (64, 64));
+    }
+
+    /// The colour-region mask's core contract (shared by `--color-faces-only` and
+    /// `--color-features-only`): chroma outside the given regions is neutral, so those
+    /// pixels decode to grayscale, while colour inside the regions survives -- with no
+    /// decoder or format change. The region is dyadic (exactly half a 64x64 image), so no
+    /// quadtree leaf straddles its edge; a straddling leaf is the documented "approximately"
+    /// caveat, and asserting on it would test leaf geometry rather than this contract.
+    #[test]
+    fn color_regions_keep_colour_inside_and_force_grayscale_outside() {
+        let img = gradient_image(64, 64);
+        let cfg = ColorEncodeParams {
+            y: params(1.0),
+            chroma: params(1.0),
+            subsampling: Subsampling::Yuv444,
+            adaptive_density: false,
+            allowed_modes: [true; 4],
+            rd_candidates: 1,
+            lambda_regions: Vec::new(),
+            color_regions: vec![LambdaRegion {
+                row: 0,
+                col: 0,
+                height: 32,
+                width: 64,
+                scale: 1.0,
+                min_size: None,
+            }],
+        };
+        let (bytes, stats) = encode_color_image(&img, &cfg);
+        let decoded = decode_color_image(&bytes, 10).unwrap();
+        let [r, g, b] = decoded.planes() else {
+            panic!("expected an RGB decode");
+        };
+
+        // Outside the region (the lower half): exactly neutral, so R == G == B.
+        for y in 32..64 {
+            for x in 0..64 {
+                assert!(
+                    r.get(x, y) == g.get(x, y) && g.get(x, y) == b.get(x, y),
+                    "pixel ({x}, {y}) outside the colour region should be grayscale, got \
+                     ({}, {}, {})",
+                    r.get(x, y),
+                    g.get(x, y),
+                    b.get(x, y)
+                );
+            }
+        }
+        // Inside it, colour must have survived -- otherwise the assertion above is vacuous.
+        let colourful_inside = (0..32).any(|y| {
+            (0..64).any(|x| r.get(x, y) != g.get(x, y) || g.get(x, y) != b.get(x, y))
+        });
+        assert!(colourful_inside, "the colour region lost all its colour");
+
+        // Masking chroma must not cost more chroma bits than keeping it everywhere.
+        let plain = ColorEncodeParams {
+            color_regions: Vec::new(),
+            ..cfg.clone()
+        };
+        let (_, baseline) = encode_color_image(&img, &plain);
+        assert!(
+            stats.cb_bytes + stats.cr_bytes <= baseline.cb_bytes + baseline.cr_bytes,
+            "neutralising chroma should not cost more: {}+{} vs {}+{}",
+            stats.cb_bytes,
+            stats.cr_bytes,
+            baseline.cb_bytes,
+            baseline.cr_bytes
+        );
     }
 
     #[test]

@@ -3291,3 +3291,44 @@ no numeric quality threshold is relaxed. Three CLI parser tests cover default re
 legacy selection, zero/explicit lambda precedence and mode replacement. These and CLI-B,
 C, D, E and residual integration tests passed; focused encmars Clippy passed. CLI-A's
 real-image default/off byte comparison also passed; its opt-in density sweep was not run.
+
+## D52 · 2026-09-20 · `encmars --human-adaptive --color-faces-only` / `--color-features-only`: colour in detected regions, grayscale elsewhere, by masking chroma rather than by a format or decoder change
+
+User-requested extension to `--human-adaptive`: keep colour only inside detected regions
+and encode everything else as grayscale. Two mutually exclusive flags choose the regions:
+`--color-faces-only` (the whole face box) and `--color-features-only` (the eyes, nose and
+mouth boxes). Both map onto one codec field, `ColorEncodeParams::color_regions` -- a set of
+luma-space rectangles that *retain* colour. After `ycbcr(img)`, the Cb and Cr planes are
+forced to neutral 128 outside their union and encoded as normal, before any 4:2:0
+subsampling, so a neutralised area stays neutral through the box filter. Empty (the
+default) is a no-op, byte-identical to every pre-existing caller.
+
+**Why a chroma mask, not a new mode or format field.** `Cb == Cr == 128` inverts to
+`R == G == B` (`mars_core::metrics::ycbcr`), so no format change and no decoder change are
+needed: `decode_color_image` already reconstructs those pixels as grayscale, and the
+neutral area compresses to almost nothing, so the flags save chroma bits rather than
+spending them (measured on `input.jpeg`, 270x333: chroma 486 bytes with `faces`, 382 with
+`features`).
+
+**A one-level colour cast, and why chroma `bits_beta` is raised.** A flat leaf reconstructs
+`trunc(0.5 + qbeta/((1 << bits_beta) - 1) * 255)`. At the CLI's default `bits_beta = 7` the
+step skips 128 (63 -> 127, 64 -> 129), so a neutralised background would decode with a
+uniform one-level colour cast instead of being gray. When `color_regions` is non-empty the
+chroma planes' `bits_beta` is therefore raised to at least 8 (DC step exactly 1.0), which
+makes neutral exact; luma is untouched. Verified end to end: outside the regions the decoded
+pixels are exactly `R == G == B`, and inside they keep full colour.
+
+**What this is not, stated plainly.**
+- It is a deliberately lossy, stylistic transform: the background's colour information is
+  discarded, not coarsened. It is not a fidelity feature and no BD-rate/quality gate
+  applies.
+- The mask is exact for chroma leaves that lie wholly outside a region. A leaf that
+  *straddles* a region edge has mixed source chroma, so a block-granularity fringe of colour
+  survives around the edge -- measured up to ~12 px (`faces`) and ~7 px (`features`) from
+  the region box, bounded by `--max-size`. Most of the fringe is subtle (RGB spread <= 10),
+  but a narrow outline at the edge is not. A finer `--max-size` narrows it.
+- As with `--outside-min-size`, the flags are **not applied** when no face is detected (an
+  empty region set is a no-op, reported as such), rather than silently grayscaling the whole
+  image on a detection failure. On grayscale input they have no effect and say so.
+
+No measurement/gate accompanies this entry; it adds a capability, not a number.

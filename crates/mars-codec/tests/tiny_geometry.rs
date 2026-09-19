@@ -116,6 +116,7 @@ fn color_8x8_420_roundtrips_through_the_existing_wrapper() {
         allowed_modes: [true; 4],
         rd_candidates: 1,
         lambda_regions: Vec::new(),
+        color_regions: Vec::new(),
     };
     let (bytes, _) = color::encode_color_image_with_residual_quantisation(
         &img,
