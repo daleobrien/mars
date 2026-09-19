@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "name": "research-p5c",
+  "description": "P5c: several retrieved domain candidates in RD mode competition. The historical path offers only the minimum-RMS fit to modes 2/3; group `candidates8` offers the eight best-RMS fits instead and charges the same search evaluations (top-k retention adds no fits) plus a little per-leaf mode pricing. Modes 0/2/3 only -- with modes 0/2 alone the wider list is provably inert here, since mode 2's rate is a handful of coordinate symbols while RMS dominates. Lambda grid matches the P5a objective audit (200/800/3200; lambda 50 still omitted for runtime). Kodak grayscale, fixed residual step 8. Three points are a diagnostic, not a BD-rate interval: four overlapping points per arm per image would be needed for that.",
+  "indexes": ["corpus/standard.images.json"],
+  "images": ["kodim01", "kodim02"],
+  "codec": {
+    "min_size": 4,
+    "max_size": 16,
+    "shift": 4,
+    "bits_alfa": 4,
+    "bits_beta": 7,
+    "max_alfa": 1.0,
+    "zero_threshold": 0,
+    "subsampling": "444",
+    "t_rms": 8.0,
+    "chroma_t_rms": 8.0,
+    "threads": 4
+  },
+  "decoder": {
+    "iterations": 10,
+    "zoom": 1.0
+  },
+  "stages": [
+    {
+      "name": "rd",
+      "description": "RD lambda sweep, modes 0/2/3, fixed residual step 8, exhaustive search: single-winner candidate list versus the eight best-RMS candidates.",
+      "repetitions": 1,
+      "timeout_secs": 1800,
+      "arms": [
+        {
+          "label": "k1-lambda200",
+          "group": "candidates1",
+          "description": "Historical single min-RMS candidate at lambda 200.",
+          "lambda": 200.0,
+          "modes": [0, 2, 3],
+          "rd_candidates": 1
+        },
+        {
+          "label": "k1-lambda800",
+          "group": "candidates1",
+          "description": "Historical single min-RMS candidate at lambda 800.",
+          "lambda": 800.0,
+          "modes": [0, 2, 3],
+          "rd_candidates": 1
+        },
+        {
+          "label": "k1-lambda3200",
+          "group": "candidates1",
+          "description": "Historical single min-RMS candidate at lambda 3200.",
+          "lambda": 3200.0,
+          "modes": [0, 2, 3],
+          "rd_candidates": 1
+        },
+        {
+          "label": "k8-lambda200",
+          "group": "candidates8",
+          "description": "Eight best-RMS candidates competing for modes 2/3 at lambda 200.",
+          "lambda": 200.0,
+          "modes": [0, 2, 3],
+          "rd_candidates": 8
+        },
+        {
+          "label": "k8-lambda800",
+          "group": "candidates8",
+          "description": "Eight best-RMS candidates competing for modes 2/3 at lambda 800.",
+          "lambda": 800.0,
+          "modes": [0, 2, 3],
+          "rd_candidates": 8
+        },
+        {
+          "label": "k8-lambda3200",
+          "group": "candidates8",
+          "description": "Eight best-RMS candidates competing for modes 2/3 at lambda 3200.",
+          "lambda": 3200.0,
+          "modes": [0, 2, 3],
+          "rd_candidates": 8
+        }
+      ]
+    }
+  ]
+}

@@ -32,6 +32,13 @@ const LAMBDA_GRID: [f64; 4] = [50.0, 200.0, 800.0, 3200.0];
 const KODAK_WIDTH: usize = 768;
 const KODAK_HEIGHT: usize = 512;
 
+/// Frame size [`omitting_adaptive_density_matches_explicit_false_byte_for_byte`] encodes.
+/// That check's claim is byte identity between two CLI invocations, which no frame size can
+/// change, while a full-frame exhaustive RD encode costs ~90s per invocation even in an
+/// optimized profile -- the same cost that keeps the `MARS_RUN_CLI_A_GATE` sweep above
+/// opt-in.
+const DEFAULT_CHECK_CROP: usize = 128;
+
 /// **D48 CONTRACT-CHANGE.** D43's originally-measured -6.82% mean BD-rate came from a
 /// branch that D48 found corrupted the bitstream and removed; the surviving mechanism
 /// re-measures at essentially BD-rate-neutral (`gate-16`'s own post-fix number: mean
@@ -43,19 +50,40 @@ fn encmars_bin() -> &'static str {
     env!("CARGO_BIN_EXE_encmars")
 }
 
+/// Write `DEFAULT_CHECK_CROP`x`DEFAULT_CHECK_CROP` from the top-left of the committed
+/// full-frame grayscale plane to `dest`. Returns `false` when the corpus (or an
+/// unexpected-sized plane) is unavailable, so the caller can skip with a message -- this
+/// file's own convention for corpus-dependent checks.
+fn write_cropped_raw(src: &Path, dest: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(src) else {
+        return false;
+    };
+    if bytes.len() != KODAK_WIDTH * KODAK_HEIGHT {
+        return false;
+    }
+    let mut cropped = Vec::with_capacity(DEFAULT_CHECK_CROP * DEFAULT_CHECK_CROP);
+    for row in 0..DEFAULT_CHECK_CROP {
+        let start = row * KODAK_WIDTH;
+        cropped.extend_from_slice(&bytes[start..start + DEFAULT_CHECK_CROP]);
+    }
+    std::fs::write(dest, &cropped).expect("writing the cropped plane");
+    true
+}
+
 /// Encode `kodimNN.raw` at one lambda via the real `encmars` binary, returning the
 /// produced `.mars` bytes and the file's bpp.
 fn encode_via_cli(
     image_path: &Path,
     out_path: &Path,
+    (width, height): (usize, usize),
     lambda: f64,
     adaptive_density: bool,
 ) -> (Vec<u8>, f64) {
     let mut cmd = Command::new(encmars_bin());
     cmd.arg(image_path)
         .arg(out_path)
-        .args(["--raw-width", &KODAK_WIDTH.to_string()])
-        .args(["--raw-height", &KODAK_HEIGHT.to_string()])
+        .args(["--raw-width", &width.to_string()])
+        .args(["--raw-height", &height.to_string()])
         .args(["--lambda", &lambda.to_string()])
         // Preserve this historical four-mode density A/B despite the new CLI mask default.
         .args(["--modes", "0,1,2,3"])
@@ -75,7 +103,7 @@ fn encode_via_cli(
     assert!(status.success(), "encmars exited with {status}");
 
     let bytes = std::fs::read(out_path).expect("encmars wrote the output file");
-    let bpp = 8.0 * bytes.len() as f64 / (KODAK_WIDTH * KODAK_HEIGHT) as f64;
+    let bpp = 8.0 * bytes.len() as f64 / (width * height) as f64;
     (bytes, bpp)
 }
 
@@ -98,7 +126,13 @@ fn curve_for(label: &str, image_path: &Path, tmp: &Path, adaptive_density: bool)
                 "fixed"
             }
         ));
-        let (bytes, bpp) = encode_via_cli(image_path, &out_path, lambda, adaptive_density);
+        let (bytes, bpp) = encode_via_cli(
+            image_path,
+            &out_path,
+            (KODAK_WIDTH, KODAK_HEIGHT),
+            lambda,
+            adaptive_density,
+        );
         let decoded = mars_codec::color::decode_color_image(&bytes, 10)
             .expect("decode of what encmars just wrote");
         let p =
@@ -172,12 +206,14 @@ fn adaptive_density_flag_reproduces_a_real_improvement_at_cli_scope() {
 fn omitting_adaptive_density_matches_explicit_false_byte_for_byte() {
     let tmp = std::env::temp_dir().join(format!("gate-cli-a-default-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).expect("scratch dir");
-    let image_path =
+    let source =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/images/kodak-gray/kodim01.raw");
-    if !image_path.exists() {
+    let image_path = tmp.join("kodim01-crop.raw");
+    if !write_cropped_raw(&source, &image_path) {
         eprintln!("skipping: corpus not fetched (run `just corpus-gray`)");
         return;
     }
+    let dims = (DEFAULT_CHECK_CROP, DEFAULT_CHECK_CROP);
 
     // Both arms must pin the same explicit non-default configuration (four modes,
     // `t_rms` 0, matching `encode_via_cli` below) so this test isolates the
@@ -188,8 +224,8 @@ fn omitting_adaptive_density_matches_explicit_false_byte_for_byte() {
     let status = Command::new(encmars_bin())
         .arg(&image_path)
         .arg(&out_default)
-        .args(["--raw-width", &KODAK_WIDTH.to_string()])
-        .args(["--raw-height", &KODAK_HEIGHT.to_string()])
+        .args(["--raw-width", &dims.0.to_string()])
+        .args(["--raw-height", &dims.1.to_string()])
         .args(["--lambda", "200"])
         .args(["--modes", "0,1,2,3"])
         .args(["--t-rms", "0"])
@@ -198,7 +234,7 @@ fn omitting_adaptive_density_matches_explicit_false_byte_for_byte() {
     assert!(status.success());
 
     let out_explicit = tmp.join("explicit-off.mars");
-    let (bytes_explicit, _) = encode_via_cli(&image_path, &out_explicit, 200.0, false);
+    let (bytes_explicit, _) = encode_via_cli(&image_path, &out_explicit, dims, 200.0, false);
     let bytes_default = std::fs::read(&out_default).unwrap();
 
     assert_eq!(

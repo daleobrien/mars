@@ -118,6 +118,10 @@ pub struct ColorEncodeParams {
     /// mode competition at all. `[true; 4]` (the
     /// default) reproduces every pre-existing caller's behaviour exactly.
     pub allowed_modes: [bool; 4],
+    /// P5c: how many of the search's best-RMS domain candidates compete for modes 2/3 on
+    /// the RD path, per plane. `1` (the default) is the historical single-winner
+    /// behaviour and is byte-identical to it. See [`EncodeOptions::rd_candidates`].
+    pub rd_candidates: usize,
 }
 
 /// Per-plane stats from a colour encode, for measurement (bpp attribution, evals).
@@ -193,6 +197,7 @@ pub fn encode_color_image_with_residual_quantisation(
         allowed_modes: params.allowed_modes,
         adaptive_density: params.adaptive_density,
         residual_quantisation: policy,
+        rd_candidates: params.rd_candidates,
     };
     match img.color() {
         ColorSpace::Gray => {
@@ -661,6 +666,7 @@ mod tests {
             subsampling: Subsampling::Yuv444,
             adaptive_density: false,
             allowed_modes: [true; 4],
+            rd_candidates: 1,
         };
         let (bytes, _stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -678,6 +684,7 @@ mod tests {
             subsampling: Subsampling::Yuv444,
             adaptive_density: false,
             allowed_modes: [true; 4],
+            rd_candidates: 1,
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -701,6 +708,36 @@ mod tests {
         );
     }
 
+    /// P5c: `ColorEncodeParams::rd_candidates` must reach every plane's RD walk -- a
+    /// grayscale-only implementation would silently drop the field on this path -- and must
+    /// not break the container round trip or determinism.
+    #[test]
+    fn colour_rd_candidates_plumb_through_every_plane_and_round_trip() {
+        let img = gradient_image(64, 64);
+        let rd = EncodeParams {
+            lambda: Some(200.0),
+            ..params(8.0)
+        };
+        let cfg = ColorEncodeParams {
+            y: rd,
+            chroma: rd,
+            subsampling: Subsampling::Yuv444,
+            adaptive_density: false,
+            allowed_modes: [true; 4],
+            rd_candidates: 3,
+        };
+        let (bytes, stats) = encode_color_image(&img, &cfg);
+        let (bytes_again, _) = encode_color_image(&img, &cfg);
+        assert_eq!(
+            bytes, bytes_again,
+            "a wider candidate list must be deterministic"
+        );
+        assert!(stats.cb_bytes > 0 && stats.cr_bytes > 0);
+        let decoded = decode_color_image(&bytes, 10).unwrap();
+        assert_eq!(decoded.color(), ColorSpace::Rgb);
+        assert_eq!((decoded.width(), decoded.height()), (64, 64));
+    }
+
     #[test]
     fn rgb_420_round_trips_and_produces_smaller_chroma_streams_than_444() {
         let img = gradient_image(64, 64);
@@ -710,6 +747,7 @@ mod tests {
             subsampling: Subsampling::Yuv444,
             adaptive_density: false,
             allowed_modes: [true; 4],
+            rd_candidates: 1,
         };
         let cfg_420 = ColorEncodeParams {
             y: params(4.0),
@@ -717,6 +755,7 @@ mod tests {
             subsampling: Subsampling::Yuv420,
             adaptive_density: false,
             allowed_modes: [true; 4],
+            rd_candidates: 1,
         };
         let (bytes_444, stats_444) = encode_color_image(&img, &cfg_444);
         let (bytes_420, stats_420) = encode_color_image(&img, &cfg_420);
@@ -756,6 +795,7 @@ mod tests {
             subsampling: Subsampling::Yuv420,
             adaptive_density: false,
             allowed_modes: [true; 4],
+            rd_candidates: 1,
         };
         let (bytes_420, _stats) = encode_color_image(&img, &cfg_420);
 

@@ -119,6 +119,7 @@ fn provider_is_used_only_for_final_walk_with_effective_stride_and_separate_count
             adaptive_density: true,
             allowed_modes: [true, false, true, false],
             residual_quantisation: ResidualQuantisation::LambdaAdaptive,
+            rd_candidates: 1,
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);

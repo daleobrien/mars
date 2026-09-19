@@ -114,6 +114,7 @@ fn color_8x8_420_roundtrips_through_the_existing_wrapper() {
         subsampling: Subsampling::Yuv420,
         adaptive_density: false,
         allowed_modes: [true; 4],
+        rd_candidates: 1,
     };
     let (bytes, _) = color::encode_color_image_with_residual_quantisation(
         &img,

@@ -137,6 +137,7 @@ fn color_planes_serialize_fixed_default_and_explicit_per_plane_lambda_steps() {
         let cfg = ColorEncodeParams {
             y: params(Some(2.0)), chroma: params(Some(200.0)), subsampling,
             adaptive_density: false, allowed_modes: [true; 4],
+            rd_candidates: 1,
         };
         let (bytes, _) = color::encode_color_image_with_residual_quantisation(&img, &cfg, policy);
         if policy == ResidualQuantisation::default() {
@@ -161,6 +162,7 @@ fn color_planes_serialize_fixed_default_and_explicit_per_plane_lambda_steps() {
                 allowed_modes: cfg.allowed_modes,
                 adaptive_density: cfg.adaptive_density,
                 residual_quantisation: policy,
+                rd_candidates: 1,
             });
             let expected_step = match policy {
                 ResidualQuantisation::Fixed(step) => step,
@@ -192,6 +194,7 @@ fn gray_color_wrapper_preserves_explicit_policy_and_fixed_default() {
         y: params(Some(50.0)), chroma: params(Some(200.0)),
         subsampling: Subsampling::Yuv420, adaptive_density: true,
         allowed_modes: [true, false, true, true],
+        rd_candidates: 1,
     };
     for policy in [ResidualQuantisation::default(), ResidualQuantisation::LambdaAdaptive] {
         let (bytes, _) = color::encode_color_image_with_residual_quantisation(&img, &cfg, policy);
@@ -201,6 +204,7 @@ fn gray_color_wrapper_preserves_explicit_policy_and_fixed_default() {
         let (hdr, leaves, _, _) = encode_image_with_options(&img.planes()[0], &cfg.y, &EncodeOptions {
             allowed_modes: cfg.allowed_modes, adaptive_density: cfg.adaptive_density,
             residual_quantisation: policy,
+            rd_candidates: 1,
         });
         assert_eq!(bytes, color::wrap_gray_stream(mars_format::write(&hdr, &leaves).unwrap()));
         assert_eq!(color::decode_color_image(&bytes, 10).unwrap().planes()[0],

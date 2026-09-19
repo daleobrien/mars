@@ -57,3 +57,14 @@ all = { level = "deny", priority = -1 }
 
 [profile.release]
 debug = 1
+
+# `cargo test` and `cargo build` use this profile. At the default opt-level 0 the
+# exhaustive fractal search runs ~20-50x slower than release: `color_gate`'s full-image
+# colour round trip alone measured ~23 minutes of wall time (13480s CPU) against 277s CPU
+# in release. The gate recipes in the Justfile sidestep that by passing `--release`, but
+# the plan's routine `cargo test --locked -p mars-codec` does not, so the tax hit every
+# test run. opt-level 2 removes it while keeping dev-profile semantics (debug assertions
+# and debuginfo still on). Deliberately not 3: this profile is also for debugging, and 2
+# captures essentially all of the numeric win at a lower compile cost.
+[profile.dev]
+opt-level = 2

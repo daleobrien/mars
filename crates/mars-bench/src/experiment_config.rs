@@ -169,6 +169,11 @@ pub struct Arm {
     pub seed: Option<u64>,
     #[serde(default)]
     pub adaptive_density: bool,
+    /// P5c: how many top-RMS domain candidates compete for modes 2/3. Default 1 is the
+    /// historical single-winner behaviour; a larger value requires the RD path and the
+    /// exhaustive method. Applies to every plane.
+    #[serde(default = "default_rd_candidates")]
+    pub rd_candidates: usize,
     #[serde(default)]
     pub adaptive_residual: bool,
     #[serde(default)]
@@ -195,6 +200,9 @@ pub struct StageSpec {
 
 fn default_subsampling() -> String {
     "444".into()
+}
+fn default_rd_candidates() -> usize {
+    1
 }
 fn default_t_rms() -> f64 {
     8.0
@@ -674,6 +682,19 @@ fn validate_arm(arm: &Arm, shared: &DecoderSpec, where_: &str, problems: &mut Ve
             problems.push(format!("{where_}: lambda must be finite and nonnegative"));
         }
     }
+    if arm.rd_candidates < 1 {
+        problems.push(format!("{where_}: rd_candidates must be at least 1"));
+    }
+    if arm.rd_candidates > 1
+        && arm
+            .method
+            .as_deref()
+            .is_some_and(|method| method != "exhaustive")
+    {
+        problems.push(format!(
+            "{where_}: rd_candidates > 1 requires the exhaustive method; other methods propose one candidate"
+        ));
+    }
     if let Some(modes) = &arm.modes {
         if modes.is_empty() {
             problems.push(format!("{where_}: modes must not be empty when given"));
@@ -704,6 +725,11 @@ fn validate_arm(arm: &Arm, shared: &DecoderSpec, where_: &str, problems: &mut Ve
         if arm.adaptive_density {
             problems.push(format!(
                 "{where_}: adaptive_density requires the RD path; give lambda"
+            ));
+        }
+        if arm.rd_candidates != 1 {
+            problems.push(format!(
+                "{where_}: rd_candidates requires the RD path; give lambda"
             ));
         }
     }
@@ -875,6 +901,7 @@ mod tests {
             budget: None,
             seed: None,
             adaptive_density: false,
+            rd_candidates: 1,
             adaptive_residual: false,
             progressive: false,
             iterations: None,
@@ -1026,6 +1053,23 @@ mod tests {
             },
             "require the RD path",
         );
+        assert_rejected(
+            "rd_candidates without rd",
+            |a| {
+                a.lambda = None;
+                a.rd_candidates = 3;
+            },
+            "require the RD path",
+        );
+        assert_rejected(
+            "rd_candidates with a candidate-restricted method",
+            |a| {
+                a.method = Some("fisher".into());
+                a.rd_candidates = 3;
+            },
+            "requires the exhaustive method",
+        );
+        assert_rejected("rd_candidates zero", |a| a.rd_candidates = 0, "at least 1");
         assert_rejected(
             "residual without mode 3",
             |a| a.adaptive_residual = true,

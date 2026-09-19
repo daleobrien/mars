@@ -389,6 +389,7 @@ fn audit_one(
         allowed_modes: config.modes,
         adaptive_density: false,
         residual_quantisation: ResidualQuantisation::default(),
+        rd_candidates: 1,
     };
     let audited = audit_rd(plane, &params(&config.codec, lambda, t_rms), &options)?;
 

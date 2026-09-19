@@ -10,6 +10,13 @@ use mars_core::io::read_raw;
 const MANDELBROT: &str = "../../fixtures/images/mandelbrot.raw";
 const MIXED_129X127: &str = "../../fixtures/images/mixed_129x127.raw";
 
+/// Larger fixtures are cropped to this square before encoding. The invariant under test --
+/// bit-identical leaves and eval count at every thread count, with both the parallel
+/// (`>= PARALLEL_SIZE_CUTOFF`) and sequential-cutoff branches exercised -- does not depend
+/// on frame size, and the committed 512x512 frame cost ~4x the wall time for no additional
+/// coverage of that invariant.
+const CROP: usize = 256;
+
 /// `min_size` at 4 (below the encoder's `PARALLEL_SIZE_CUTOFF` of 8) so the recursion
 /// exercises both the parallel and the sequential-cutoff branches, not just one.
 fn params() -> EncodeParams {
@@ -28,6 +35,11 @@ fn params() -> EncodeParams {
 
 fn assert_identical_across_thread_counts(path: &str, width: usize, height: usize) {
     let image = read_raw(std::path::Path::new(path), width, height).expect("fixture committed");
+    let image = if width > CROP && height > CROP {
+        image.crop_top_left(CROP, CROP)
+    } else {
+        image
+    };
     let p = params();
 
     let (baseline_hdr, baseline_leaves, baseline_evals) = encode_image(&image, &p);
@@ -55,7 +67,7 @@ fn assert_identical_across_thread_counts(path: &str, width: usize, height: usize
 }
 
 #[test]
-fn mandelbrot_512_bitstream_identical_at_every_thread_count() {
+fn mandelbrot_bitstream_identical_at_every_thread_count() {
     assert_identical_across_thread_counts(MANDELBROT, 512, 512);
 }
 

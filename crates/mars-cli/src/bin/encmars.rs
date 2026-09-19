@@ -172,6 +172,17 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     adaptive_density: bool,
 
+    /// P5c: let this many of the search's best-RMS domain candidates compete for modes
+    /// 2/3, instead of only the single minimum-RMS winner. `1` (the default) is the
+    /// historical behaviour, byte-identical. Values above 1 require the RD path and the
+    /// exhaustive search (omit `--method`, or use `--method exhaustive`). They add per-leaf
+    /// mode competition -- real work, not a free retrieval widening -- but no stream
+    /// syntax, so the chosen leaf's coordinate/coefficient fields are already fully priced.
+    /// Not an output-preserving optimization: a wider list can change the partition and
+    /// therefore the bytes. Applies to every plane; the P5c measurement was grayscale.
+    #[arg(long, default_value_t = 1)]
+    rd_candidates: usize,
+
     /// Step 15's per-leaf mode mask, a diagnostic/comparison knob: comma-separated mode
     /// numbers to allow, from 0 (flat), 1 (affine), 2 (fractal), 3 (fractal + residual) --
     /// e.g. `--modes 0,1,2` disables mode 3, `--modes 2` forces fractal-only. Only affects
@@ -395,6 +406,21 @@ impl Cli {
         if self.adaptive_residual && !self.effective_modes().contains(&3) {
             bail!("--adaptive-residual requires mode 3 in --modes (for example --modes 0,2,3)");
         }
+        if self.rd_candidates < 1 {
+            bail!("--rd-candidates must be at least 1");
+        }
+        if self.rd_candidates > 1 {
+            if self.effective_lambda().is_none() {
+                bail!(
+                    "--rd-candidates requires the RD path; supply --lambda with legacy thresholds or --method"
+                );
+            }
+            if !matches!(self.method, None | Some(MethodArg::Exhaustive)) {
+                bail!(
+                    "--rd-candidates > 1 requires the exhaustive search (omit --method or use --method exhaustive); other methods propose one candidate"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -447,6 +473,42 @@ mod tests {
         ] {
             parse(&args).validate().expect("supported parameter bounds");
         }
+    }
+
+    #[test]
+    fn rd_candidates_above_one_require_the_rd_exhaustive_path() {
+        assert_eq!(parse(&[]).rd_candidates, 1);
+        assert_eq!(parse(&["--rd-candidates", "1"]).rd_candidates, 1);
+        // Above 1 needs the RD path and the exhaustive search.
+        assert!(parse(&["--rd-candidates", "3"]).validate().is_ok());
+        assert!(parse(&["--lambda", "200", "--rd-candidates", "3"])
+            .validate()
+            .is_ok());
+        assert!(parse(&[
+            "--method",
+            "exhaustive",
+            "--lambda",
+            "200",
+            "--rd-candidates",
+            "3"
+        ])
+        .validate()
+        .is_ok());
+        // A legacy threshold, a candidate-restricted method, and zero are all refused.
+        assert!(parse(&["--rd-candidates", "3", "-r", "8"])
+            .validate()
+            .is_err());
+        assert!(parse(&[
+            "--method",
+            "fisher",
+            "--lambda",
+            "200",
+            "--rd-candidates",
+            "3"
+        ])
+        .validate()
+        .is_err());
+        assert!(parse(&["--rd-candidates", "0"]).validate().is_err());
     }
 
     #[test]
@@ -515,6 +577,7 @@ fn main() -> Result<()> {
         allowed_modes,
         adaptive_density: cli.adaptive_density,
         residual_quantisation: residual_policy(&cli),
+        rd_candidates: cli.rd_candidates,
     };
 
     if let Some(method_arg) = cli.method {
@@ -552,6 +615,7 @@ fn main() -> Result<()> {
         subsampling: cli.subsampling.into(),
         adaptive_density: options.adaptive_density,
         allowed_modes: options.allowed_modes,
+        rd_candidates: cli.rd_candidates,
     };
 
     let (width, height) = (image.width(), image.height());

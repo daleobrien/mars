@@ -13,11 +13,15 @@
 //!    (encode -> write -> read -> decode) with reasonable PSNR-Y, in both 4:4:4 and
 //!    4:2:0, and 4:2:0 does not cost more total bytes than 4:4:4 at matched `t_rms`.
 //! 3. If the real Kodak corpus is present (`corpus/images/kodak/kodim01.png` -- fetched
-//!    by `scripts/fetch-corpus.sh`, not committed), one real colour photograph round-trips
-//!    through encode/decode with PSNR-Y above a sanity floor, in both subsampling modes,
-//!    and 4:2:0 again does not exceed 4:4:4's total bytes. If the corpus is absent this
-//!    check is skipped with a message, not failed -- the same convention `funnel_gate.rs`
-//!    and `classical_methods_gate.rs` already use for corpus/oracle-dependent checks.
+//!    by `scripts/fetch-corpus.sh`, not committed), a 256x256 crop of one real colour
+//!    photograph round-trips through encode/decode with PSNR-Y above a sanity floor, in
+//!    both subsampling modes, and 4:2:0 again does not exceed 4:4:4's total bytes. If the
+//!    corpus is absent this check is skipped with a message, not failed -- the same
+//!    convention `funnel_gate.rs` and `classical_methods_gate.rs` already use for
+//!    corpus/oracle-dependent checks. The crop is deliberate: the encoded frame size does
+//!    not enter this gate's contract (container round trip + chroma byte ordering), while
+//!    the full 768x512 frame dominated the whole `cargo test -p mars-codec` run -- ~90s
+//!    even at the dev profile's opt-level 2, and ~23 minutes at opt-level 0.
 //!
 //! Does **not** check: BD-rate against any anchor codec, the full 24-image corpus, or
 //! MS-SSIM-based comparisons -- all open per `docs/decisions.md` D38's scope-cut note.
@@ -69,6 +73,7 @@ fn round_trip_psnr_y_and_bytes(img: &Image, subsampling: Subsampling) -> (f64, u
         subsampling,
         adaptive_density: false,
         allowed_modes: [true; 4],
+        rd_candidates: 1,
     };
     let (bytes, _stats) = encode_color_image(img, &cfg);
     let decoded = decode_color_image(&bytes, 10).expect("decode of what we just encoded");
@@ -126,6 +131,7 @@ fn gray_image_round_trips_through_the_colour_container() {
         subsampling: Subsampling::Yuv444,
         adaptive_density: false,
         allowed_modes: [true; 4],
+        rd_candidates: 1,
     };
     let (bytes, _stats) = encode_color_image(&img, &cfg);
     let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -144,6 +150,11 @@ fn real_kodak_image_round_trips_if_the_corpus_is_present() {
     }
     let img = read_image(path, None).expect("reading the Kodak fixture");
     assert_eq!(img.color(), ColorSpace::Rgb);
+    // The encoder configuration below is what this gate pins; the frame size is incidental
+    // (see the module doc). Cropping keeps every container/chroma code path and real
+    // photographic content at a fraction of the cost.
+    let img = img.crop_top_left(256, 256);
+    assert_eq!((img.width(), img.height()), (256, 256));
 
     let (psnr_444, bytes_444) = round_trip_psnr_y_and_bytes(&img, Subsampling::Yuv444);
     let (psnr_420, bytes_420) = round_trip_psnr_y_and_bytes(&img, Subsampling::Yuv420);

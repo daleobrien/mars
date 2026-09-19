@@ -73,6 +73,14 @@ pub struct EncodeOptions {
     pub allowed_modes: [bool; 4],
     pub adaptive_density: bool,
     pub residual_quantisation: ResidualQuantisation,
+    /// P5c: how many of the provider's best-RMS domain candidates compete for modes 2/3,
+    /// instead of only the minimum-RMS winner. `1` is the historical behaviour and is
+    /// byte-identical to it (`search_top_k`'s strict-`<` tie-break is what preserves that).
+    /// Values above `1` require a provider that can rank candidates -- only
+    /// [`ExhaustiveSearch`] does -- and are a deliberate quality extension: they add no
+    /// stream syntax, so the winner's coordinate/coefficient fields are already fully priced
+    /// by [`crate::mars_format::leaf_events`], but they do add per-leaf mode-pricing work.
+    pub rd_candidates: usize,
 }
 
 impl Default for EncodeOptions {
@@ -81,6 +89,7 @@ impl Default for EncodeOptions {
             allowed_modes: [true; 4],
             adaptive_density: false,
             residual_quantisation: ResidualQuantisation::default(),
+            rd_candidates: 1,
         }
     }
 }
@@ -413,10 +422,37 @@ pub struct SearchOutcome {
     pub evals: u64,
 }
 
+/// Up to `max` of the provider's best fitted candidates for one range block, ascending by
+/// RMS with equal-RMS ties in the provider's own encounter order, plus the provider's
+/// search evaluation count. P5c's opt-in shape for letting several candidates compete for
+/// modes 2/3 rather than only the winner of [`SearchOutcome`].
+pub struct RankedCandidates {
+    pub candidates: Vec<Candidate>,
+    pub evals: u64,
+}
+
 /// Shared search backend for the codec's parallel partition walks.
 pub trait SearchProvider: Sync {
     /// Search a range block using the supplied effective stride and fit parameters.
     fn search(&self, request: &SearchRequest<'_>) -> SearchOutcome;
+
+    /// [`SearchProvider::search`] widened to the best `max` candidates. The same scanned
+    /// candidates are counted once, so `evals` matches [`SearchOutcome::evals`] for every
+    /// provider; ranking a provider already computed its fits to find the winner, so this
+    /// costs no extra evaluations.
+    ///
+    /// The default returns only the single winner, which is correct for any provider whose
+    /// own retrieval proposes one candidate (or whose budget cannot rank them): `max == 1`
+    /// is exactly [`SearchProvider::search`], and `max > 1` degrades to one competitor
+    /// rather than inventing candidates. Callers that need `max > 1` must therefore state
+    /// it, and [`ExhaustiveSearch`] is the provider that honours it.
+    fn search_candidates(&self, request: &SearchRequest<'_>, max: usize) -> RankedCandidates {
+        let outcome = self.search(request);
+        RankedCandidates {
+            candidates: outcome.candidate.into_iter().take(max.max(1)).collect(),
+            evals: outcome.evals,
+        }
+    }
 }
 
 /// The existing exhaustive search, with unchanged fitting and tie-breaking.
@@ -434,6 +470,11 @@ impl SearchProvider for ExhaustiveSearch {
             request.shift,
         );
         SearchOutcome { candidate, evals }
+    }
+
+    fn search_candidates(&self, request: &SearchRequest<'_>, max: usize) -> RankedCandidates {
+        let (candidates, evals) = search_top_k(request, max);
+        RankedCandidates { candidates, evals }
     }
 }
 
@@ -475,11 +516,12 @@ fn search(
     search_with_shift(image, contracted, row, col, size, params, params.shift)
 }
 
-/// [`search`]'s actual body, taking the domain-search stride explicitly instead of always
-/// reading `params.shift` -- Step 16's hook for content-adaptive domain-pool density.
-/// [`search`] itself is `search_with_shift(.., params.shift)`, so every pre-Step-16 caller
-/// is byte-for-byte unaffected; only [`walk_rd`]'s new `Ctx::adaptive_density` path calls
-/// this directly with a per-block stride computed from [`block_rms`].
+/// [`search`]'s single-winner entry point, taking the domain-search stride explicitly
+/// instead of always reading `params.shift` -- Step 16's hook for content-adaptive
+/// domain-pool density. [`search`] itself is `search_with_shift(.., params.shift)`, so every
+/// pre-Step-16 caller is byte-for-byte unaffected; only [`walk_rd`]'s new
+/// `Ctx::adaptive_density` path calls this directly with a per-block stride computed from
+/// [`block_rms`]. Thin wrapper over [`search_top_k`], which does the actual scan.
 fn search_with_shift(
     image: &Plane,
     contracted: &Contracted,
@@ -489,6 +531,53 @@ fn search_with_shift(
     params: &EncodeParams,
     shift: u32,
 ) -> (Option<Candidate>, u64) {
+    let (mut winners, evals) = search_top_k(
+        &SearchRequest {
+            image,
+            contracted,
+            params,
+            row,
+            col,
+            size,
+            shift,
+        },
+        1,
+    );
+    (winners.pop(), evals)
+}
+
+/// Insert `candidate` into the ascending-RMS `top` list, keeping at most `k`. The scan
+/// uses a strict `rms <` comparison, so equal-RMS candidates keep their encounter order and
+/// `k == 1` reproduces `search_with_shift`'s historical `best.is_none_or(|b| rms < b.rms)`
+/// winner exactly (including which of two tied candidates wins).
+fn retain_top_k(top: &mut Vec<Candidate>, candidate: Candidate, k: usize) {
+    let pos = top
+        .iter()
+        .position(|b| candidate.rms < b.rms)
+        .unwrap_or(top.len());
+    if pos < k {
+        top.insert(pos, candidate);
+        top.truncate(k);
+    }
+}
+
+/// [`search_with_shift`]'s actual body, keeping the best `max` candidates instead of only
+/// the winner (P5c). The scan and its fitting are identical at every `max`, so `max == 1`
+/// returns exactly the historical winner and the same `evals`; `max > 1` only changes which
+/// candidates are retained, never how much work the search does.
+///
+/// Takes the same [`SearchRequest`] the [`SearchProvider`] trait already carries -- those
+/// seven fields *are* this scan's inputs, so reusing the request also keeps the function
+/// inside the workspace's seven-argument lint.
+fn search_top_k(request: &SearchRequest<'_>, max: usize) -> (Vec<Candidate>, u64) {
+    debug_assert!(max >= 1, "a search always retains at least its winner");
+    let image = request.image;
+    let contracted = request.contracted;
+    let params = request.params;
+    let row = request.row;
+    let col = request.col;
+    let size = request.size;
+    let shift = request.shift;
     let (width, height) = (image.width() as u32, image.height() as u32);
     let px = image.as_slice();
     let stride = image.width();
@@ -520,13 +609,13 @@ fn search_with_shift(
         .collect();
 
     let Some(max_dom_row) = height.checked_sub(2 * size) else {
-        return (None, 0);
+        return (Vec::new(), 0);
     };
     let Some(max_dom_col) = width.checked_sub(2 * size) else {
-        return (None, 0);
+        return (Vec::new(), 0);
     };
 
-    let mut best: Option<Candidate> = None;
+    let mut top: Vec<Candidate> = Vec::with_capacity(max);
     let mut evals = 0u64;
     let mut dom_row = 0u32;
     while dom_row <= max_dom_row {
@@ -554,8 +643,9 @@ fn search_with_shift(
                 let (qalfa, qbeta, rms) =
                     fit_f64(moments, params.max_alfa, params.bits_alfa, params.bits_beta);
                 evals += 1;
-                if best.is_none_or(|b| rms < b.rms) {
-                    best = Some(Candidate {
+                retain_top_k(
+                    &mut top,
+                    Candidate {
                         dom_row,
                         dom_col,
                         isometry: k,
@@ -563,14 +653,15 @@ fn search_with_shift(
                         qbeta,
                         rms,
                         moments,
-                    });
-                }
+                    },
+                    max,
+                );
             }
             dom_col += shift;
         }
         dom_row += shift;
     }
-    (best, evals)
+    (top, evals)
 }
 
 /// `(ΣD, ΣD²)` over one domain position's `size x size` samples — independent of isometry,
@@ -872,6 +963,7 @@ pub fn encode_image_with_search(
             rate: Some(&rate),
             allowed_modes,
             adaptive_density,
+            rd_candidates: options.rd_candidates,
         };
         let result = walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda);
         return EncodeOutcome {
@@ -894,6 +986,7 @@ pub fn encode_image_with_search(
         rate: None,
         allowed_modes,
         adaptive_density: false,
+        rd_candidates: options.rd_candidates,
     };
     let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
     EncodeOutcome {
@@ -938,6 +1031,8 @@ fn build_rate_snapshot(
         rate: None,
         allowed_modes: [true; 4],
         adaptive_density: false,
+        // The warm-up is a legacy `walk`, which has no mode competition to widen.
+        rd_candidates: 1,
     };
     let (leaves, evals) = walk(&warmup_ctx, 0, 0, hdr.virtual_size());
     let rate = RateModels::from_leaves(hdr, &leaves)
@@ -995,6 +1090,7 @@ pub fn audit_rd(
                 rate: Some(&rate),
                 allowed_modes: options.allowed_modes,
                 adaptive_density: options.adaptive_density,
+                rd_candidates: options.rd_candidates,
             };
             let result = walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda);
             (
@@ -1017,6 +1113,7 @@ pub fn audit_rd(
                 // construction, which is exactly P5a's starting mode set.
                 allowed_modes: options.allowed_modes,
                 adaptive_density: false,
+                rd_candidates: options.rd_candidates,
             };
             let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
             (
@@ -1074,6 +1171,10 @@ struct Ctx<'a> {
     /// own `true` arm, so every pre-Step-16 caller (including [`walk`], which never reads
     /// this field at all) is byte-for-byte unaffected.
     adaptive_density: bool,
+    /// P5c: how many top-RMS candidates [`walk_rd`] offers [`best_mode_leaf`]'s modes 2/3.
+    /// `1` reproduces the single-winner behaviour exactly. Read only by [`walk_rd`]; the
+    /// legacy [`walk`] has no mode competition to widen.
+    rd_candidates: usize,
 }
 
 /// Step 12: below this block size, a `rayon::join`'s task-spawn/steal overhead costs more
@@ -1293,13 +1394,16 @@ fn event_bits(rate: &RateModels, events: &[mars_entropy::Event]) -> f64 {
 /// legacy top-down path keeps that override unchanged (`lambda: None` never reaches this
 /// function), since modes 1/3 have no representation in the raw `.ifs` bitstream that path
 /// still targets (`crate::ifs::Leaf`'s doc).
+///
+/// `ranked` is the provider's ascending-RMS candidate list: exactly the single winner on
+/// every pre-P5c encode, or up to `Ctx::rd_candidates` candidates when that opt-in is set.
 #[allow(clippy::too_many_arguments)]
 fn best_mode_leaf(
     ctx: &Ctx,
     row: u32,
     col: u32,
     size: u32,
-    candidate: Option<Candidate>,
+    ranked: &[Candidate],
     rate: &RateModels,
     lambda: f64,
     size_class: u32,
@@ -1321,7 +1425,7 @@ fn best_mode_leaf(
     }
     let s0 = i64::from(size) * i64::from(size);
 
-    let mut candidates: Vec<(Leaf, f64, f64)> = Vec::with_capacity(4);
+    let mut candidates: Vec<(Leaf, f64, f64)> = Vec::with_capacity(2 + 2 * ranked.len());
     let allowed = ctx.allowed_modes;
 
     // Mode 0 -- flat: exactly §8.1's `best_beta` refit, priced as its own competing mode
@@ -1376,12 +1480,18 @@ fn best_mode_leaf(
         candidates.push((leaf, sse, r));
     }
 
-    // Modes 2/3 -- fractal, and fractal + residual -- only when the search actually found
-    // a legal domain candidate whose fit did not collapse to alfa == 0 (a genuinely
+    // Modes 2/3 -- fractal, and fractal + residual -- for every domain candidate the
+    // provider ranked (P5c). With the default single-winner list this is exactly the
+    // historical "one candidate" case; a wider list lets a candidate with slightly worse
+    // RMS but cheaper coordinate/coefficient symbols or a better residual fit win on `J`.
+    // A candidate whose fit collapsed to alfa == 0 is skipped: that is a genuinely
     // domain-independent block, which mode 0/1 already cover with no domain fields to
-    // code at all).
-    if let Some(c) = candidate {
-        if c.qalfa >= 1 && allowed[2] {
+    // code at all.
+    for c in ranked {
+        if c.qalfa < 1 {
+            continue;
+        }
+        if allowed[2] {
             let leaf2 = Leaf {
                 row,
                 col,
@@ -1403,9 +1513,9 @@ fn best_mode_leaf(
             );
             candidates.push((leaf2, sse2, r2));
         }
-        if c.qalfa >= 1 && allowed[3] {
+        if allowed[3] {
             let (levels, sse3) =
-                residual_for_candidate(&block, px, stride, size_u, &c, ctx.params, hdr);
+                residual_for_candidate(&block, px, stride, size_u, c, ctx.params, hdr);
             let leaf3 = Leaf {
                 row,
                 col,
@@ -1683,10 +1793,7 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
     } else {
         ctx.params.shift
     };
-    let SearchOutcome {
-        candidate,
-        evals: block_evals,
-    } = ctx.provider.search(&SearchRequest {
+    let request = SearchRequest {
         image: ctx.image,
         contracted: ctx.contracted,
         params: ctx.params,
@@ -1694,9 +1801,40 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
         col,
         size,
         shift,
-    });
-    let (leaf, leaf_d, leaf_r) =
-        best_mode_leaf(ctx, row, col, size, candidate, rate, lambda, size_class);
+    };
+    // P5c: `rd_candidates == 1` (the default) keeps the historical single-winner call
+    // exactly -- same `search()`, no extra allocation -- while above 1 the provider's
+    // ranked list widens modes 2/3's competition. Only `ExhaustiveSearch` ranks candidates;
+    // `encmars` and the experiment schema both refuse `rd_candidates > 1` with any other
+    // provider, so a provider returning one candidate here is a caller error rather than a
+    // silently narrowed experiment.
+    let (leaf, leaf_d, leaf_r, block_evals) = if ctx.rd_candidates <= 1 {
+        let outcome = ctx.provider.search(&request);
+        let (leaf, d, r) = best_mode_leaf(
+            ctx,
+            row,
+            col,
+            size,
+            outcome.candidate.as_slice(),
+            rate,
+            lambda,
+            size_class,
+        );
+        (leaf, d, r, outcome.evals)
+    } else {
+        let outcome = ctx.provider.search_candidates(&request, ctx.rd_candidates);
+        let (leaf, d, r) = best_mode_leaf(
+            ctx,
+            row,
+            col,
+            size,
+            &outcome.candidates,
+            rate,
+            lambda,
+            size_class,
+        );
+        (leaf, d, r, outcome.evals)
+    };
 
     if size <= hdr.min_size {
         // Never split below min_size -- mars_format never emits a split flag here either.
@@ -2643,6 +2781,7 @@ mod tests {
                 rate: Some(&rate),
                 allowed_modes,
                 adaptive_density: false,
+                rd_candidates: 1,
             };
             walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda)
         };
@@ -2694,5 +2833,142 @@ mod tests {
             "estimate-vs-real gap (real bits - internal r estimate): 2-mode={gap_2mode:.1}, \
              4-mode={gap_4mode:.1} (4-mode's larger gap is the expected signature)"
         );
+    }
+
+    /// P5c: retaining more candidates changes only *which* fits are kept, never the scan.
+    /// `max == 1` must reproduce [`search_with_shift`]'s winner exactly (including the
+    /// first-encountered tie rule), and a larger `max` must return an ascending-RMS list
+    /// whose head is that same winner and whose length is bounded by `max`.
+    #[test]
+    fn top_k_search_retains_an_ascending_rms_prefix_with_an_unchanged_winner() {
+        let image = textured_image(64, 64);
+        let contracted = Contracted::build(&image);
+        let params = rd_params(200.0);
+        let (row, col, size, shift) = (0u32, 0u32, 16u32, params.shift);
+
+        let request = SearchRequest {
+            image: &image,
+            contracted: &contracted,
+            params: &params,
+            row,
+            col,
+            size,
+            shift,
+        };
+        let (winner, evals) =
+            search_with_shift(&image, &contracted, row, col, size, &params, shift);
+        let winner = winner.expect("a 64x64 image has legal domains at size 16");
+
+        let (top1, evals1) = search_top_k(&request, 1);
+        assert_eq!(
+            evals1, evals,
+            "ranking must not change the scan's evaluation count"
+        );
+        assert_eq!(top1.len(), 1);
+        assert_eq!(top1[0].rms, winner.rms);
+        assert_eq!(top1[0].dom_row, winner.dom_row);
+        assert_eq!(top1[0].dom_col, winner.dom_col);
+        assert_eq!(top1[0].isometry, winner.isometry);
+
+        let (top3, evals3) = search_top_k(&request, 3);
+        assert_eq!(evals3, evals, "the very same candidates were scanned");
+        assert_eq!(top3.len(), 3);
+        assert_eq!(top3[0].rms, winner.rms, "the winner is still first");
+        assert!(
+            top3[0].rms <= top3[1].rms && top3[1].rms <= top3[2].rms,
+            "candidates must be ascending by RMS"
+        );
+        let distinct = top3
+            .iter()
+            .map(|c| (c.dom_row, c.dom_col, c.isometry))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(distinct.len(), 3, "three distinct domain/isometry fits");
+    }
+
+    /// P5c: a wider candidate list is a strict superset of the single-winner list at every
+    /// node, so under the identical frozen snapshot it can only lower (or tie) the aggregate
+    /// `J = D + lambda*R` -- the same bottom-up induction as
+    /// [`aggregate_estimated_cost_is_provably_no_worse_under_more_modes_even_though_real_bpp_can_be`],
+    /// applied to the candidate axis rather than the mode mask. The repeat run pins
+    /// determinism of the wider list.
+    #[test]
+    fn aggregate_estimated_cost_is_provably_no_worse_under_more_candidates() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let params = rd_params(200.0);
+        let hdr = build_header(&image, &params, ResidualQstep::LEGACY);
+        let contracted = Contracted::build(&image);
+        let (rate, _) = build_rate_snapshot(&image, &hdr, &contracted, &params);
+        let lambda = params.lambda.unwrap();
+
+        let run = |rd_candidates: usize| -> RdResult {
+            let ctx = Ctx {
+                image: &image,
+                contracted: &contracted,
+                provider: &ExhaustiveSearch,
+                hdr: &hdr,
+                params: &params,
+                rate: Some(&rate),
+                // Modes 2/3 on: without them no candidate can ever compete, so the
+                // assertion would be vacuous.
+                allowed_modes: [true, false, true, true],
+                adaptive_density: false,
+                rd_candidates,
+            };
+            walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda)
+        };
+        let bytes = |leaves: &[Leaf]| -> Vec<u8> {
+            crate::mars_format::write(&hdr, leaves).expect("a valid partition always writes")
+        };
+
+        let one = run(1);
+        let three = run(3);
+        let three_again = run(3);
+        let j = |r: &RdResult| r.d + lambda * r.r;
+        assert!(
+            j(&three) <= j(&one) + 1e-6,
+            "3-candidate internal J ({:.1}) must never exceed the 1-candidate J ({:.1}) under \
+             the identical frozen snapshot -- a failure is in best_mode_leaf's/walk_rd's \
+             minimisation, not the estimate",
+            j(&three),
+            j(&one)
+        );
+        assert_eq!(
+            bytes(&three.leaves),
+            bytes(&three_again.leaves),
+            "the wider candidate list must be deterministic"
+        );
+    }
+
+    /// P5c must not move the default path: an explicitly-written `rd_candidates: 1`
+    /// reproduces the default options' bytes exactly, and widening the candidate list is a
+    /// no-op for a partition whose competing modes never reference a domain (mode 0 only).
+    #[test]
+    fn rd_candidates_one_is_byte_identical_to_the_default() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let params = rd_params(200.0);
+        let encode = |options: &EncodeOptions| {
+            let (hdr, leaves, _, _) = encode_image_with_options(&image, &params, options);
+            crate::mars_format::write(&hdr, &leaves).expect("a valid partition always writes")
+        };
+
+        let base = EncodeOptions {
+            allowed_modes: [true, false, true, true],
+            ..EncodeOptions::default()
+        };
+        let explicit_one = EncodeOptions {
+            rd_candidates: 1,
+            ..base
+        };
+        assert_eq!(encode(&base), encode(&explicit_one));
+
+        let mode0 = EncodeOptions {
+            allowed_modes: [true, false, false, false],
+            ..EncodeOptions::default()
+        };
+        let mode0_wide = EncodeOptions {
+            rd_candidates: 4,
+            ..mode0
+        };
+        assert_eq!(encode(&mode0), encode(&mode0_wide));
     }
 }

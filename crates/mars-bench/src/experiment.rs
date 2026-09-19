@@ -619,6 +619,9 @@ fn encode_args(
     if case.arm.adaptive_density {
         args.push("--adaptive-density".into());
     }
+    if case.arm.rd_candidates != 1 {
+        args.extend(["--rd-candidates".into(), case.arm.rd_candidates.to_string()]);
+    }
     if case.arm.adaptive_residual {
         args.push("--adaptive-residual".into());
     }

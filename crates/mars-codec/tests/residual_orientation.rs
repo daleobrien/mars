@@ -99,6 +99,7 @@ fn encoded_residuals_reconstruct_in_all_eight_orientations_after_wire_roundtrip(
                 allowed_modes: [false, false, false, true],
                 adaptive_density: false,
                 residual_quantisation: policy,
+                rd_candidates: 1,
             },
         );
         assert_eq!(header.residual_qstep, expected_step);

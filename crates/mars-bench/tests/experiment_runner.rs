@@ -106,6 +106,7 @@ fn arm(label: &str) -> Arm {
         budget: None,
         seed: None,
         adaptive_density: false,
+        rd_candidates: 1,
         adaptive_residual: false,
         progressive: false,
         iterations: None,
