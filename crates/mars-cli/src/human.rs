@@ -135,12 +135,13 @@ pub fn plan_regions(
             eye_distance = 0.25 * box_width.max(box_height).max(1.0);
         }
 
-        // Eyes: both keypoints, padded by half the interocular distance so the brows and
-        // lashes -- where errors are most visible -- are covered too. This is the one box
-        // with a scale of its own (`eye_scale`), so it can out-refine the nose and mouth.
+        // Eyes: both keypoints, padded by 0.3 of the interocular distance -- enough to take
+        // in the lashes and the lower brow, where errors are most visible, without spreading
+        // onto the cheeks or down to the nose. This is the one box with a scale of its own
+        // (`eye_scale`), so it can out-refine the nose and mouth.
         if let Some(region) = padded_region(
             points_bounds(&face.keypoints[0..2]),
-            0.5 * eye_distance,
+            0.3 * eye_distance,
             width,
             height,
             eye_scale,
