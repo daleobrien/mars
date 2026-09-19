@@ -1,5 +1,5 @@
-//! Image readers: PGM (P2 and P5), headerless raw, PNG and JPEG; writers for PNG, JPEG
-//! and PNM.
+//! Image readers: PGM (P2 and P5), headerless raw, PNG, JPEG, TIFF, WebP and TGA; writers
+//! for PNG, JPEG, TIFF, WebP, TGA and PNM.
 //!
 //! Raw has no header, so its dimensions must be supplied by the caller. Mars 1 takes
 //! them on the command line (`-w`/`-h`); we require them explicitly rather than guessing,
@@ -22,7 +22,10 @@ pub enum ImageError {
     },
     #[error("{path}: {reason}")]
     Malformed { path: String, reason: String },
-    #[error("{path}: unsupported format; expected .pgm, .ppm, .png, .jpg/.jpeg or .raw/.y/.gray")]
+    #[error(
+        "{path}: unsupported format; expected .pgm, .ppm, .png, .jpg/.jpeg, .tga, .tif/.tiff, \
+         .webp or .raw/.y/.gray"
+    )]
     UnknownFormat { path: String },
     #[error("{path}: raw images have no header; dimensions must be given explicitly")]
     RawDimensionsRequired { path: String },
@@ -57,11 +60,13 @@ pub fn read_image(path: &Path, raw_dims: Option<(usize, usize)>) -> Result<Image
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    // Headerless raw has no signature at all and needs its name to be read; PNM's magic
-    // is plain text that arbitrary bytes could imitate, so neither is autodetected.
+    // Headerless raw has no signature at all and needs its name to be read; PNM's magic is
+    // plain text that arbitrary bytes could imitate, and TGA has no leading signature to
+    // look for, so all three are dispatched by extension rather than by content.
     match ext.as_str() {
         "pgm" => return read_pgm(path).map(Image::gray),
         "ppm" => return read_ppm(path),
+        "tga" => return read_encoded(path),
         "raw" | "y" | "gray" => {
             let (w, h) = raw_dims.ok_or_else(|| ImageError::RawDimensionsRequired {
                 path: path.display().to_string(),
@@ -70,9 +75,9 @@ pub fn read_image(path: &Path, raw_dims: Option<(usize, usize)>) -> Result<Image
         }
         _ => {}
     }
-    // PNG and JPEG carry unambiguous binary signatures, so those are detected from the
-    // file's own leading bytes: a mis-named or extension-less file still reads as what
-    // it is, and an unrecognised blob is refused without guessing.
+    // PNG, JPEG, TIFF and WebP carry unambiguous binary signatures, so those are detected
+    // from the file's own leading bytes: a mis-named or extension-less file still reads as
+    // what it is, and an unrecognised blob is refused without guessing.
     if sniff_encoded(path)? {
         read_encoded(path)
     } else {
@@ -82,19 +87,22 @@ pub fn read_image(path: &Path, raw_dims: Option<(usize, usize)>) -> Result<Image
     }
 }
 
-/// Does `path` begin with a PNG or JPEG signature?
+/// Does `path` begin with a signature `read_encoded` can decode by content?
 ///
-/// `read_image` uses this to autodetect those two formats from content rather than name.
-/// The check is deliberately limited to their unambiguous binary signatures: PNM's magic
-/// is text that arbitrary bytes could imitate, and headerless raw has none at all.
+/// `read_image` uses this to autodetect these formats from content rather than name. It
+/// covers the formats with an unambiguous binary signature -- PNG, JPEG, TIFF and WebP.
+/// PNM's magic is text that arbitrary bytes could imitate, headerless raw has none at all,
+/// and TGA has no leading signature to look for, so those three are named instead.
 fn sniff_encoded(path: &Path) -> Result<bool, ImageError> {
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
     const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF];
+    const TIFF_LITTLE_ENDIAN: &[u8] = b"II*\0";
+    const TIFF_BIG_ENDIAN: &[u8] = b"MM\0*";
     let mut file = fs::File::open(path).map_err(|source| ImageError::Io {
         path: path.display().to_string(),
         source,
     })?;
-    let mut head = [0u8; 8];
+    let mut head = [0u8; 12];
     let mut filled = 0;
     while filled < head.len() {
         match file.read(&mut head[filled..]) {
@@ -112,7 +120,13 @@ fn sniff_encoded(path: &Path) -> Result<bool, ImageError> {
         }
     }
     let head = &head[..filled];
-    Ok(head.starts_with(PNG) || head.starts_with(JPEG))
+    // WebP is a RIFF container: `RIFF` plus a 4-byte length, then the `WEBP` form tag.
+    let webp = head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WEBP";
+    Ok(head.starts_with(PNG)
+        || head.starts_with(JPEG)
+        || head.starts_with(TIFF_LITTLE_ENDIAN)
+        || head.starts_with(TIFF_BIG_ENDIAN)
+        || webp)
 }
 
 /// Read a headerless 8-bit grayscale raw plane of known dimensions.
@@ -290,6 +304,28 @@ fn write_encoded(
 /// format matters more than the colour-management neutrality `write_pnm` is for.
 pub fn write_png(path: &Path, image: &crate::image::Image) -> Result<(), ImageError> {
     write_encoded(path, image, image::ImageFormat::Png)
+}
+
+/// Write an image as TGA: 8-bit gray for a one-plane image, 8-bit RGB for a three-plane
+/// one. Lossless.
+pub fn write_tga(path: &Path, image: &crate::image::Image) -> Result<(), ImageError> {
+    write_encoded(path, image, image::ImageFormat::Tga)
+}
+
+/// Write an image as TIFF: 8-bit gray for a one-plane image, 8-bit RGB for a three-plane
+/// one. Lossless.
+pub fn write_tiff(path: &Path, image: &crate::image::Image) -> Result<(), ImageError> {
+    write_encoded(path, image, image::ImageFormat::Tiff)
+}
+
+/// Write an image as **lossless** WebP (VP8L): 8-bit gray for a one-plane image, 8-bit RGB
+/// for a three-plane one. The `image` crate exposes only the lossless encoder, so unlike
+/// `write_jpeg` there is no quality knob, and sample values round-trip exactly.
+///
+/// WebP has no grayscale mode, so a one-plane image is stored as RGB and reads back as
+/// three equal planes rather than one.
+pub fn write_webp(path: &Path, image: &crate::image::Image) -> Result<(), ImageError> {
+    write_encoded(path, image, image::ImageFormat::WebP)
 }
 
 /// Write an image as JPEG: 8-bit gray for a one-plane image, 8-bit RGB for a three-plane

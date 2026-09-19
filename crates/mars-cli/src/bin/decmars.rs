@@ -12,16 +12,19 @@ use mars_codec::color::{
 };
 use mars_codec::postprocess::smooth_boundaries;
 use mars_core::image::Image;
-use mars_core::io::{ImageError, write_jpeg_with_quality, write_png, write_pnm};
+use mars_core::io::{
+    ImageError, write_jpeg_with_quality, write_png, write_pnm, write_tga, write_tiff, write_webp,
+};
 
 /// Decompress a `.mars` bitstream to an image.
 #[derive(Parser)]
 struct Cli {
     /// Input `.mars` bitstream.
     input: PathBuf,
-    /// Output image path. `.png` writes a viewable PNG; `.jpg`/`.jpeg` a lossy JPEG
-    /// (inspection only -- it will not match the decode pixel-for-pixel); `.pgm`/`.ppm`
-    /// writes a raw PNM (single-plane for grayscale input, P6 colour for RGB input).
+    /// Output image path; the extension picks the format. `.png`, `.tga`, `.tif`/`.tiff`
+    /// and `.webp` (lossless) write those formats; `.jpg`/`.jpeg` a lossy JPEG (inspection
+    /// only -- it will not match the decode pixel-for-pixel); `.pgm`/`.ppm` a raw PNM
+    /// (single-plane for grayscale input, P6 colour for RGB input).
     output: PathBuf,
 
     /// Fixed-point iterations to run from the flat grey (128) seed. With `--auto`, this is
@@ -107,11 +110,17 @@ fn is_jpeg(ext: &str) -> bool {
 fn output_writer(ext: &str, quality: u8) -> Result<ImageWriter> {
     match ext {
         "png" => Ok(Box::new(write_png)),
+        "tga" => Ok(Box::new(write_tga)),
+        "tif" | "tiff" => Ok(Box::new(write_tiff)),
+        "webp" => Ok(Box::new(write_webp)),
         "pgm" | "ppm" => Ok(Box::new(write_pnm)),
         "jpg" | "jpeg" => Ok(Box::new(move |path, image| {
             write_jpeg_with_quality(path, image, quality)
         })),
-        _ => bail!("unsupported output extension {ext:?}; use .png, .jpg, .jpeg, .pgm or .ppm"),
+        _ => bail!(
+            "unsupported output extension {ext:?}; use .png, .jpg, .jpeg, .tga, .tif, .tiff, \
+             .webp, .pgm or .ppm"
+        ),
     }
 }
 

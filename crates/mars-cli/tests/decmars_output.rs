@@ -139,6 +139,29 @@ fn quality_out_of_range_is_rejected() {
 }
 
 #[test]
+fn tga_tiff_and_webp_outputs_are_selected_by_extension() {
+    let scratch = Scratch::new("formats");
+    let mars = encoded(&scratch);
+    for (name, expected_planes) in [
+        ("out.tga", 1),
+        ("out.tif", 1),
+        ("out.tiff", 1),
+        // WebP has no grayscale mode, so a gray decode reads back as three equal planes.
+        ("out.webp", 3),
+    ] {
+        let output = decode(&scratch, &mars, name, &[]);
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let image = read_image(&scratch.path(name), None).unwrap();
+        assert_eq!((image.width(), image.height()), (48, 48), "{name}");
+        assert_eq!(image.planes().len(), expected_planes, "{name}");
+    }
+}
+
+#[test]
 fn png_output_still_writes_without_quality() {
     let scratch = Scratch::new("png");
     let mars = encoded(&scratch);

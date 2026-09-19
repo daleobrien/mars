@@ -33,11 +33,13 @@ A plain encode uses RD partitioning at `--lambda 200`, modes `0,2` (flat and fra
 kodim01/02 comparisons, not a claim of universal optimality. RD can be slower than
 legacy threshold encoding. Library/benchmark defaults are unchanged.
 
-Inputs may be `.png`, `.jpg`/`.jpeg`, `.pgm`, `.ppm` or headerless raw, and PNG/JPEG are
-detected from the file's contents rather than its name. `decmars` picks its output format
-from the output filename's extension: `.png` (lossless), `.jpg`/`.jpeg` (lossy, for visual
-inspection only; `decmars --quality 1-100` sets its quality, default 75) or `.pgm`/`.ppm`
-(raw PNM).
+Inputs may be `.png`, `.jpg`/`.jpeg`, `.tga`, `.tif`/`.tiff`, `.webp`, `.pgm`, `.ppm` or
+headerless raw. PNG, JPEG, TIFF and WebP are detected from the file's contents rather than
+its name; TGA (which has no signature), PNM and raw are selected by extension. `decmars`
+picks its output format from the output filename's extension: `.png`, `.tga`, `.tif`/`.tiff`
+and `.webp` (all lossless, though WebP has no grayscale mode), `.jpg`/`.jpeg` (lossy, for
+visual inspection only; `decmars --quality 1-100` sets its quality, default 75) or
+`.pgm`/`.ppm` (raw PNM).
 
 - `--lambda 50`: prioritise quality; `--lambda 800`: prioritise smaller files.
 - `--subsampling 420`: optionally trade chroma detail for smaller colour files.

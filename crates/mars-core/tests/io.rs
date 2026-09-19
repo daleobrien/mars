@@ -5,12 +5,12 @@
 //! §2.1's failure mode. So the fixtures are hand-written and the expected bytes are
 //! spelled out.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mars_core::image::Image;
 use mars_core::io::{
     read_image, read_pgm, read_ppm, read_raw, write_jpeg, write_jpeg_with_quality, write_png,
-    write_pnm, ImageError,
+    write_pnm, write_tga, write_tiff, write_webp, ImageError,
 };
 
 fn scratch(name: &str) -> PathBuf {
@@ -229,6 +229,80 @@ fn jpeg_quality_trades_size_for_detail() {
     let back = read_image(&high_path, None).unwrap();
     assert_eq!((back.width(), back.height()), (16, 16));
     assert_eq!(back.planes().len(), 1);
+}
+
+/// Assert that `write` lands `img` on disk in a form `read_image` reads back sample-for-
+/// sample and plane-for-plane.
+fn assert_exact_round_trip(
+    name: &str,
+    img: &Image,
+    write: fn(&Path, &Image) -> Result<(), ImageError>,
+) {
+    let path = scratch(name);
+    write(&path, img).unwrap();
+    let back = read_image(&path, None).unwrap();
+    assert_eq!(
+        (back.width(), back.height()),
+        (img.width(), img.height()),
+        "{name}"
+    );
+    assert_eq!(back.planes().len(), img.planes().len(), "{name}");
+    for (a, b) in img.planes().iter().zip(back.planes()) {
+        assert_eq!(a.as_slice(), b.as_slice(), "{name}");
+    }
+}
+
+fn colour_fixture() -> Image {
+    Image::rgb(
+        mars_core::image::Plane::from_vec(2, 2, vec![1, 2, 3, 4]),
+        mars_core::image::Plane::from_vec(2, 2, vec![10, 20, 30, 40]),
+        mars_core::image::Plane::from_vec(2, 2, vec![100, 200, 250, 5]),
+    )
+}
+
+#[test]
+fn tga_tiff_and_webp_round_trip_colour_exactly() {
+    let img = colour_fixture();
+    assert_exact_round_trip("rt.tga", &img, write_tga);
+    assert_exact_round_trip("rt.tiff", &img, write_tiff);
+    assert_exact_round_trip("rt.webp", &img, write_webp);
+}
+
+#[test]
+fn tga_and_tiff_keep_a_gray_image_gray() {
+    // Unlike WebP, both carry a real grayscale mode, so the plane count survives too.
+    let img = Image::gray(mars_core::image::Plane::from_vec(2, 2, vec![7, 8, 9, 10]));
+    assert_exact_round_trip("gray.tga", &img, write_tga);
+    assert_exact_round_trip("gray.tiff", &img, write_tiff);
+}
+
+#[test]
+fn tiff_and_webp_are_autodetected_under_an_unknown_extension() {
+    let img = colour_fixture();
+    let tiff = scratch("mystery-tiff.dat");
+    write_tiff(&tiff, &img).unwrap();
+    let back = read_image(&tiff, None).unwrap();
+    assert_eq!((back.width(), back.height()), (2, 2));
+    assert_eq!(back.planes().len(), 3);
+
+    let webp = scratch("mystery-webp.dat");
+    write_webp(&webp, &img).unwrap();
+    let back = read_image(&webp, None).unwrap();
+    assert_eq!((back.width(), back.height()), (2, 2));
+    assert_eq!(back.planes().len(), 3);
+}
+
+#[test]
+fn tga_without_its_extension_is_not_autodetected() {
+    // TGA has no leading signature, so it is dispatched by extension only: an unrecognised
+    // extension is refused rather than guessed at.
+    let img = colour_fixture();
+    let path = scratch("mystery-tga.dat");
+    write_tga(&path, &img).unwrap();
+    assert!(matches!(
+        read_image(&path, None),
+        Err(ImageError::UnknownFormat { .. })
+    ));
 }
 
 #[test]

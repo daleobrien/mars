@@ -45,8 +45,9 @@ Every crate in the graph at Step 1 resolves to a GPLv2-compatible licence:
 
 | Licence chosen | Crates |
 |---|---|
-| MIT | the large majority, including `anyhow`, `clap`, `serde`, `serde_json`, `sha2`, `thiserror`, `image`, `png`, `flate2`, `memchr`, `byteorder-lite` |
-| MIT (or Apache-2.0 or Zlib) | `zune-jpeg`, `zune-core` — `image`'s JPEG codec, enabled by the `jpeg` feature alongside `png`; MIT chosen |
+| MIT | the large majority, including `anyhow`, `clap`, `serde`, `serde_json`, `sha2`, `thiserror`, `image`, `png`, `flate2`, `memchr`, `byteorder-lite`, `tiff`, `fax` |
+| MIT (or Apache-2.0 or Zlib) | `zune-jpeg`, `zune-core` — `image`'s JPEG codec; MIT chosen |
+| MIT (or Apache-2.0) | `image-webp` (`image`'s WebP codec) and its `weezl`, `half`, `quick-error` dependencies; MIT chosen |
 | BSD-3-Clause | `moxcms`, `pxfm` (Apache-2.0 OR BSD-3-Clause — pulled in by `image`) |
 | Unicode-3.0 | `unicode-ident`, whose expression is `(MIT OR Apache-2.0) AND Unicode-3.0` |
 | Zlib | `bytemuck`, `miniz_oxide` (also available under MIT) |
