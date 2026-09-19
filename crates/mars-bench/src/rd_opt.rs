@@ -12,11 +12,11 @@
 //! Both curves measure `.mars` v0 (entropy-coded) bpp, since Step 14 optimises the actual
 //! coded rate, not the raw `.ifs` bit count.
 
-use mars_codec::encode::{EncodeParams, encode_image};
-use mars_codec::ifs::{Leaf, decode_iterative};
+use mars_codec::encode::{encode_image, EncodeParams};
+use mars_codec::ifs::{decode_iterative, Leaf};
 use mars_codec::mars_format;
-use mars_core::Plane;
 use mars_core::metrics::psnr;
+use mars_core::Plane;
 
 use crate::bdrate::{RdCurve, RdPoint};
 

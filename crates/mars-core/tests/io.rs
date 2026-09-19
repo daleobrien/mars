@@ -188,7 +188,10 @@ fn jpeg_is_written_from_content_and_read_back_close() {
             .map(|(a, b)| a.abs_diff(*b))
             .max()
             .unwrap();
-        assert!(worst <= 16, "plane drifted by {worst} through a JPEG round trip");
+        assert!(
+            worst <= 16,
+            "plane drifted by {worst} through a JPEG round trip"
+        );
     }
 }
 
@@ -201,7 +204,11 @@ fn jpeg_content_is_autodetected_even_when_named_png() {
     write_jpeg(&path, &img).unwrap();
     let back = read_image(&path, None).unwrap();
     assert_eq!((back.width(), back.height()), (8, 8));
-    assert_eq!(back.planes().len(), 1, "a gray JPEG reads back as one plane");
+    assert_eq!(
+        back.planes().len(),
+        1,
+        "a gray JPEG reads back as one plane"
+    );
 }
 
 #[test]
@@ -212,14 +219,22 @@ fn jpeg_quality_trades_size_for_detail() {
     let img = Image::gray(mars_core::image::Plane::from_vec(
         16,
         16,
-        (0..256).map(|i| ((i * 37 + i / 16 * 13) % 256) as u8).collect(),
+        (0..256)
+            .map(|i| ((i * 37 + i / 16 * 13) % 256) as u8)
+            .collect(),
     ));
     write_jpeg_with_quality(&low_path, &img, 10).unwrap();
     write_jpeg_with_quality(&high_path, &img, 95).unwrap();
     let low = std::fs::read(&low_path).unwrap();
     let high = std::fs::read(&high_path).unwrap();
-    assert!(low.starts_with(&[0xFF, 0xD8, 0xFF]), "quality 10 is not a JPEG");
-    assert!(high.starts_with(&[0xFF, 0xD8, 0xFF]), "quality 95 is not a JPEG");
+    assert!(
+        low.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "quality 10 is not a JPEG"
+    );
+    assert!(
+        high.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "quality 95 is not a JPEG"
+    );
     assert!(
         high.len() > low.len(),
         "quality 95 ({} bytes) should exceed quality 10 ({} bytes)",

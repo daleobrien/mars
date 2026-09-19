@@ -8,7 +8,7 @@ use mars_codec::mars_format::{self, Header};
 use mars_codec::progressive;
 use mars_codec::quant::ResidualQstep;
 use mars_core::io::{read_image, read_pgm};
-use mars_core::{Plane, image::Image};
+use mars_core::{image::Image, Plane};
 
 struct Scratch(PathBuf);
 impl Scratch {

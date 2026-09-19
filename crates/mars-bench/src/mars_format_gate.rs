@@ -136,7 +136,11 @@ pub fn gate(root: &Path, fixtures_index: &Path) -> Result<(Vec<Check>, Vec<BppRo
             rows.push(BppRow {
                 image: image.name.clone(),
                 t_rms,
-                raw_bpp: bpp(raw_bytes.len() as u64, image.width as usize, image.height as usize),
+                raw_bpp: bpp(
+                    raw_bytes.len() as u64,
+                    image.width as usize,
+                    image.height as usize,
+                ),
                 mars_bpp: bpp(
                     mars_bytes.len() as u64,
                     image.width as usize,

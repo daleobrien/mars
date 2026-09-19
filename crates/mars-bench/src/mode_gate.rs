@@ -9,14 +9,14 @@
 //! chosen over diffing against a separate git revision.
 
 use mars_codec::encode::{
-    EncodeOptions, EncodeParams, ModeStats, ResidualQuantisation, encode_image_with_options,
+    encode_image_with_options, EncodeOptions, EncodeParams, ModeStats, ResidualQuantisation,
 };
 use mars_codec::mars_format;
 use mars_codec::quant::ResidualQstep;
 use mars_core::Plane;
 
 use crate::bdrate::RdCurve;
-use crate::rd_opt::{RdSample, sample_from_bytes};
+use crate::rd_opt::{sample_from_bytes, RdSample};
 
 /// Modes 0 (flat) and 2 (fractal) only -- Step 14's own decision rule, reproduced exactly
 /// on the current codebase (§ this module's doc).

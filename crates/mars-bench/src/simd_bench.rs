@@ -40,7 +40,14 @@ fn scalar_domain_sums(contracted: &Contracted, dr: usize, dc: usize, size: usize
 
 /// Pre-Step-11 `cross_term`, byte-for-byte: `isometry::map` looked up per element rather
 /// than a permuted buffer handed to a vectorised dot product.
-fn scalar_cross_term(contracted: &Contracted, dr: usize, dc: usize, size: usize, k: u8, range: &[u8]) -> i64 {
+fn scalar_cross_term(
+    contracted: &Contracted,
+    dr: usize,
+    dc: usize,
+    size: usize,
+    k: u8,
+    range: &[u8],
+) -> i64 {
     let mut t1 = 0i64;
     for u in 0..size {
         for v in 0..size {

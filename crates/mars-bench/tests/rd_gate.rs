@@ -80,9 +80,7 @@ const BD_RATE_TARGET_PCT: f64 = -5.0;
 
 fn kodim(n: u32) -> Plane {
     read_raw(
-        std::path::Path::new(&format!(
-            "../../corpus/images/kodak-gray/kodim{n:02}.raw"
-        )),
+        std::path::Path::new(&format!("../../corpus/images/kodak-gray/kodim{n:02}.raw")),
         768,
         512,
     )

@@ -181,7 +181,14 @@ pub fn dot_u8_i32_window_scalar(
 ///
 /// # Panics
 /// If `a.len() != size * size`, or if the windowed region of `b` runs past its bounds.
-pub fn dot_u8_i32_window(a: &[u8], b: &[i32], b_stride: usize, br: usize, bc: usize, size: usize) -> i64 {
+pub fn dot_u8_i32_window(
+    a: &[u8],
+    b: &[i32],
+    b_stride: usize,
+    br: usize,
+    bc: usize,
+    size: usize,
+) -> i64 {
     assert_eq!(a.len(), size * size);
     (0..size)
         .map(|u| {
@@ -204,7 +211,9 @@ mod tests {
         for _ in 0..500 {
             let stride = rng.gen_range(1..40);
             let height = rng.gen_range(1..40);
-            let plane: Vec<i32> = (0..stride * height).map(|_| rng.gen_range(0..=1020)).collect();
+            let plane: Vec<i32> = (0..stride * height)
+                .map(|_| rng.gen_range(0..=1020))
+                .collect();
             let size = rng.gen_range(1..=stride.min(height));
             let dr = rng.gen_range(0..=height - size);
             let dc = rng.gen_range(0..=stride - size);

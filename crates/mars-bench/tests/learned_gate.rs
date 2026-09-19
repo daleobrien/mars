@@ -202,13 +202,22 @@ fn learned_vs_funnel_recall_evals_and_wall_clock_on_both_images() {
                 learned::DEFAULT_SURVIVORS,
             ))
         });
-        print_report(&format!("learned[k=16] kodim{n:02} ({tag})"), &learned, &cache);
+        print_report(
+            &format!("learned[k=16] kodim{n:02} ({tag})"),
+            &learned,
+            &cache,
+        );
 
-        let funnel = run_method(&image, &params, || Box::new(Funnel::new(FunnelMode::Scaled)));
-        print_report(&format!("funnel[scaled] kodim{n:02} ({tag})"), &funnel, &cache);
+        let funnel = run_method(&image, &params, || {
+            Box::new(Funnel::new(FunnelMode::Scaled))
+        });
+        print_report(
+            &format!("funnel[scaled] kodim{n:02} ({tag})"),
+            &funnel,
+            &cache,
+        );
 
-        let exhaustive =
-            run_method(&image, &params, || MethodName::Exhaustive.new_retriever());
+        let exhaustive = run_method(&image, &params, || MethodName::Exhaustive.new_retriever());
         let exhaustive_evals_per_t = exhaustive.evals as f64 / exhaustive.transforms as f64;
         println!(
             "exhaustive kodim{n:02}: evals/transform={exhaustive_evals_per_t:.3} (ceiling, not a gate)"

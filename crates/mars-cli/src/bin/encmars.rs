@@ -5,16 +5,16 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 #[cfg(feature = "face-detect")]
 use mars_cli::human::RegionKind;
 use mars_codec::color::{
-    ColorEncodeParams, Subsampling, encode_color_image_with_residual_quantisation, wrap_gray_stream,
+    encode_color_image_with_residual_quantisation, wrap_gray_stream, ColorEncodeParams, Subsampling,
 };
 use mars_codec::encode::{
-    EncodeOptions, EncodeParams, ExhaustiveSearch, LambdaRegion, ResidualQuantisation,
-    encode_image_with_search,
+    encode_image_with_search, EncodeOptions, EncodeParams, ExhaustiveSearch, LambdaRegion,
+    ResidualQuantisation,
 };
 use mars_core::io::read_image;
 
@@ -1155,9 +1155,9 @@ mod tests {
             .validate()
             .is_err());
         // Meaningless without --human-adaptive, and clap refuses it.
-        assert!(Cli::try_parse_from([
-            "encmars", "in.png", "out.mars", "--outside-min-size", "16"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["encmars", "in.png", "out.mars", "--outside-min-size", "16"])
+                .is_err()
+        );
     }
 }

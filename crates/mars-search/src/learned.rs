@@ -69,13 +69,7 @@ impl MlpWeights {
             let acc: f32 = self.b1[h] + row.iter().zip(features).map(|(w, x)| w * x).sum::<f32>();
             hidden[h] = acc.tanh();
         }
-        let out: f32 = self.b2
-            + self
-                .w2
-                .iter()
-                .zip(&hidden)
-                .map(|(w, h)| w * h)
-                .sum::<f32>();
+        let out: f32 = self.b2 + self.w2.iter().zip(&hidden).map(|(w, h)| w * h).sum::<f32>();
         1.0 / (1.0 + (-out).exp())
     }
 }
@@ -114,7 +108,9 @@ pub fn build_features(
     // training (`docs/decisions.md`'s Step 17 entry) until this was found and fixed --
     // the clamp keeps the *sign and rough magnitude* of the contrast-ratio signal while
     // removing the outlier's ability to blow up gradient descent.
-    let log_std_ratio = ((domain_std + EPS) / (range_std + EPS)).ln().clamp(-5.0, 5.0);
+    let log_std_ratio = ((domain_std + EPS) / (range_std + EPS))
+        .ln()
+        .clamp(-5.0, 5.0);
     let rel_dr = (f64::from(domain_row) - f64::from(range_row)) / f64::from(image_height.max(1));
     let rel_dc = (f64::from(domain_col) - f64::from(range_col)) / f64::from(image_width.max(1));
     let rel_dist = (rel_dr * rel_dr + rel_dc * rel_dc).sqrt();
@@ -213,8 +209,16 @@ impl CandidateRetriever for Learned {
             .enumerate()
             .map(|(i, d)| {
                 let feats = build_features(
-                    &r1, r_std, &d.stage1, d.std, range.row, range.col, d.dom_row, d.dom_col,
-                    self.image_width, self.image_height,
+                    &r1,
+                    r_std,
+                    &d.stage1,
+                    d.std,
+                    range.row,
+                    range.col,
+                    d.dom_row,
+                    d.dom_col,
+                    self.image_width,
+                    self.image_height,
                 );
                 (self.weights.score(&feats), i)
             })

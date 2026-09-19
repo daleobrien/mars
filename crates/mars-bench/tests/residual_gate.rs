@@ -96,9 +96,7 @@ const BD_RATE_CEILING_PCT: f64 = 5.0;
 
 fn kodim(n: u32) -> Plane {
     read_raw(
-        std::path::Path::new(&format!(
-            "../../corpus/images/kodak-gray/kodim{n:02}.raw"
-        )),
+        std::path::Path::new(&format!("../../corpus/images/kodak-gray/kodim{n:02}.raw")),
         768,
         512,
     )
@@ -126,10 +124,20 @@ fn four_mode_competition_stays_within_the_regression_ceiling_and_covers_every_mo
         let image = kodim(n);
         let label = format!("kodim{n:02}");
 
-        let (reference, ref_samples, ref_stats) =
-            mode_curve(format!("{label} step14-equivalent (modes 0/2)"), &image, &BASE, &LAMBDA_GRID, STEP14_MODES);
-        let (test, test_samples, test_stats) =
-            mode_curve(format!("{label} step15 (modes 0-3)"), &image, &BASE, &LAMBDA_GRID, STEP15_MODES);
+        let (reference, ref_samples, ref_stats) = mode_curve(
+            format!("{label} step14-equivalent (modes 0/2)"),
+            &image,
+            &BASE,
+            &LAMBDA_GRID,
+            STEP14_MODES,
+        );
+        let (test, test_samples, test_stats) = mode_curve(
+            format!("{label} step15 (modes 0-3)"),
+            &image,
+            &BASE,
+            &LAMBDA_GRID,
+            STEP15_MODES,
+        );
 
         eprintln!("-- {label} --");
         for s in &ref_samples {
@@ -144,8 +152,14 @@ fn four_mode_competition_stays_within_the_regression_ceiling_and_covers_every_mo
                 s.point.bpp, s.point.psnr, s.evals, s.leaves
             );
         }
-        eprintln!("  step14-equiv mode histogram: {}", format_mode_histogram(&ref_stats));
-        eprintln!("  step15       mode histogram: {}", format_mode_histogram(&test_stats));
+        eprintln!(
+            "  step14-equiv mode histogram: {}",
+            format_mode_histogram(&ref_stats)
+        );
+        eprintln!(
+            "  step15       mode histogram: {}",
+            format_mode_histogram(&test_stats)
+        );
 
         for i in 0..4 {
             corpus_stats.leaf_modes[i] += test_stats.leaf_modes[i];
@@ -177,7 +191,10 @@ fn four_mode_competition_stays_within_the_regression_ceiling_and_covers_every_mo
          improvement, and not hidden as one)",
         bd_rates.len()
     );
-    eprintln!("corpus-wide (kodim01+kodim02) mode histogram: {}", format_mode_histogram(&corpus_stats));
+    eprintln!(
+        "corpus-wide (kodim01+kodim02) mode histogram: {}",
+        format_mode_histogram(&corpus_stats)
+    );
 
     assert!(
         mean_bd_rate <= BD_RATE_CEILING_PCT,

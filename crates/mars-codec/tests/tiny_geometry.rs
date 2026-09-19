@@ -2,12 +2,12 @@
 //! without panicking, with independent DC and border pixel oracles.
 use mars_codec::color::{self, ColorEncodeParams, Subsampling};
 use mars_codec::encode::{
-    EncodeOptions, EncodeParams, ResidualQuantisation, encode_image, encode_image_with_options,
+    encode_image, encode_image_with_options, EncodeOptions, EncodeParams, ResidualQuantisation,
 };
 use mars_codec::ifs::{self, Leaf};
 use mars_codec::mars_format::{self, Header};
-use mars_core::Plane;
 use mars_core::image::Image;
+use mars_core::Plane;
 
 fn params(lambda: Option<f64>) -> EncodeParams {
     EncodeParams {

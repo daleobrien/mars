@@ -9,8 +9,8 @@ use mars_codec::ifs::{self, Leaf};
 use mars_codec::mars_format::{self, Header};
 use mars_codec::postprocess::smooth_boundaries;
 use mars_codec::progressive;
-use mars_core::Plane;
 use mars_core::io::read_pgm;
+use mars_core::Plane;
 
 struct Scratch(PathBuf);
 impl Scratch {

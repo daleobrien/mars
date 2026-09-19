@@ -1,7 +1,7 @@
 //! Independent range-to-domain oracle: no production isometry map or decoder is used
 //! to compute the expected coefficients and pixels.
 use mars_codec::encode::{
-    EncodeOptions, EncodeParams, ResidualQuantisation, encode_image_with_options,
+    encode_image_with_options, EncodeOptions, EncodeParams, ResidualQuantisation,
 };
 use mars_codec::{dct, ifs, mars_format, quant};
 use mars_core::Plane;

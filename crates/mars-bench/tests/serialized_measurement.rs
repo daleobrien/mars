@@ -1,16 +1,16 @@
 use mars_bench::bdrate::RdPoint;
 use mars_bench::density_gate::sample_with_density;
-use mars_bench::mode_gate::{STEP14_MODES, STEP15_MODES, sample_with_modes};
-use mars_bench::rd_opt::{RdSample, sample};
+use mars_bench::mode_gate::{sample_with_modes, STEP14_MODES, STEP15_MODES};
+use mars_bench::rd_opt::{sample, RdSample};
 use mars_codec::encode::{
-    EncodeOptions, EncodeParams, ModeStats, ResidualQuantisation, encode_image,
-    encode_image_rd_with_modes_and_density, encode_image_with_options,
+    encode_image, encode_image_rd_with_modes_and_density, encode_image_with_options, EncodeOptions,
+    EncodeParams, ModeStats, ResidualQuantisation,
 };
-use mars_codec::ifs::{Leaf, decode_iterative};
+use mars_codec::ifs::{decode_iterative, Leaf};
 use mars_codec::mars_format::{self, Header};
 use mars_codec::quant::ResidualQstep;
-use mars_core::Plane;
 use mars_core::metrics::psnr;
+use mars_core::Plane;
 
 fn image() -> Plane {
     Plane::from_vec(
@@ -98,11 +98,9 @@ fn mode_samples_report_serialized_rate_quality_and_histograms() {
         let (reported, reported_stats) = sample_with_modes(&image, &params, allowed_modes);
         assert_eq!(header.residual_qstep, ResidualQstep::LEGACY);
         let wire_leaves = assert_serialized_sample(&image, &reported, &header, &leaves, evals);
-        assert!(
-            wire_leaves
-                .iter()
-                .all(|leaf| allowed_modes[usize::from(leaf.mode)])
-        );
+        assert!(wire_leaves
+            .iter()
+            .all(|leaf| allowed_modes[usize::from(leaf.mode)]));
         assert_stats(&reported_stats, &stats, &wire_leaves);
     }
 }

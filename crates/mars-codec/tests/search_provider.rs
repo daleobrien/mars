@@ -1,9 +1,9 @@
 //! Provider injection must preserve pinned pre-refactor streams and codec objectives.
 use mars_codec::encode::{
-    EncodeOptions, EncodeParams, ResidualQuantisation, encode_image_with_options,
+    encode_image_with_options, EncodeOptions, EncodeParams, ResidualQuantisation,
 };
 use mars_codec::encode::{
-    ExhaustiveSearch, SearchOutcome, SearchProvider, SearchRequest, encode_image_with_search,
+    encode_image_with_search, ExhaustiveSearch, SearchOutcome, SearchProvider, SearchRequest,
 };
 use mars_codec::{ifs, mars_format, quant::ResidualQstep};
 use mars_core::Plane;
@@ -149,12 +149,10 @@ fn provider_is_used_only_for_final_walk_with_effective_stride_and_separate_count
         } else {
             assert!(requests.iter().all(|r| r.3 == 4));
         }
-        assert!(
-            outcome
-                .leaves
-                .iter()
-                .all(|leaf| leaf.mode == 0 && leaf.qalfa == 0)
-        );
+        assert!(outcome
+            .leaves
+            .iter()
+            .all(|leaf| leaf.mode == 0 && leaf.qalfa == 0));
         assert_eq!(
             outcome.header.residual_qstep,
             lambda.map_or(ResidualQstep::LEGACY, ResidualQstep::from_lambda)

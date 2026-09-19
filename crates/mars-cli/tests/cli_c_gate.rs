@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use mars_codec::encode::{EncodeOptions, EncodeParams, ExhaustiveSearch, encode_image_with_search};
+use mars_codec::encode::{encode_image_with_search, EncodeOptions, EncodeParams, ExhaustiveSearch};
 use mars_core::Plane;
 
 fn encmars_bin() -> &'static str {

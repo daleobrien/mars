@@ -76,15 +76,29 @@ impl std::ops::Deref for Header {
 
 impl From<GeometryHeader> for Header {
     fn from(geometry: GeometryHeader) -> Self {
-        Self { geometry, residual_qstep: ResidualQstep::LEGACY }
+        Self {
+            geometry,
+            residual_qstep: ResidualQstep::LEGACY,
+        }
     }
 }
 
 impl crate::ifs::DecodeHeader for Header {
-    fn geometry(&self) -> &GeometryHeader { &self.geometry }
-    fn residual_qstep(&self) -> ResidualQstep { self.residual_qstep }
+    fn geometry(&self) -> &GeometryHeader {
+        &self.geometry
+    }
+    fn residual_qstep(&self) -> ResidualQstep {
+        self.residual_qstep
+    }
     fn with_dimensions(&self, width: u32, height: u32) -> Self {
-        Self { geometry: GeometryHeader { width, height, ..self.geometry }, ..*self }
+        Self {
+            geometry: GeometryHeader {
+                width,
+                height,
+                ..self.geometry
+            },
+            ..*self
+        }
     }
 }
 
@@ -215,8 +229,14 @@ fn leaf_count_within_bound(hdr: &Header) -> bool {
 
 /// Encode `(hdr, leaves)` in the revised `.mars` v0 layout, including the exact residual step.
 /// A legacy geometry header implies step 8.
-pub fn write(hdr: &impl crate::ifs::DecodeHeader, leaves: &[Leaf]) -> Result<Vec<u8>, MarsFormatError> {
-    let hdr = &Header { geometry: *hdr.geometry(), residual_qstep: hdr.residual_qstep() };
+pub fn write(
+    hdr: &impl crate::ifs::DecodeHeader,
+    leaves: &[Leaf],
+) -> Result<Vec<u8>, MarsFormatError> {
+    let hdr = &Header {
+        geometry: *hdr.geometry(),
+        residual_qstep: hdr.residual_qstep(),
+    };
     if !valid_header_fields(
         hdr.width,
         hdr.height,
@@ -271,7 +291,7 @@ pub fn write(hdr: &impl crate::ifs::DecodeHeader, leaves: &[Leaf]) -> Result<Vec
     out.push(1); // section_count
     out.extend_from_slice(&hdr.residual_qstep.to_le_bytes());
     out.push(SECTION_TREE);
-    out.extend_from_slice(&(u32::try_from(tree.len()).expect("tree fits in u32") ).to_le_bytes());
+    out.extend_from_slice(&(u32::try_from(tree.len()).expect("tree fits in u32")).to_le_bytes());
     out.extend_from_slice(&tree);
     Ok(out)
 }
@@ -302,19 +322,24 @@ pub fn read(data: &[u8]) -> Result<(Header, Vec<Leaf>), MarsFormatError> {
     let height = u32::from(u16::from_le_bytes([data[17], data[18]]));
     let section_count = data[19];
 
-    if !valid_header_fields(width, height, shift, bits_alfa, bits_beta, min_size, max_size) {
+    if !valid_header_fields(
+        width, height, shift, bits_alfa, bits_beta, min_size, max_size,
+    ) {
         return Err(MarsFormatError::DegenerateHeader);
     }
-    let hdr = Header { residual_qstep, geometry: GeometryHeader {
-        bits_alfa,
-        bits_beta,
-        min_size,
-        max_size,
-        shift,
-        width,
-        height,
-        int_max_alfa,
-    }};
+    let hdr = Header {
+        residual_qstep,
+        geometry: GeometryHeader {
+            bits_alfa,
+            bits_beta,
+            min_size,
+            max_size,
+            shift,
+            width,
+            height,
+            int_max_alfa,
+        },
+    };
     if !leaf_count_within_bound(&hdr) {
         return Err(MarsFormatError::DegenerateHeader);
     }
@@ -350,7 +375,15 @@ pub fn read(data: &[u8]) -> Result<(Header, Vec<Leaf>), MarsFormatError> {
     let mut dec = EntropyDecoder::new(tree)?;
     let mut pred = Predictor::default();
     let mut leaves = Vec::new();
-    walk_read(&hdr, 0, 0, hdr.virtual_size(), &mut dec, &mut pred, &mut leaves)?;
+    walk_read(
+        &hdr,
+        0,
+        0,
+        hdr.virtual_size(),
+        &mut dec,
+        &mut pred,
+        &mut leaves,
+    )?;
     Ok((hdr, leaves))
 }
 
@@ -372,7 +405,15 @@ fn build_events(
 ) -> Result<Vec<Event>, MarsFormatError> {
     let mut events = Vec::new();
     let mut pred = Predictor::default();
-    walk_write(hdr, 0, 0, hdr.virtual_size(), by_pos, &mut pred, &mut events)?;
+    walk_write(
+        hdr,
+        0,
+        0,
+        hdr.virtual_size(),
+        by_pos,
+        &mut pred,
+        &mut events,
+    )?;
     Ok(events)
 }
 
@@ -381,7 +422,10 @@ fn build_events(
 /// estimator uses this to turn a representative (not necessarily RD-optimal) partition
 /// into the real, observed per-context symbol frequencies its "warm-up" snapshot is built
 /// from -- see `crate::rate`'s module doc for why a snapshot beats a constant-bits guess.
-pub(crate) fn events_for_leaves(hdr: &GeometryHeader, leaves: &[Leaf]) -> Result<Vec<Event>, MarsFormatError> {
+pub(crate) fn events_for_leaves(
+    hdr: &GeometryHeader,
+    leaves: &[Leaf],
+) -> Result<Vec<Event>, MarsFormatError> {
     let hdr = &Header::from(*hdr);
     let mut by_pos = HashMap::with_capacity(leaves.len());
     for leaf in leaves {
@@ -468,7 +512,13 @@ fn grad_alphabet() -> u32 {
 /// Emit one leaf's event stream, keyed by `leaf.mode` (§ this module's doc, Step 15's R&D
 /// plan §4 modes 0-3; mode 4/subdivide is the `FIELD_SPLIT` bit `walk_write`/`walk_read`
 /// already emit one level up, not a leaf-mode value at all).
-fn emit_leaf(hdr: &Header, leaf: &Leaf, size_class: u32, pred: &mut Predictor, events: &mut Vec<Event>) {
+fn emit_leaf(
+    hdr: &Header,
+    leaf: &Leaf,
+    size_class: u32,
+    pred: &mut Predictor,
+    events: &mut Vec<Event>,
+) {
     events.push(Event {
         ctx: (FIELD_MODE, size_class),
         alphabet: MODE_ALPHABET,
@@ -633,7 +683,11 @@ fn walk_read(
     pred.prev_row_units = row_units;
     pred.prev_col_units = col_units;
 
-    if row_units < 0 || col_units < 0 || row_units > i64::from(u32::MAX) || col_units > i64::from(u32::MAX) {
+    if row_units < 0
+        || col_units < 0
+        || row_units > i64::from(u32::MAX)
+        || col_units > i64::from(u32::MAX)
+    {
         return Err(MarsFormatError::DomainOutOfBounds {
             row,
             col,
@@ -717,8 +771,22 @@ mod tests {
 
         assert_eq!(hdr, hdr2);
         assert_eq!(leaves.len(), leaves2.len());
-        let mut a: Vec<_> = leaves.iter().map(|l| (l.row, l.col, l.size, l.qalfa, l.qbeta, l.isometry, l.dom_row, l.dom_col)).collect();
-        let mut b: Vec<_> = leaves2.iter().map(|l| (l.row, l.col, l.size, l.qalfa, l.qbeta, l.isometry, l.dom_row, l.dom_col)).collect();
+        let mut a: Vec<_> = leaves
+            .iter()
+            .map(|l| {
+                (
+                    l.row, l.col, l.size, l.qalfa, l.qbeta, l.isometry, l.dom_row, l.dom_col,
+                )
+            })
+            .collect();
+        let mut b: Vec<_> = leaves2
+            .iter()
+            .map(|l| {
+                (
+                    l.row, l.col, l.size, l.qalfa, l.qbeta, l.isometry, l.dom_row, l.dom_col,
+                )
+            })
+            .collect();
         a.sort();
         b.sort();
         assert_eq!(a, b);
@@ -770,7 +838,10 @@ mod tests {
         let mut b = leaves2.clone();
         a.sort_by_key(|l| (l.row, l.col, l.size));
         b.sort_by_key(|l| (l.row, l.col, l.size));
-        assert_eq!(a, b, "every field -- including mode 3's residual -- must round trip exactly");
+        assert_eq!(
+            a, b,
+            "every field -- including mode 3's residual -- must round trip exactly"
+        );
 
         let modes_used: std::collections::HashSet<u8> = leaves.iter().map(|l| l.mode).collect();
         assert!(
@@ -814,7 +885,10 @@ mod tests {
         // Corrupt the TREE section's length to claim far more than remains.
         let len_off = HEADER_LEN + 1;
         bytes[len_off..len_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(matches!(read(&bytes), Err(MarsFormatError::SectionOutOfBounds { .. })));
+        assert!(matches!(
+            read(&bytes),
+            Err(MarsFormatError::SectionOutOfBounds { .. })
+        ));
     }
 
     #[test]

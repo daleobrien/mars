@@ -33,12 +33,18 @@ pub trait DecodeHeader: Copy {
 }
 
 impl DecodeHeader for Header {
-    fn geometry(&self) -> &Header { self }
+    fn geometry(&self) -> &Header {
+        self
+    }
     fn residual_qstep(&self) -> crate::quant::ResidualQstep {
         crate::quant::ResidualQstep::LEGACY
     }
     fn with_dimensions(&self, width: u32, height: u32) -> Self {
-        Self { width, height, ..*self }
+        Self {
+            width,
+            height,
+            ..*self
+        }
     }
 }
 
@@ -273,7 +279,10 @@ fn walk(
 /// This exists to sanity-check `parse`, not to replace `decmars` — no pyramidal mode, no
 /// postprocessing, no attempt at speed.
 pub fn decode_iterative(hdr: &impl DecodeHeader, leaves: &[Leaf], iterations: u32) -> Plane {
-    let (w, h) = (hdr.geometry().width as usize, hdr.geometry().height as usize);
+    let (w, h) = (
+        hdr.geometry().width as usize,
+        hdr.geometry().height as usize,
+    );
     let mut img = vec![128u8; w * h];
     for _ in 0..iterations {
         img = decode_step(hdr, leaves, &img);
@@ -288,7 +297,10 @@ pub fn decode_iterative(hdr: &impl DecodeHeader, leaves: &[Leaf], iterations: u3
 /// e.g. `color::decode_color_image_progression`, which needs one Y/Cb/Cr frame per step
 /// rather than each plane fully decoded in turn.
 pub fn decode_step(hdr: &impl DecodeHeader, leaves: &[Leaf], img: &[u8]) -> Vec<u8> {
-    let (w, h) = (hdr.geometry().width as usize, hdr.geometry().height as usize);
+    let (w, h) = (
+        hdr.geometry().width as usize,
+        hdr.geometry().height as usize,
+    );
     let mut next = vec![0u8; w * h];
     for leaf in leaves {
         decode_leaf(hdr, leaf, img, w, &mut next);
@@ -313,7 +325,10 @@ pub fn decode_until_stable(
     threshold: u8,
     max_iterations: u32,
 ) -> (Plane, u32) {
-    let (w, h) = (hdr.geometry().width as usize, hdr.geometry().height as usize);
+    let (w, h) = (
+        hdr.geometry().width as usize,
+        hdr.geometry().height as usize,
+    );
     let mut img = vec![128u8; w * h];
     let mut used = 0;
     for i in 0..max_iterations.max(1) {
@@ -388,7 +403,13 @@ pub fn zoom_leaves<H: DecodeHeader>(hdr: &H, leaves: &[Leaf], factor: f64) -> (H
 /// consumed -- this function exists so [`decode_iterative`] (and hence any PSNR
 /// measurement built on it, e.g. `mars-bench`'s RD sampler) reconstructs every mode
 /// correctly, not only the two the legacy `.ifs` bitstream itself can express.
-fn decode_leaf(header: &impl DecodeHeader, leaf: &Leaf, img: &[u8], stride: usize, next: &mut [u8]) {
+fn decode_leaf(
+    header: &impl DecodeHeader,
+    leaf: &Leaf,
+    img: &[u8],
+    stride: usize,
+    next: &mut [u8],
+) {
     let hdr = header.geometry();
     let size = leaf.size as usize;
 
@@ -401,7 +422,9 @@ fn decode_leaf(header: &impl DecodeHeader, leaf: &Leaf, img: &[u8], stride: usiz
         let gy = f64::from(leaf.qgy) / crate::encode::AFFINE_GRAD_SCALE;
         for u in 0..size {
             for v in 0..size {
-                let value = (b0 + gx * u as f64 + gy * v as f64).round().clamp(0.0, 255.0) as u8;
+                let value = (b0 + gx * u as f64 + gy * v as f64)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
                 next[(leaf.row as usize + u) * stride + leaf.col as usize + v] = value;
             }
         }

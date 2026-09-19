@@ -14,14 +14,14 @@
 
 use std::time::Instant;
 
-use mars_codec::encode::{EncodeParams, ModeStats, encode_image_rd_with_modes_and_density};
+use mars_codec::encode::{encode_image_rd_with_modes_and_density, EncodeParams, ModeStats};
 use mars_codec::ifs::Leaf;
 use mars_codec::mars_format;
 
 use mars_core::Plane;
 
 use crate::bdrate::RdCurve;
-use crate::rd_opt::{RdSample, sample_from_bytes};
+use crate::rd_opt::{sample_from_bytes, RdSample};
 
 /// One operating point under an explicit `adaptive_density` flag: the usual RD sample plus
 /// the mode histogram, the leaves themselves (for partition-statistics reporting), and the

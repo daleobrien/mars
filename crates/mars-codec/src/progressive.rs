@@ -223,8 +223,15 @@ fn base_grid(hdr: &Header) -> Vec<(u32, u32, u32)> {
 /// output) as a 4-layer progressive stream. `image` is the *source* image — needed for
 /// layer 1's grid means and layer 2's flat approximation of mode-2/3 leaves, neither of
 /// which exists anywhere in `leaves` itself.
-pub fn encode(image: &Plane, hdr: &impl crate::ifs::DecodeHeader, leaves: &[Leaf]) -> Result<Vec<u8>, ProgressiveError> {
-    let hdr = &Header { geometry: *hdr.geometry(), residual_qstep: hdr.residual_qstep() };
+pub fn encode(
+    image: &Plane,
+    hdr: &impl crate::ifs::DecodeHeader,
+    leaves: &[Leaf],
+) -> Result<Vec<u8>, ProgressiveError> {
+    let hdr = &Header {
+        geometry: *hdr.geometry(),
+        residual_qstep: hdr.residual_qstep(),
+    };
     if !valid_header_fields(hdr) || !leaf_count_within_bound(hdr) {
         return Err(ProgressiveError::DegenerateHeader);
     }
@@ -543,16 +550,19 @@ fn parse_header(data: &[u8]) -> Result<ParsedHeader, ProgressiveError> {
     let width = u32::from(u16::from_le_bytes([data[11], data[12]]));
     let height = u32::from(u16::from_le_bytes([data[13], data[14]]));
 
-    let hdr = Header { residual_qstep, geometry: crate::ifs::Header {
-        bits_alfa,
-        bits_beta,
-        min_size,
-        max_size,
-        shift,
-        width,
-        height,
-        int_max_alfa,
-    }};
+    let hdr = Header {
+        residual_qstep,
+        geometry: crate::ifs::Header {
+            bits_alfa,
+            bits_beta,
+            min_size,
+            max_size,
+            shift,
+            width,
+            height,
+            int_max_alfa,
+        },
+    };
     if !valid_header_fields(&hdr) || !leaf_count_within_bound(&hdr) {
         return Err(ProgressiveError::DegenerateHeader);
     }
@@ -598,10 +608,7 @@ pub fn decode(data: &[u8]) -> Result<Decoded, ProgressiveError> {
 /// Decode all fully present layers using a positive fixed-point iteration count.
 /// Like [`decode`], incomplete trailing layers are ignored. Iteration starts from
 /// the flat grey seed; base and partition-only layers settle after one iteration.
-pub fn decode_with_iterations(
-    data: &[u8],
-    iterations: u32,
-) -> Result<Decoded, ProgressiveError> {
+pub fn decode_with_iterations(data: &[u8], iterations: u32) -> Result<Decoded, ProgressiveError> {
     if iterations == 0 {
         return Err(ProgressiveError::InvalidIterations);
     }

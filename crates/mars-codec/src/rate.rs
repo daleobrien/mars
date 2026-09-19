@@ -140,6 +140,9 @@ mod tests {
         // A context never observed at all still gets a sensible (uniform, not zero)
         // estimate rather than panicking or silently returning 0.
         let unseen = snapshot.bits_for((crate::mars_format::FIELD_ISOMETRY, size_class), 8, 3);
-        assert!((unseen - 3.0).abs() < 0.5, "unseen 8-way context ~3 bits, got {unseen}");
+        assert!(
+            (unseen - 3.0).abs() < 0.5,
+            "unseen 8-way context ~3 bits, got {unseen}"
+        );
     }
 }

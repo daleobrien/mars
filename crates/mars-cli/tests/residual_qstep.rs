@@ -289,8 +289,19 @@ fn adaptive_residual_requires_lambda_and_supports_method() {
         .arg(&input)
         .arg(&output)
         .args([
-            "--lambda", "50", "--modes", "0,3", "--min-size", "4", "--max-size", "4",
-            "--threads", "1", "--adaptive-residual", "--method", "fisher",
+            "--lambda",
+            "50",
+            "--modes",
+            "0,3",
+            "--min-size",
+            "4",
+            "--max-size",
+            "4",
+            "--threads",
+            "1",
+            "--adaptive-residual",
+            "--method",
+            "fisher",
         ]));
     let bytes = std::fs::read(&output).expect("read encoded stream");
     let planes = parse_planes(&bytes, 0, 1);

@@ -137,7 +137,10 @@ mod tests {
             let mut dec = Decoder::new(&bytes).unwrap();
             let decoded = decode_values(&mut dec, size_class, n);
 
-            let expected: Vec<i32> = levels.iter().map(|&l| l.clamp(-LEVEL_CLAMP, LEVEL_CLAMP)).collect();
+            let expected: Vec<i32> = levels
+                .iter()
+                .map(|&l| l.clamp(-LEVEL_CLAMP, LEVEL_CLAMP))
+                .collect();
             assert_eq!(decoded, expected, "size {size}");
         }
     }
@@ -147,7 +150,7 @@ mod tests {
         let size_class = 3;
         let levels = vec![0i32; 64];
         let mut events = Vec::new();
-            encode_events(&levels, size_class, &mut events);
+        encode_events(&levels, size_class, &mut events);
         let bytes = mars_entropy::encode(&events);
         let mut dec = Decoder::new(&bytes).unwrap();
         let decoded = decode_values(&mut dec, size_class, 64);
@@ -159,10 +162,21 @@ mod tests {
         let size_class = 2;
         let levels = vec![500, -500, 0, 63, -63, 64, -64];
         let mut events = Vec::new();
-            encode_events(&levels, size_class, &mut events);
+        encode_events(&levels, size_class, &mut events);
         let bytes = mars_entropy::encode(&events);
         let mut dec = Decoder::new(&bytes).unwrap();
         let decoded = decode_values(&mut dec, size_class, levels.len());
-        assert_eq!(decoded, vec![63, -63, 0, 63, -63, 64i32.min(LEVEL_CLAMP), (-64i32).max(-LEVEL_CLAMP)]);
+        assert_eq!(
+            decoded,
+            vec![
+                63,
+                -63,
+                0,
+                63,
+                -63,
+                64i32.min(LEVEL_CLAMP),
+                (-64i32).max(-LEVEL_CLAMP)
+            ]
+        );
     }
 }

@@ -54,7 +54,10 @@ fn assert_identical_across_thread_counts(path: &str, width: usize, height: usize
             .build()
             .expect("building a scoped pool");
         let (hdr, leaves, evals) = pool.install(|| encode_image(&image, &p));
-        assert_eq!(hdr, baseline_hdr, "{path}: header differs at {threads} threads");
+        assert_eq!(
+            hdr, baseline_hdr,
+            "{path}: header differs at {threads} threads"
+        );
         assert_eq!(
             evals, baseline_evals,
             "{path}: evals differs at {threads} threads"

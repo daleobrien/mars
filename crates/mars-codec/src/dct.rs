@@ -21,7 +21,11 @@ use std::f64::consts::PI;
 /// otherwise -- the normalisation that makes DCT-II and DCT-III exact inverses of one
 /// another (an orthonormal transform, not just "a" DCT convention).
 fn basis(n_size: usize, k: usize, n: usize) -> f64 {
-    let c_k = if k == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
+    let c_k = if k == 0 {
+        std::f64::consts::FRAC_1_SQRT_2
+    } else {
+        1.0
+    };
     (2.0 / n_size as f64).sqrt() * c_k * (PI / n_size as f64 * (n as f64 + 0.5) * k as f64).cos()
 }
 
@@ -135,7 +139,11 @@ mod tests {
         let size = 8;
         let block = vec![100.0; size * size];
         let coeffs = forward_dct2d(&block, size);
-        assert!((coeffs[0] - 100.0 * size as f64).abs() < 1e-9, "dc={}", coeffs[0]);
+        assert!(
+            (coeffs[0] - 100.0 * size as f64).abs() < 1e-9,
+            "dc={}",
+            coeffs[0]
+        );
         for &c in &coeffs[1..] {
             assert!(c.abs() < 1e-9, "expected 0 AC energy, got {c}");
         }

@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use mars_codec::color::{
     decode_color_image_auto, decode_color_image_progression, decode_color_image_zoomed,
@@ -13,7 +13,7 @@ use mars_codec::color::{
 use mars_codec::postprocess::smooth_boundaries;
 use mars_core::image::Image;
 use mars_core::io::{
-    ImageError, write_jpeg_with_quality, write_png, write_pnm, write_tga, write_tiff, write_webp,
+    write_jpeg_with_quality, write_png, write_pnm, write_tga, write_tiff, write_webp, ImageError,
 };
 
 /// Decompress a `.mars` bitstream to an image.

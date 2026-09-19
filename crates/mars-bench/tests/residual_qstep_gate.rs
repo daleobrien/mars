@@ -7,19 +7,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, ensure};
-use mars_bench::bdrate::{RdCurve, RdPoint, bd_metrics};
+use anyhow::{ensure, Context, Result};
+use mars_bench::bdrate::{bd_metrics, RdCurve, RdPoint};
 use mars_bench::mode_gate::{STEP14_MODES, STEP15_MODES};
-use mars_bench::provenance::{Provenance, sha256_hex};
+use mars_bench::provenance::{sha256_hex, Provenance};
 use mars_bench::rd_opt::check_convex_and_monotonic;
 use mars_codec::encode::{
-    EncodeOptions, EncodeParams, ResidualQuantisation, encode_image_with_options,
+    encode_image_with_options, EncodeOptions, EncodeParams, ResidualQuantisation,
 };
 use mars_codec::ifs::decode_iterative;
 use mars_codec::mars_format;
 use mars_codec::quant::ResidualQstep;
-use mars_core::{Plane, io::read_raw, metrics::psnr};
-use serde_json::{Value, json};
+use mars_core::{io::read_raw, metrics::psnr, Plane};
+use serde_json::{json, Value};
 
 const BASE: EncodeParams = EncodeParams {
     min_size: 4,
