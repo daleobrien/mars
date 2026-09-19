@@ -18,7 +18,7 @@ use mars_core::Plane;
 use crate::ifs::Leaf;
 use crate::isometry;
 use crate::mars_format::Header;
-use crate::mars_format::{FIELD_SPLIT, leaf_events};
+use crate::mars_format::{leaf_events, FIELD_SPLIT};
 use crate::quant::ResidualQstep;
 use crate::rate::RateModels;
 
@@ -784,7 +784,12 @@ pub fn encode_image_with_options(
     options: &EncodeOptions,
 ) -> (Header, Vec<Leaf>, u64, ModeStats) {
     let outcome = encode_image_with_search(image, params, options, |_| Box::new(ExhaustiveSearch));
-    (outcome.header, outcome.leaves, outcome.counters.search_evals, outcome.mode_stats)
+    (
+        outcome.header,
+        outcome.leaves,
+        outcome.counters.search_evals,
+        outcome.mode_stats,
+    )
 }
 
 /// Search work split between the chosen backend and the fixed exhaustive RD warmup.
@@ -807,6 +812,24 @@ pub struct EncodeOutcome {
     pub leaves: Vec<Leaf>,
     pub counters: EncodeCounters,
     pub mode_stats: ModeStats,
+}
+
+/// Build the stream header for one encode. Shared by every entry point, so the P5a audit
+/// and the encoder can never disagree about the header they are pricing.
+fn build_header(image: &Plane, params: &EncodeParams, residual_qstep: ResidualQstep) -> Header {
+    Header {
+        residual_qstep,
+        geometry: crate::ifs::Header {
+            bits_alfa: params.bits_alfa,
+            bits_beta: params.bits_beta,
+            min_size: params.min_size,
+            max_size: params.max_size,
+            shift: params.shift,
+            width: image.width() as u32,
+            height: image.height() as u32,
+            int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
+        },
+    }
 }
 
 /// Encode with a provider built once from the contracted plane (e.g. owning an index).
@@ -834,19 +857,7 @@ pub fn encode_image_with_search(
     };
     let allowed_modes = options.allowed_modes;
     let adaptive_density = options.adaptive_density;
-    let hdr = Header {
-        residual_qstep,
-        geometry: crate::ifs::Header {
-            bits_alfa: params.bits_alfa,
-            bits_beta: params.bits_beta,
-            min_size: params.min_size,
-            max_size: params.max_size,
-            shift: params.shift,
-            width: image.width() as u32,
-            height: image.height() as u32,
-            int_max_alfa: quantise_f64(params.max_alfa / 8.0 * 256.0, 255),
-        },
-    };
+    let hdr = build_header(image, params, residual_qstep);
     let contracted = Contracted::build(image);
     let provider = make_search(&contracted);
 
@@ -866,7 +877,10 @@ pub fn encode_image_with_search(
         return EncodeOutcome {
             header: hdr,
             leaves: result.leaves,
-            counters: EncodeCounters { search_evals: result.evals, warmup_evals },
+            counters: EncodeCounters {
+                search_evals: result.evals,
+                warmup_evals,
+            },
             mode_stats: result.stats,
         };
     }
@@ -885,7 +899,10 @@ pub fn encode_image_with_search(
     EncodeOutcome {
         header: hdr,
         leaves,
-        counters: EncodeCounters { search_evals: evals, warmup_evals: 0 },
+        counters: EncodeCounters {
+            search_evals: evals,
+            warmup_evals: 0,
+        },
         mode_stats: ModeStats::default(),
     }
 }
@@ -926,6 +943,105 @@ fn build_rate_snapshot(
     let rate = RateModels::from_leaves(hdr, &leaves)
         .expect("a warm-up partition from `walk` always writes as a valid `.mars` tree");
     (rate, evals)
+}
+
+/// One production encode plus the P5a audit of the partition it produced.
+pub struct AuditedEncode {
+    pub outcome: EncodeOutcome,
+    pub audit: crate::audit::RateAudit,
+}
+
+/// Encode with the exhaustive production provider, then price the resulting partition
+/// twice: against the frozen snapshot the RD search would have decided with, and against
+/// the live models the stream is really coded with (research plan §8 P5a).
+///
+/// `params.lambda` selects the partition exactly as every other entry point does: `Some`
+/// runs the RD walk, whose objective *is* the frozen estimate, so the audit's estimated
+/// side is the objective itself; `None` runs the legacy threshold walk, for which the
+/// same snapshot is reported as a reference price the walk never consulted
+/// ([`crate::audit::EstimatedProvenance`] says which). Both partition types are priced
+/// against the identical `t_rms = 8` exhaustive warm-up snapshot, so they are directly
+/// comparable -- which is what P5a's "same retrieval provider and mode set" asks for.
+///
+/// `counters` describe the production encode only. A threshold partition never runs the
+/// warm-up, so its `warmup_evals` is zero even though the audit itself built a snapshot
+/// to price it against.
+pub fn audit_rd(
+    image: &Plane,
+    params: &EncodeParams,
+    options: &EncodeOptions,
+) -> Result<AuditedEncode, crate::mars_format::MarsFormatError> {
+    let residual_qstep = match options.residual_quantisation {
+        ResidualQuantisation::LambdaAdaptive => params
+            .lambda
+            .map_or(ResidualQstep::LEGACY, ResidualQstep::from_lambda),
+        ResidualQuantisation::Fixed(step) => step,
+    };
+    let hdr = build_header(image, params, residual_qstep);
+    let contracted = build_contracted(image);
+    let provider = ExhaustiveSearch;
+    // Always built: it is both the RD objective and the reference price the audit reports
+    // for a threshold partition.
+    let (rate, warmup_evals) = build_rate_snapshot(image, &hdr, &contracted, params);
+
+    let (leaves, evals, stats, warmup, provenance) = match params.lambda {
+        Some(lambda) => {
+            let ctx = Ctx {
+                image,
+                contracted: &contracted,
+                provider: &provider,
+                hdr: &hdr,
+                params,
+                rate: Some(&rate),
+                allowed_modes: options.allowed_modes,
+                adaptive_density: options.adaptive_density,
+            };
+            let result = walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda);
+            (
+                result.leaves,
+                result.evals,
+                result.stats,
+                warmup_evals,
+                crate::audit::EstimatedProvenance::RdWarmupSnapshot,
+            )
+        }
+        None => {
+            let ctx = Ctx {
+                image,
+                contracted: &contracted,
+                provider: &provider,
+                hdr: &hdr,
+                params,
+                rate: None,
+                // `walk` has no mode mask -- the legacy path emits modes 0/2 by
+                // construction, which is exactly P5a's starting mode set.
+                allowed_modes: options.allowed_modes,
+                adaptive_density: false,
+            };
+            let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
+            (
+                leaves,
+                evals,
+                ModeStats::default(),
+                0,
+                crate::audit::EstimatedProvenance::ReferenceOnly,
+            )
+        }
+    };
+
+    let audit = crate::audit::audit_stream(&hdr, &leaves, &rate, provenance)?;
+    Ok(AuditedEncode {
+        outcome: EncodeOutcome {
+            header: hdr,
+            leaves,
+            counters: EncodeCounters {
+                search_evals: evals,
+                warmup_evals: warmup,
+            },
+            mode_stats: stats,
+        },
+        audit,
+    })
 }
 
 /// The read-only context one `walk` recursion shares — bundled so the recursive calls
@@ -1009,7 +1125,10 @@ fn walk(ctx: &Ctx, row: u32, col: u32, size: u32) -> (Vec<Leaf>, u64) {
         return (vec![leaf], 0);
     }
 
-    let SearchOutcome { candidate, evals: block_evals } = ctx.provider.search(&SearchRequest {
+    let SearchOutcome {
+        candidate,
+        evals: block_evals,
+    } = ctx.provider.search(&SearchRequest {
         image: ctx.image,
         contracted: ctx.contracted,
         params: ctx.params,
@@ -1539,8 +1658,7 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
             qgy: 0,
             residual: Vec::new(),
         };
-        let decoded = (0.5
-            + f64::from(leaf.qbeta) / f64::from((1u32 << hdr.bits_beta) - 1) * 255.0)
+        let decoded = (0.5 + f64::from(leaf.qbeta) / f64::from((1u32 << hdr.bits_beta) - 1) * 255.0)
             .clamp(0.0, 255.0) as u8;
         let d = (f64::from(pixel) - f64::from(decoded)).powi(2);
         let r = event_bits(rate, &leaf_events(hdr, &leaf, size_class));
@@ -1565,7 +1683,10 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
     } else {
         ctx.params.shift
     };
-    let SearchOutcome { candidate, evals: block_evals } = ctx.provider.search(&SearchRequest {
+    let SearchOutcome {
+        candidate,
+        evals: block_evals,
+    } = ctx.provider.search(&SearchRequest {
         image: ctx.image,
         contracted: ctx.contracted,
         params: ctx.params,
@@ -1889,6 +2010,114 @@ mod tests {
             zero_threshold: 0,
             lambda: Some(lambda),
         }
+    }
+
+    /// P5a: the RD surrogate's own error, measured rather than assumed. Only the *shape* of
+    /// the accounting is asserted here -- every event attributed, categories summing to the
+    /// totals, the byte-aligned stream never smaller than its own information content. The
+    /// magnitude on real images is a recorded measurement (`marsbench rate-audit`), not a
+    /// gate, so no tolerance is invented for it.
+    #[test]
+    fn audit_rd_accounts_for_every_event_in_the_partition_it_chose() {
+        use crate::audit::{Category, EstimatedProvenance};
+        let image = half_flat_half_noisy_image(64, 64);
+        // Modes 0 and 2 only: P5a's explicit starting point.
+        let options = EncodeOptions {
+            allowed_modes: [true, false, true, false],
+            ..EncodeOptions::default()
+        };
+
+        let rd = audit_rd(&image, &rd_params(200.0), &options).unwrap();
+        assert_eq!(
+            rd.audit.estimated_provenance,
+            EstimatedProvenance::RdWarmupSnapshot
+        );
+        assert!(rd.audit.estimated_bits > 0.0);
+        assert_eq!(
+            rd.audit.unattributed_events, 0,
+            "every field this build writes must be categorised"
+        );
+        assert_eq!(
+            rd.audit.events,
+            rd.audit.categories().iter().map(|c| c.events).sum::<u64>(),
+            "the categories must cover the whole event stream"
+        );
+        let estimated: f64 = rd.audit.categories().iter().map(|c| c.estimated_bits).sum();
+        let actual: f64 = rd.audit.categories().iter().map(|c| c.actual_bits).sum();
+        assert!((estimated - rd.audit.estimated_bits).abs() < 1e-9);
+        assert!((actual - rd.audit.actual_event_bits).abs() < 1e-9);
+        assert!(rd.audit.actual_event_bits >= 0.0);
+        assert!(rd.audit.serialized_bits >= rd.audit.actual_event_bits);
+        assert!(rd.audit.estimate_error_pct().is_finite());
+
+        // The audit describes the partition the encoder actually returned.
+        assert_eq!(rd.audit.leaves, rd.outcome.leaves.len());
+        assert_eq!(
+            rd.audit.leaves as u64,
+            rd.audit.category(Category::Modes).events,
+            "one mode symbol per leaf"
+        );
+        // Exactly two coordinate events per domain-referencing leaf, and no residual fields
+        // while mode 3 is excluded -- both exact identities, not approximations.
+        let domain_leaves = rd.outcome.leaves.iter().filter(|l| l.mode >= 2).count() as u64;
+        assert_eq!(
+            rd.audit.category(Category::Coordinates).events,
+            2 * domain_leaves
+        );
+        assert_eq!(rd.audit.category(Category::Residuals).events, 0);
+        assert!(
+            domain_leaves > 0,
+            "the noisy half should use fractal mode at lambda 200"
+        );
+        assert!(rd.audit.category(Category::Partition).events > 0);
+
+        // A threshold partition is priced by the same snapshot, flagged as a reference
+        // price rather than an objective, and pays for no warm-up of its own.
+        let threshold_params = EncodeParams {
+            lambda: None,
+            ..rd_params(0.0)
+        };
+        let threshold = audit_rd(&image, &threshold_params, &options).unwrap();
+        assert_eq!(
+            threshold.audit.estimated_provenance,
+            EstimatedProvenance::ReferenceOnly
+        );
+        assert_eq!(threshold.outcome.counters.warmup_evals, 0);
+        assert!(threshold.outcome.counters.search_evals > 0);
+        assert_eq!(threshold.audit.unattributed_events, 0);
+        assert!(threshold.audit.serialized_bits >= threshold.audit.actual_event_bits);
+        assert_eq!(threshold.audit.leaves, threshold.outcome.leaves.len());
+        // The threshold branch really is the threshold walk -- it must respond to `t_rms`.
+        // An accidentally shared RD code path would ignore `t_rms` entirely and produce
+        // two identical streams here.
+        let coarse = audit_rd(
+            &image,
+            &EncodeParams {
+                t_rms: 64.0,
+                ..threshold_params
+            },
+            &options,
+        )
+        .unwrap();
+        let fine = audit_rd(
+            &image,
+            &EncodeParams {
+                t_rms: 2.0,
+                ..threshold_params
+            },
+            &options,
+        )
+        .unwrap();
+        assert_ne!(
+            coarse.audit.serialized_bytes, fine.audit.serialized_bytes,
+            "a looser threshold must not produce an identical stream"
+        );
+        assert!(
+            coarse.outcome.leaves.len() < fine.outcome.leaves.len(),
+            "a looser threshold must produce fewer leaves ({} vs {})",
+            coarse.outcome.leaves.len(),
+            fine.outcome.leaves.len()
+        );
     }
 
     /// Step 14's P14.3 harness-sanity check: at a moderate lambda, the RD walk must not

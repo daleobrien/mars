@@ -120,11 +120,36 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - Validation: 90 `mars-bench` unit tests (config/plan/report/tally/store round-trip), 6 runner integration tests with native stub codecs (resume, failed-case retry, unsupported, timeout, preflight failures, repeated-repetition identity), the existing 5+3 smoke tests, and 2 CLI end-to-end tests against the shipped smoke config driving the real encmars/decmars (run → resume → report). Manual `research-smoke` run on `tiny64`: 48.711 dB, 0.117 bpp, one row; the second invocation resumed the case (`resumed: 1`, still one row). Targeted Clippy clean for the changed crates; the pre-existing `encmars::items_after_test_module` lint blocks a `mars-cli --bins --tests` sweep and is unrelated to this step.
 - Limitations: one stage per invocation; subprocess-based, so no per-block search internals; no oracle-cache requirement or coverage computation yet; the `research-search`/`research-rd`/`research-final` corpus sweeps are opt-in definitions and were not run here. The runner P0.3 asked for now exists; the corpus/science exits that depend on it remain open.
 
+### Step 13 — P5a: measure the RD objective's own error
+
+- Added `mars-entropy::encode_with_bits`: the same recording pass `encode` already ran, additionally reporting each event's real information content (`-log2 p`) under the **live, evolving** models. Byte-identical output to `encode` on the same events (asserted); the extra vector is a query, never a mutation.
+- Added `mars-codec::audit` + `encode::audit_rd`: one partition priced twice — by the frozen `t_rms = 8` warm-up snapshot the RD search decides with (`estimated`), and by the live models the stream is really coded with (`actual`) — with both attributed to P5a's five categories by field id (`partition`/`modes`/`coordinates`/`coefficients`/`residuals`). Unrecognised field ids are counted, never dropped. Container overhead (header, section table, alignment, coder final state) is reported separately rather than folded in.
+- Added `mars-bench::rate_audit` + `marsbench rate-audit`: a partition grid over an image set, one append-only row per case (full category breakdown, both bit totals, quality, provenance), and a deterministic Markdown report. Both partition families are priced against the *identical* snapshot, which is what makes P5a's "same retrieval provider and mode set" comparison meaningful; a threshold row's estimate is labelled `reference_only` because that walk never consulted it.
+- No encode behaviour changed. The only edit to the encoder was extracting the existing header construction into `build_header` so the audit cannot disagree with it; the pinned byte-identity, all-method and thread-determinism tests still pass.
+- **Measurement** (`target/p5a/results.jsonl`, report `target/p5a/report.md`; 2 Kodak grayscale images, modes 0/2, fixed residual step 8, no search-method override, ~5m37s foreground):
+
+| image | partition | parameter | leaves | bpp | PSNR-Y dB | estimated bits | actual bits | error |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| kodim01 | RD | λ=200 | 7737 | 0.53809 | 26.5104 | 225083.4 | 211240.7 | +6.553% |
+| kodim01 | RD | λ=800 | 2442 | 0.16781 | 23.1354 | 79307.9 | 65645.3 | +20.813% |
+| kodim01 | RD | λ=3200 | 1548 | 0.08610 | 21.5172 | 48153.9 | 33512.3 | +43.690% |
+| kodim02 | RD | λ=200 | 2310 | 0.14119 | 30.6731 | 61695.6 | 55162.6 | +11.843% |
+| kodim02 | RD | λ=800 | 1602 | 0.06706 | 29.0229 | 40456.3 | 26002.0 | +55.589% |
+| kodim02 | RD | λ=3200 | 1542 | 0.04093 | 28.1497 | 36775.7 | 15743.0 | +133.599% |
+| kodim01 | threshold | t_rms=8 | 18186 | 1.31527 | 30.2127 | 511946.4 | 516847.9 | −0.948% |
+| kodim02 | threshold | t_rms=8 | 5835 | 0.43172 | 33.3018 | 160514.8 | 169396.9 | −5.243% |
+
+- **The error is category-localized, not diffuse.** Across every RD row, `coordinates` is priced within −10%..+5% and `coefficients` within +5%..+47%, while `partition` (split flags) ranges +51%..+9507% and `modes` +203%..+1318%. On kodim01 λ=3200 those two fields are 24% of the estimated rate but only 4.5% of the actual payload (11645 of 48154 estimated bits vs 1521 of 33512 actual).
+- **The bias has a direction.** The snapshot's statistics come from a *fine* `t_rms = 8` partition, where a size class's split flag is mostly `1`; a coarse partition emits mostly `0` at the few nodes it still considers, and the snapshot prices that rare symbol at roughly `log2` of a small probability while the live model rapidly makes it nearly free. The surrogate therefore over-penalizes *not* splitting, i.e. it is biased toward more splitting than a live rate model would justify. `threshold` partitions, whose statistics match the warm-up by construction, are priced almost exactly (−0.948%, −5.243%) — a clean internal control that the accounting itself is sound.
+- **Container overhead is negligible at these rates**: 248–278 bits per stream (header, section table, word alignment, coder final state), under 0.5% of the payload.
+- Validation: `mars-entropy` 5 unit tests (including byte-identity and a slack bound tying the summed live costs to the byte-aligned payload); `mars-codec` 54 lib tests including a new `audit_rd` test asserting every event is attributed, the category totals reproduce the totals, exactly two coordinate events per domain-referencing leaf, zero residual fields with mode 3 excluded, and that the threshold branch really responds to `t_rms` (an accidentally shared RD path would ignore it); `mars-bench` 5 `rate_audit` unit tests plus 95 lib tests; `mars-cli` 2 end-to-end audit tests against the pinned `tiny64` fixture (real encode, decode, measure; append-only across two runs; invalid `--modes` and `--dims`-without-`--input` refused before anything is written). Targeted Clippy clean for every changed crate and target; changed files rustfmt-clean.
+- Limits, stated rather than papered over: λ=50 is **not** measured — the provided `--lambdas 3200,800,200` grid was chosen to bound foreground time (the trend is already monotone in λ, and Step22's own sweep set the precedent of reporting partial grids plainly); two images, one profile, modes 0/2 (so `residuals` is identically zero and says nothing about mode 3); error percentages are meaningless wherever the actual magnitude is near zero (the threshold arm's `modes` field: 1.8 estimated vs 10.3 actual bits out of ~512000). Nothing here is a promotion claim: P5a asked for the objective's error to be measured, and it now is, per category.
+
 ## 2. What Mars already implements
 
 README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.
 
-**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. A restricted file-to-file smoke and shared production retrieval interface are implemented (steps 6/7); random (step 8) and APCC (step 10) are opt-in providers; the out-of-loop boundary filter is implemented (step 11); the strict config-driven experiment runner is implemented (step 12). The sparse multi-domain format remains proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
+**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. A restricted file-to-file smoke and shared production retrieval interface are implemented (steps 6/7); random (step 8) and APCC (step 10) are opt-in providers; the out-of-loop boundary filter is implemented (step 11); the strict config-driven experiment runner is implemented (step 12); P5a's objective audit is implemented and measured (step 13), and it found the surrogate's error to be localized in the partition and mode fields rather than diffuse. The sparse multi-domain format remains proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
 
 | Area | Existing implementation | Consequence for this plan |
 |---|---|---|
@@ -370,6 +395,8 @@ Sources: [optimal hierarchical partition summary](Research/summaries/Optimal_hie
 
 ### P5a: verify the current objective
 
+**Implemented and measured in execution step 13.** `marsbench rate-audit` prices one partition twice — against the frozen warm-up snapshot the RD search decides with, and against the live models the stream is really coded with — and attributes both to the five categories below. On two Kodak images the total error was +6.6%..+133.6% and rose with λ, but the error was concentrated in `partition` (split flags) and `modes`; `coordinates` stayed within −10%..+5%. Because the snapshot comes from a fine `t_rms = 8` partition, the surrogate over-penalizes *not* splitting, which biases the search toward finer partitions than a live rate model would justify. λ=50, mode 3 and more images remain unmeasured.
+
 Mars already searches a full square quadtree and prunes bottom-up. Its costs are frozen entropy-model estimates; domain-coordinate events are priced differently from the real sequential predictor, and actual entropy models adapt while writing.
 
 Consequently, the current solution is optimal only over evaluated choices under its additive surrogate—not all domains, partitions, stream lengths, or final decoded distortion.
@@ -534,7 +561,7 @@ For each promotion show worst-image behavior. Proposed guardrails: no unexplaine
 | 7 | Sparse model/format/decoder/rate integration | Conditional versioned experimental codec and RD report |
 | 8 | Result store/reporting and docs | Reproducible final leaderboard, limitations, promote/defer decisions |
 
-**Next deliverable:** 0a/0b are delivered — residual metadata and geometry fixes, and the strict config-driven file-to-file runner with schema, corpus-completeness/timeout handling and a reproducible smoke report. Next is P5a's objective/counter audit and the fixed8-vs-modes0/2/3 ablation on the runner (`configs/research-rd.json`), then the P4 retrieval challengers; do not register a new search enum before those measured curves exist.
+**Next deliverable:** P5a's audit is delivered and measured; its finding (split-flag and mode symbols over-priced against a fine warm-up snapshot) is the input to P5b/P5c, not P5b itself. Next is P5c's deliberate quality extension — let several retrieved domain candidates into RD mode competition, without claiming it is output-preserving — or, if the audit's bias is judged the binding constraint, a re-snapshotting objective; either way, do not register a new search enum before those measured curves exist.
 
 0a and 0b can be delegated independently only with disjoint file ownership. Random, APCC, and P4 work can proceed in parallel after the shared interface is frozen; one integration owner controls common enums/CLI files. P5 and P6 can proceed independently after P0/P1. Sparse coding follows successful APCC and corrected RD/mode accounting.
 

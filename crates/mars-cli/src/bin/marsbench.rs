@@ -47,6 +47,8 @@ enum Cmd {
     Experiment(ExperimentArgs),
     /// P0.3: render a Markdown report from an experiment store.
     ExperimentReport(ExperimentReportArgs),
+    /// P5a: audit the RD surrogate's estimated vs actual bits by category.
+    RateAudit(RateAuditArgs),
     /// Compute every pinned quality metric for one (original, decoded) pair.
     Metrics(MetricsArgs),
     /// BD-rate and BD-PSNR between two curves given as JSON.
@@ -249,6 +251,118 @@ fn experiment_report(a: ExperimentReportArgs) -> Result<()> {
         }
         None => print!("{markdown}"),
     }
+    Ok(())
+}
+
+#[derive(Args)]
+struct RateAuditArgs {
+    /// Corpus image-set index.
+    #[arg(long, default_value = "corpus/standard.images.json")]
+    index: PathBuf,
+    /// Image-name subset of the index (comma-delimited); empty means all of it.
+    #[arg(long, value_delimiter = ',')]
+    images: Vec<String>,
+    /// Audit one explicit headerless raw image instead of a corpus index.
+    #[arg(long)]
+    input: Option<PathBuf>,
+    /// Dimensions for --input, e.g. 64x64.
+    #[arg(long, value_name = "WxH", value_parser = parse_dims)]
+    dims: Option<(usize, usize)>,
+    /// RD lambdas to audit, in the order given.
+    #[arg(long, value_delimiter = ',', default_value = "50,200,800,3200")]
+    lambdas: Vec<f64>,
+    /// Legacy threshold values to audit, in the order given.
+    #[arg(long, value_delimiter = ',', default_value = "8")]
+    thresholds: Vec<f64>,
+    /// Allowed leaf modes (P5a starts at 0,2).
+    #[arg(long, value_delimiter = ',', default_value = "0,2")]
+    modes: Vec<u8>,
+    #[arg(long, default_value_t = 4)]
+    min_size: u32,
+    #[arg(long, default_value_t = 16)]
+    max_size: u32,
+    #[arg(long, default_value_t = 4)]
+    shift: u32,
+    #[arg(long, default_value_t = 4)]
+    bits_alfa: u32,
+    #[arg(long, default_value_t = 7)]
+    bits_beta: u32,
+    #[arg(long, default_value_t = 1.0)]
+    max_alfa: f64,
+    /// Decoder iterations for the audited decode.
+    #[arg(long, default_value_t = 10)]
+    iterations: u32,
+    /// Append-only result store.
+    #[arg(long, default_value = "results/rate-audit.jsonl")]
+    store: PathBuf,
+    /// Scratch directory for coded and decoded artifacts.
+    #[arg(long, default_value = "target/rate-audit")]
+    scratch: PathBuf,
+    /// Write the Markdown report here instead of stdout.
+    #[arg(long)]
+    markdown_out: Option<PathBuf>,
+    /// Repository root for resolving index-relative paths.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+}
+
+fn rate_audit(a: RateAuditArgs) -> Result<()> {
+    let root = a.root;
+    let images = match (&a.input, a.dims) {
+        (Some(path), Some((width, height))) => {
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("input")
+                .to_string();
+            vec![mars_bench::rate_audit::image_from_input(
+                &root, path, width, height, &name,
+            )?]
+        }
+        (None, None) => mars_bench::rate_audit::images_from_index(&root, &a.index, &a.images)?,
+        (Some(_), None) => bail!("--input requires --dims WxH"),
+        (None, Some(_)) => bail!("--dims is only valid with --input"),
+    };
+    if a.modes.is_empty() {
+        bail!("--modes must not be empty");
+    }
+    let mut allowed = [false; 4];
+    for &mode in &a.modes {
+        if mode > 3 {
+            bail!("--modes must contain only 0..=3, got {mode}");
+        }
+        allowed[usize::from(mode)] = true;
+    }
+    let config = mars_bench::rate_audit::AuditConfig {
+        images,
+        lambdas: a.lambdas,
+        thresholds: a.thresholds,
+        modes: allowed,
+        mode_numbers: a.modes,
+        codec: mars_bench::rate_audit::AuditCodec {
+            min_size: a.min_size,
+            max_size: a.max_size,
+            shift: a.shift,
+            bits_alfa: a.bits_alfa,
+            bits_beta: a.bits_beta,
+            max_alfa: a.max_alfa,
+        },
+        iterations: a.iterations,
+        scratch: a.scratch,
+    };
+    let summary = mars_bench::rate_audit::run(&root, &config, &a.store)?;
+    match a.markdown_out {
+        Some(path) => {
+            std::fs::write(&path, &summary.markdown)?;
+            eprintln!("wrote {}", path.display());
+        }
+        None => print!("{}", summary.markdown),
+    }
+    eprintln!(
+        "appended {} rows to {}",
+        summary.rows,
+        summary.store.display()
+    );
     Ok(())
 }
 
@@ -679,6 +793,7 @@ fn main() -> Result<()> {
         Cmd::ExperimentSmoke(a) => experiment_smoke(a),
         Cmd::Experiment(a) => experiment(a),
         Cmd::ExperimentReport(a) => experiment_report(a),
+        Cmd::RateAudit(a) => rate_audit(a),
         Cmd::Metrics(a) => metrics(a),
         Cmd::Bdrate(a) => bdrate(a),
         Cmd::Report(a) => report(a),

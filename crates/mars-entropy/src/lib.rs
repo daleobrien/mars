@@ -44,7 +44,10 @@ const RESCALE_THRESHOLD: u64 = 1 << 16;
 
 impl AdaptiveModel {
     pub fn new(alphabet_size: u32) -> Self {
-        assert!(alphabet_size >= 2, "a 1-symbol alphabet carries no information");
+        assert!(
+            alphabet_size >= 2,
+            "a 1-symbol alphabet carries no information"
+        );
         assert!(
             u64::from(alphabet_size) < PRECISION_TOTAL,
             "alphabet too large for PRECISION"
@@ -110,7 +113,10 @@ impl AdaptiveModel {
             }
             cum = next;
         }
-        unreachable!("quantile {quantile} out of range for a model with total {}", self.total)
+        unreachable!(
+            "quantile {quantile} out of range for a model with total {}",
+            self.total
+        )
     }
 }
 
@@ -129,14 +135,21 @@ impl EncoderModel<PRECISION> for AdaptiveModel {
             return None;
         }
         let (left, prob) = self.left_and_prob(symbol as usize);
-        Some((left, NonZeroU32::new(prob).expect("probability is always >= 1")))
+        Some((
+            left,
+            NonZeroU32::new(prob).expect("probability is always >= 1"),
+        ))
     }
 }
 
 impl DecoderModel<PRECISION> for AdaptiveModel {
     fn quantile_function(&self, quantile: u32) -> (u32, u32, NonZeroU32) {
         let (symbol, left, prob) = self.symbol_for_quantile(quantile);
-        (symbol, left, NonZeroU32::new(prob).expect("probability is always >= 1"))
+        (
+            symbol,
+            left,
+            NonZeroU32::new(prob).expect("probability is always >= 1"),
+        )
     }
 }
 
@@ -185,13 +198,55 @@ pub struct Event {
 /// typically produced by walking the same recursive structure the decoder will walk,
 /// reading symbols from already-known data instead of decoding them.
 pub fn encode(events: &[Event]) -> Vec<u8> {
+    encode_recorded(record(events).0)
+}
+
+/// The compressed bytes, plus each event's own information content under the *live*,
+/// evolving per-context model -- `-log2(p_i)` for the exact fixed-point probability the
+/// coder used. This is what the stream really paid per event, as distinct from any frozen
+/// estimate a caller compared it against (research plan §8 P5a).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Coded {
+    pub bytes: Vec<u8>,
+    /// `bits_per_event[i]` belongs to `events[i]`, in the same order.
+    pub bits_per_event: Vec<f64>,
+    /// `sum(bits_per_event)`. Bounded above by `8 * bytes.len()`: the difference is the
+    /// coder's final state and word-alignment padding, not hidden cost.
+    pub bits_total: f64,
+}
+
+impl Coded {
+    /// The byte-aligned size of the compressed payload, in bits.
+    pub fn byte_aligned_bits(&self) -> f64 {
+        self.bytes.len() as f64 * 8.0
+    }
+}
+
+/// [`encode`], additionally reporting each event's own cost under the evolving models.
+/// Produces byte-identical output to [`encode`] on the same events -- the recording loop is
+/// shared, and the extra vector is a query, never a mutation.
+pub fn encode_with_bits(events: &[Event]) -> Coded {
+    let (recorded, bits_per_event) = record(events);
+    let bits_total = bits_per_event.iter().sum();
+    Coded {
+        bytes: encode_recorded(recorded),
+        bits_per_event,
+        bits_total,
+    }
+}
+
+/// The shared forward pass: evolve one model per context, recording each symbol's
+/// fixed-point interval and the `-log2 p` cost that interval represents.
+fn record(events: &[Event]) -> (Vec<(u32, FixedInterval)>, Vec<f64>) {
     let mut models: HashMap<ContextKey, AdaptiveModel> = HashMap::new();
     let mut recorded: Vec<(u32, FixedInterval)> = Vec::with_capacity(events.len());
+    let mut bits = Vec::with_capacity(events.len());
     for ev in events {
         let model = models
             .entry(ev.ctx)
             .or_insert_with(|| AdaptiveModel::new(ev.alphabet));
         let (left, prob) = model.left_and_prob(ev.symbol as usize);
+        bits.push(-(f64::from(prob) / PRECISION_TOTAL as f64).log2());
         recorded.push((
             ev.symbol,
             FixedInterval {
@@ -201,8 +256,7 @@ pub fn encode(events: &[Event]) -> Vec<u8> {
         ));
         model.update(ev.symbol);
     }
-
-    encode_recorded(recorded)
+    (recorded, bits)
 }
 
 /// Step 14: replay `events` against fresh per-context [`AdaptiveModel`]s exactly the way
@@ -229,7 +283,9 @@ fn encode_recorded(recorded: Vec<(u32, FixedInterval)>) -> Vec<u8> {
         ans.encode_symbol(symbol, interval)
             .expect("fixed-point interval is always valid");
     }
-    let words = ans.into_compressed().expect("Vec backend never fails to write");
+    let words = ans
+        .into_compressed()
+        .expect("Vec backend never fails to write");
     bytemuck_words_to_bytes(&words)
 }
 
@@ -301,12 +357,14 @@ mod tests {
     fn round_trips_a_skewed_stream() {
         // A single context, heavily skewed toward symbol 0 -- the case adaptive coding
         // should compress well and, more importantly, must still round-trip exactly.
-        let symbols: Vec<u32> = (0..2000)
-            .map(|i| if i % 7 == 0 { 1 } else { 0 })
-            .collect();
+        let symbols: Vec<u32> = (0..2000).map(|i| if i % 7 == 0 { 1 } else { 0 }).collect();
         let events: Vec<Event> = symbols
             .iter()
-            .map(|&s| Event { ctx: (0, 0), alphabet: 2, symbol: s })
+            .map(|&s| Event {
+                ctx: (0, 0),
+                alphabet: 2,
+                symbol: s,
+            })
             .collect();
         let bytes = encode(&events);
 
@@ -315,7 +373,11 @@ mod tests {
         assert_eq!(decoded, symbols);
 
         // Skewed binary data at ~2000 symbols should be well under 1 bit/symbol.
-        assert!(bytes.len() < 2000 / 8 * 3, "got {} bytes for 2000 symbols", bytes.len());
+        assert!(
+            bytes.len() < 2000 / 8 * 3,
+            "got {} bytes for 2000 symbols",
+            bytes.len()
+        );
     }
 
     #[test]
@@ -326,7 +388,11 @@ mod tests {
             let ctx: ContextKey = (u8::try_from(i % 3).unwrap(), i % 5);
             let alphabet = 4 + (i % 3) * 10;
             let symbol = i % alphabet;
-            events.push(Event { ctx, alphabet, symbol });
+            events.push(Event {
+                ctx,
+                alphabet,
+                symbol,
+            });
             expected.push((ctx, alphabet, symbol));
         }
         let bytes = encode(&events);
@@ -340,5 +406,60 @@ mod tests {
     fn single_symbol_alphabet_is_rejected() {
         let result = std::panic::catch_unwind(|| AdaptiveModel::new(1));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn encode_with_bits_is_byte_identical_and_its_cost_bounds_the_payload() {
+        let symbols: Vec<u32> = (0..4000).map(|i| if i % 5 == 0 { 1 } else { 0 }).collect();
+        let events: Vec<Event> = symbols
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| Event {
+                ctx: (u8::try_from(i % 2).unwrap(), 0),
+                alphabet: 2,
+                symbol: s,
+            })
+            .collect();
+
+        let plain = encode(&events);
+        let coded = encode_with_bits(&events);
+        assert_eq!(
+            coded.bytes, plain,
+            "the accounting pass must not change the bytes"
+        );
+        assert_eq!(coded.bits_per_event.len(), events.len());
+        assert!(coded
+            .bits_per_event
+            .iter()
+            .all(|b| b.is_finite() && *b >= 0.0));
+
+        // The recorded costs are the real payload: byte alignment, the coder's final
+        // state, and word padding are the only difference, never a large hidden term.
+        let slack = coded.byte_aligned_bits() - coded.bits_total;
+        assert!(
+            slack >= -1e-9 && slack < 128.0,
+            "cost {} vs payload {} bits (slack {slack})",
+            coded.bits_total,
+            coded.byte_aligned_bits()
+        );
+    }
+
+    #[test]
+    fn encode_with_bits_reports_a_deterministic_cost_for_a_repeated_event() {
+        // The same context/symbol pair gets strictly cheaper as its model adapts, which is
+        // the property the audit relies on to compare a frozen estimate to a live cost.
+        let events: Vec<Event> = (0..64)
+            .map(|_| Event {
+                ctx: (0, 0),
+                alphabet: 8,
+                symbol: 3,
+            })
+            .collect();
+        let coded = encode_with_bits(&events);
+        assert!(coded.bits_per_event[0] > coded.bits_per_event[63]);
+        assert_eq!(
+            coded.bits_per_event,
+            encode_with_bits(&events).bits_per_event
+        );
     }
 }

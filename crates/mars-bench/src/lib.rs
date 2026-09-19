@@ -25,6 +25,7 @@ pub mod oracle;
 pub mod parallel_bench;
 pub mod pchip;
 pub mod provenance;
+pub mod rate_audit;
 pub mod rd_opt;
 pub mod recall;
 pub mod report;
