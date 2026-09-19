@@ -425,113 +425,6 @@ impl Cli {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(args: &[&str]) -> Cli {
-        Cli::try_parse_from(
-            ["encmars", "input.png", "output.mars"]
-                .into_iter()
-                .chain(args.iter().copied()),
-        )
-        .expect("valid arguments")
-    }
-
-    #[test]
-    fn defaults_select_rd_and_measured_modes_without_other_experiments() {
-        let cli = parse(&[]);
-        assert_eq!(cli.effective_lambda(), Some(200.0));
-        assert_eq!(cli.effective_t_rms(), 8.0);
-        assert!(cli.modes.is_empty());
-        assert_eq!(cli.effective_modes(), [0, 2]);
-        assert!(matches!(cli.subsampling, SubsamplingArg::Yuv444));
-        assert!(!cli.adaptive_density && !cli.adaptive_residual && !cli.progressive);
-    }
-
-    #[test]
-    fn explicit_thresholds_and_methods_keep_the_legacy_path() {
-        for args in [
-            vec!["--t-rms", "8"],
-            vec!["-r", "4"],
-            vec!["--chroma-t-rms", "16"],
-            vec!["--method", "fisher"],
-        ] {
-            assert_eq!(parse(&args).effective_lambda(), None);
-        }
-        assert_eq!(parse(&["-r", "4"]).effective_t_rms(), 4.0);
-    }
-
-    #[test]
-    fn format_boundaries_are_not_replaced_with_arbitrary_limits() {
-        for args in [
-            vec!["--bits-alfa", "24", "--bits-beta", "24"],
-            vec!["--min-size", "1", "--max-size", "128", "--shift", "254"],
-            vec!["--max-alfa", "0.03125"],
-            vec!["--max-alfa", "7.96875"],
-            vec!["--t-rms", "1e300", "--zero-threshold", "4294967295"],
-        ] {
-            parse(&args).validate().expect("supported parameter bounds");
-        }
-    }
-
-    #[test]
-    fn rd_candidates_above_one_require_the_rd_exhaustive_path() {
-        assert_eq!(parse(&[]).rd_candidates, 1);
-        assert_eq!(parse(&["--rd-candidates", "1"]).rd_candidates, 1);
-        // Above 1 needs the RD path and the exhaustive search.
-        assert!(parse(&["--rd-candidates", "3"]).validate().is_ok());
-        assert!(parse(&["--lambda", "200", "--rd-candidates", "3"])
-            .validate()
-            .is_ok());
-        assert!(parse(&[
-            "--method",
-            "exhaustive",
-            "--lambda",
-            "200",
-            "--rd-candidates",
-            "3"
-        ])
-        .validate()
-        .is_ok());
-        // A legacy threshold, a candidate-restricted method, and zero are all refused.
-        assert!(parse(&["--rd-candidates", "3", "-r", "8"])
-            .validate()
-            .is_err());
-        assert!(parse(&[
-            "--method",
-            "fisher",
-            "--lambda",
-            "200",
-            "--rd-candidates",
-            "3"
-        ])
-        .validate()
-        .is_err());
-        assert!(parse(&["--rd-candidates", "0"]).validate().is_err());
-    }
-
-    #[test]
-    fn explicit_lambda_overrides_threshold_and_modes_replace_defaults() {
-        let cli = parse(&[
-            "--lambda",
-            "50",
-            "--t-rms",
-            "0",
-            "--chroma-t-rms",
-            "16",
-            "--modes",
-            "0,1,2,3",
-        ]);
-        assert_eq!(cli.effective_lambda(), Some(50.0));
-        assert_eq!(cli.effective_t_rms(), 0.0);
-        assert_eq!(cli.modes, [0, 1, 2, 3]);
-        assert_eq!(parse(&["--lambda", "0"]).effective_lambda(), Some(0.0));
-        assert_eq!(parse(&["--modes", "3"]).modes, [3]);
-        assert_eq!(parse(&["--progressive"]).effective_lambda(), Some(200.0));
-    }
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     cli.validate()?;
@@ -781,4 +674,111 @@ fn run_progressive(
         leaves.len(),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(
+            ["encmars", "input.png", "output.mars"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )
+        .expect("valid arguments")
+    }
+
+    #[test]
+    fn defaults_select_rd_and_measured_modes_without_other_experiments() {
+        let cli = parse(&[]);
+        assert_eq!(cli.effective_lambda(), Some(200.0));
+        assert_eq!(cli.effective_t_rms(), 8.0);
+        assert!(cli.modes.is_empty());
+        assert_eq!(cli.effective_modes(), [0, 2]);
+        assert!(matches!(cli.subsampling, SubsamplingArg::Yuv444));
+        assert!(!cli.adaptive_density && !cli.adaptive_residual && !cli.progressive);
+    }
+
+    #[test]
+    fn explicit_thresholds_and_methods_keep_the_legacy_path() {
+        for args in [
+            vec!["--t-rms", "8"],
+            vec!["-r", "4"],
+            vec!["--chroma-t-rms", "16"],
+            vec!["--method", "fisher"],
+        ] {
+            assert_eq!(parse(&args).effective_lambda(), None);
+        }
+        assert_eq!(parse(&["-r", "4"]).effective_t_rms(), 4.0);
+    }
+
+    #[test]
+    fn format_boundaries_are_not_replaced_with_arbitrary_limits() {
+        for args in [
+            vec!["--bits-alfa", "24", "--bits-beta", "24"],
+            vec!["--min-size", "1", "--max-size", "128", "--shift", "254"],
+            vec!["--max-alfa", "0.03125"],
+            vec!["--max-alfa", "7.96875"],
+            vec!["--t-rms", "1e300", "--zero-threshold", "4294967295"],
+        ] {
+            parse(&args).validate().expect("supported parameter bounds");
+        }
+    }
+
+    #[test]
+    fn rd_candidates_above_one_require_the_rd_exhaustive_path() {
+        assert_eq!(parse(&[]).rd_candidates, 1);
+        assert_eq!(parse(&["--rd-candidates", "1"]).rd_candidates, 1);
+        // Above 1 needs the RD path and the exhaustive search.
+        assert!(parse(&["--rd-candidates", "3"]).validate().is_ok());
+        assert!(parse(&["--lambda", "200", "--rd-candidates", "3"])
+            .validate()
+            .is_ok());
+        assert!(parse(&[
+            "--method",
+            "exhaustive",
+            "--lambda",
+            "200",
+            "--rd-candidates",
+            "3"
+        ])
+        .validate()
+        .is_ok());
+        // A legacy threshold, a candidate-restricted method, and zero are all refused.
+        assert!(parse(&["--rd-candidates", "3", "-r", "8"])
+            .validate()
+            .is_err());
+        assert!(parse(&[
+            "--method",
+            "fisher",
+            "--lambda",
+            "200",
+            "--rd-candidates",
+            "3"
+        ])
+        .validate()
+        .is_err());
+        assert!(parse(&["--rd-candidates", "0"]).validate().is_err());
+    }
+
+    #[test]
+    fn explicit_lambda_overrides_threshold_and_modes_replace_defaults() {
+        let cli = parse(&[
+            "--lambda",
+            "50",
+            "--t-rms",
+            "0",
+            "--chroma-t-rms",
+            "16",
+            "--modes",
+            "0,1,2,3",
+        ]);
+        assert_eq!(cli.effective_lambda(), Some(50.0));
+        assert_eq!(cli.effective_t_rms(), 0.0);
+        assert_eq!(cli.modes, [0, 1, 2, 3]);
+        assert_eq!(parse(&["--lambda", "0"]).effective_lambda(), Some(0.0));
+        assert_eq!(parse(&["--modes", "3"]).modes, [3]);
+        assert_eq!(parse(&["--progressive"]).effective_lambda(), Some(200.0));
+    }
 }

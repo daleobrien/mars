@@ -29,7 +29,7 @@ use mars_search::{DomainPool, RangeBlock};
 
 /// Explicit seed, recorded here and in `docs/decisions.md`'s Step 17 entry — the whole
 /// point of pinning it is that a reviewer can reproduce this exact model.
-const RNG_SEED: u64 = 0xC0FFEE_17;
+const RNG_SEED: u64 = 0xC0_FF_EE_17;
 const SIZE: u32 = 16;
 const NEG_PER_BLOCK: usize = 32;
 const EPOCHS: usize = 300;

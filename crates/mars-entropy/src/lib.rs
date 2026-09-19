@@ -437,7 +437,7 @@ mod tests {
         // state, and word padding are the only difference, never a large hidden term.
         let slack = coded.byte_aligned_bits() - coded.bits_total;
         assert!(
-            slack >= -1e-9 && slack < 128.0,
+            (-1e-9..128.0).contains(&slack),
             "cost {} vs payload {} bits (slack {slack})",
             coded.bits_total,
             coded.byte_aligned_bits()

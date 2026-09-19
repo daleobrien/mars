@@ -65,8 +65,10 @@ fn cases() -> [(EncodeParams, EncodeOptions); 4] {
     ]
 }
 
+type RecordedRequests = Arc<Mutex<Vec<(u32, u32, u32, u32)>>>;
+
 struct NoCandidates {
-    requests: Arc<Mutex<Vec<(u32, u32, u32, u32)>>>,
+    requests: RecordedRequests,
     // Demonstrates the agreed factory can build an owned index from Contracted.
     contracted_copy: Vec<i32>,
 }

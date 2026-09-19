@@ -64,7 +64,7 @@ fn block_artifact_psnr_improves_and_natural_ramp_does_not_degrade() {
             } else {
                 140
             };
-            (base + (i * 37 % 7) as i32 - 3) as u8
+            (base + (i * 37 % 7) - 3) as u8
         })
         .collect();
     let decoded = Plane::from_vec(32, 32, pixels);
