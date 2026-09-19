@@ -17,7 +17,7 @@ cargo build \
   --debug-regions regions.png \
   --color eyes \
   --min-size 8 \
-  --max-size 64 \
+  --max-size 128 \
   --outside-min-size-ramp \
   --desaturate 0.3 \
   --desaturate-ramp 0 \
