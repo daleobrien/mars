@@ -572,7 +572,7 @@ raw (`scripts/build-imageset.py` converts via pinned Rec.601 luma) because the 1
 is grayscale-only. Anchors have no such constraint.
 
 **Finding.** `mars_core::io::read_image` already reads 8-bit RGB PNG directly
-(`crates/mars-core/src/io.rs::read_png`), and §M2's PSNR-Y/PSNR-Cb/PSNR-Cr/PSNR-YUV
+(`crates/mars-core/src/io.rs::read_encoded`), and §M2's PSNR-Y/PSNR-Cb/PSNR-Cr/PSNR-YUV
 definitions are colour-aware. Building a second grayscale-raw image set for anchors would
 throw away information (all five anchors are colour-capable) and would not even be
 comparable to a real-world JPEG/AVIF/etc. deployment, which encodes colour. Separately:

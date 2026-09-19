@@ -8,7 +8,10 @@
 use std::path::PathBuf;
 
 use mars_core::image::Image;
-use mars_core::io::{read_image, read_pgm, read_ppm, read_raw, write_pnm, ImageError};
+use mars_core::io::{
+    read_image, read_pgm, read_ppm, read_raw, write_jpeg, write_jpeg_with_quality, write_png,
+    write_pnm, ImageError,
+};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("mars-io-{}", std::process::id()));
@@ -135,6 +138,97 @@ fn write_pnm_then_read_pgm_round_trips_a_gray_image_exactly() {
     write_pnm(&path, &img).unwrap();
     let back = read_pgm(&path).unwrap();
     assert_eq!(back.as_slice(), &[7, 8, 9, 10]);
+}
+
+#[test]
+fn write_png_then_read_image_round_trips_a_colour_image_exactly() {
+    let path = scratch("rt.png");
+    let r = mars_core::image::Plane::from_vec(2, 2, vec![1, 2, 3, 4]);
+    let g = mars_core::image::Plane::from_vec(2, 2, vec![10, 20, 30, 40]);
+    let b = mars_core::image::Plane::from_vec(2, 2, vec![100, 200, 250, 5]);
+    let img = Image::rgb(r, g, b);
+    write_png(&path, &img).unwrap();
+    let back = read_image(&path, None).unwrap();
+    assert_eq!((back.width(), back.height()), (2, 2));
+    for (a, b) in img.planes().iter().zip(back.planes()) {
+        assert_eq!(a.as_slice(), b.as_slice());
+    }
+}
+
+#[test]
+fn png_content_is_autodetected_whatever_the_extension() {
+    // A PNG written to a name the dispatcher does not know must still read: the reader
+    // falls back to the file's own signature rather than refusing the extension.
+    let path = scratch("mystery.dat");
+    let img = Image::gray(mars_core::image::Plane::from_vec(2, 2, vec![7, 8, 9, 10]));
+    write_png(&path, &img).unwrap();
+    let back = read_image(&path, None).unwrap();
+    assert_eq!(back.planes()[0].as_slice(), &[7, 8, 9, 10]);
+}
+
+#[test]
+fn jpeg_is_written_from_content_and_read_back_close() {
+    let path = scratch("colour.jpg");
+    let n = 8 * 8;
+    let img = Image::rgb(
+        mars_core::image::Plane::from_vec(8, 8, vec![200u8; n]),
+        mars_core::image::Plane::from_vec(8, 8, vec![100u8; n]),
+        mars_core::image::Plane::from_vec(8, 8, vec![50u8; n]),
+    );
+    write_jpeg(&path, &img).unwrap();
+    let back = read_image(&path, None).unwrap();
+    assert_eq!((back.width(), back.height()), (8, 8));
+    assert_eq!(back.planes().len(), 3);
+    // JPEG is lossy, so a constant block is only required to stay close, not exact.
+    for (original, decoded) in img.planes().iter().zip(back.planes()) {
+        let worst = original
+            .as_slice()
+            .iter()
+            .zip(decoded.as_slice())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(worst <= 16, "plane drifted by {worst} through a JPEG round trip");
+    }
+}
+
+#[test]
+fn jpeg_content_is_autodetected_even_when_named_png() {
+    // The writer forces the format from the function, so a mis-named `.png` is really a
+    // JPEG on disk -- and the reader must decode it as one by content, not name.
+    let path = scratch("actually-jpeg.png");
+    let img = Image::gray(mars_core::image::Plane::from_vec(8, 8, vec![128u8; 64]));
+    write_jpeg(&path, &img).unwrap();
+    let back = read_image(&path, None).unwrap();
+    assert_eq!((back.width(), back.height()), (8, 8));
+    assert_eq!(back.planes().len(), 1, "a gray JPEG reads back as one plane");
+}
+
+#[test]
+fn jpeg_quality_trades_size_for_detail() {
+    let low_path = scratch("quality-low.jpg");
+    let high_path = scratch("quality-high.jpg");
+    // High-frequency content, so the quantiser has something to discard at low quality.
+    let img = Image::gray(mars_core::image::Plane::from_vec(
+        16,
+        16,
+        (0..256).map(|i| ((i * 37 + i / 16 * 13) % 256) as u8).collect(),
+    ));
+    write_jpeg_with_quality(&low_path, &img, 10).unwrap();
+    write_jpeg_with_quality(&high_path, &img, 95).unwrap();
+    let low = std::fs::read(&low_path).unwrap();
+    let high = std::fs::read(&high_path).unwrap();
+    assert!(low.starts_with(&[0xFF, 0xD8, 0xFF]), "quality 10 is not a JPEG");
+    assert!(high.starts_with(&[0xFF, 0xD8, 0xFF]), "quality 95 is not a JPEG");
+    assert!(
+        high.len() > low.len(),
+        "quality 95 ({} bytes) should exceed quality 10 ({} bytes)",
+        high.len(),
+        low.len()
+    );
+    let back = read_image(&high_path, None).unwrap();
+    assert_eq!((back.width(), back.height()), (16, 16));
+    assert_eq!(back.planes().len(), 1);
 }
 
 #[test]

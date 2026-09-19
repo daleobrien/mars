@@ -83,7 +83,8 @@ impl From<SubsamplingArg> for Subsampling {
 /// Compress an image into a `.mars` bitstream.
 #[derive(Parser)]
 struct Cli {
-    /// Input image: .png, .pgm, .ppm, or headerless .raw/.y/.gray (needs --raw-width/--raw-height).
+    /// Input image: .png, .jpg/.jpeg, .pgm, .ppm, or headerless .raw/.y/.gray (needs
+    /// --raw-width/--raw-height). PNG and JPEG are autodetected from the file's contents.
     input: PathBuf,
     /// Output `.mars` bitstream path.
     output: PathBuf,

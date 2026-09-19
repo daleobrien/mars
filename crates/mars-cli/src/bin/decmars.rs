@@ -12,15 +12,16 @@ use mars_codec::color::{
 };
 use mars_codec::postprocess::smooth_boundaries;
 use mars_core::image::Image;
-use mars_core::io::{ImageError, write_png, write_pnm};
+use mars_core::io::{ImageError, write_jpeg_with_quality, write_png, write_pnm};
 
 /// Decompress a `.mars` bitstream to an image.
 #[derive(Parser)]
 struct Cli {
     /// Input `.mars` bitstream.
     input: PathBuf,
-    /// Output image path. `.png` writes a viewable PNG; `.pgm`/`.ppm` writes a raw PNM
-    /// (single-plane for grayscale input, P6 colour for RGB input).
+    /// Output image path. `.png` writes a viewable PNG; `.jpg`/`.jpeg` a lossy JPEG
+    /// (inspection only -- it will not match the decode pixel-for-pixel); `.pgm`/`.ppm`
+    /// writes a raw PNM (single-plane for grayscale input, P6 colour for RGB input).
     output: PathBuf,
 
     /// Fixed-point iterations to run from the flat grey (128) seed. With `--auto`, this is
@@ -79,16 +80,38 @@ struct Cli {
     /// unsmoothed, and only the final output is filtered.
     #[arg(long)]
     smooth: bool,
+
+    /// JPEG quality (1-100, higher is better) for a `.jpg`/`.jpeg` `output`; defaults to
+    /// 75. Supplying it with a non-JPEG output is refused rather than silently ignored,
+    /// and `--debug-rects` always uses the default quality regardless of this flag.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: Option<u8>,
 }
 
-/// A writer function for one output image format, shared by every decode path.
-type ImageWriter = fn(&Path, &Image) -> Result<(), ImageError>;
+/// The `image` crate's own default JPEG quality, used when `--quality` is omitted.
+const DEFAULT_JPEG_QUALITY: u8 = 75;
 
-fn image_writer(ext: &str) -> Result<ImageWriter> {
+/// A writer for one output image format, selected from the output filename's extension by
+/// `output_writer`. It is a boxed closure rather than a plain function pointer because the
+/// JPEG writer carries a quality setting.
+type ImageWriter = Box<dyn Fn(&Path, &Image) -> Result<(), ImageError>>;
+
+/// `true` for the extensions `--quality` applies to.
+fn is_jpeg(ext: &str) -> bool {
+    matches!(ext, "jpg" | "jpeg")
+}
+
+/// Pick the writer for `ext`, carrying `quality` for JPEG output. A quality given with a
+/// format that is not JPEG is refused by `main` before this is called, so it is never
+/// silently dropped here.
+fn output_writer(ext: &str, quality: u8) -> Result<ImageWriter> {
     match ext {
-        "png" => Ok(write_png),
-        "pgm" | "ppm" => Ok(write_pnm),
-        _ => bail!("unsupported output extension {ext:?}; use .png, .pgm or .ppm"),
+        "png" => Ok(Box::new(write_png)),
+        "pgm" | "ppm" => Ok(Box::new(write_pnm)),
+        "jpg" | "jpeg" => Ok(Box::new(move |path, image| {
+            write_jpeg_with_quality(path, image, quality)
+        })),
+        _ => bail!("unsupported output extension {ext:?}; use .png, .jpg, .jpeg, .pgm or .ppm"),
     }
 }
 
@@ -106,7 +129,13 @@ fn main() -> Result<()> {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let write = image_writer(&ext)?;
+    if cli.quality.is_some() && !is_jpeg(&ext) {
+        bail!(
+            "--quality only applies to .jpg/.jpeg output, not {}",
+            cli.output.display()
+        );
+    }
+    let write = output_writer(&ext, cli.quality.unwrap_or(DEFAULT_JPEG_QUALITY))?;
 
     if mars_codec::progressive::is_progressive(&bytes) {
         if cli.smooth {
@@ -182,7 +211,7 @@ fn main() -> Result<()> {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let debug_write = image_writer(&debug_ext)?;
+        let debug_write = output_writer(&debug_ext, DEFAULT_JPEG_QUALITY)?;
         let debug = quadtree_image(&bytes)
             .with_context(|| format!("building quadtree image from {}", cli.input.display()))?;
         debug_write(path, &debug).with_context(|| format!("writing {}", path.display()))?;
