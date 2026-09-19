@@ -12,22 +12,16 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::experiment_config::{DecoderSpec, ExperimentConfig, Plan, PlannedCase, METHOD_KEYS};
+/// Kept at its original path; the type now lives in `experiment_report` so a stored row
+/// can be read back.
+pub use crate::experiment_report::FileIdentity;
+use crate::experiment_report::{
+    BuildIdentity, CaseStatus, EncodeCounters, ExperimentCaseRow, Repetition, StatusTally,
+};
 use crate::measure::{measure, MeasureRequest, Measurement};
-use crate::provenance::Provenance;
-
-/// Every `encmars --method` key: the nine indexed providers plus opt-in `random`.
-const METHOD_KEYS: [&str; 10] = [
-    "exhaustive",
-    "fisher",
-    "hurtgen",
-    "masscenter",
-    "saupe",
-    "saupe-fisher",
-    "mc-saupe",
-    "funnel",
-    "learned",
-    "random",
-];
+use crate::provenance::{sha256_hex, Provenance};
+use crate::store::ResultStore;
 
 /// The initial smoke profile is deliberately restricted to lambda 200 and modes 0,2.
 #[derive(Debug, Clone, Serialize)]
@@ -55,14 +49,6 @@ pub struct SmokeOptions {
     /// `--seed`: only valid with `method: Some("random")` (encmars defaults it to 0).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
-}
-
-/// A hash of the file bytes, not of decoded pixels or an inner stream payload.
-#[derive(Debug, Serialize)]
-pub struct FileIdentity {
-    pub path: PathBuf,
-    pub bytes: u64,
-    pub sha256: String,
 }
 
 /// Exact invocation and outcome. Logs live in the new artifact directory.
@@ -257,31 +243,42 @@ fn validate(options: &SmokeOptions) -> Result<()> {
     ensure!(options.iterations > 0, "iterations must be positive");
     ensure!(options.threads > 0, "threads must be positive");
     ensure!(options.timeout_secs > 0, "timeout-secs must be positive");
-    match &options.method {
+    match options.method.as_deref() {
+        // `random` needs a positive budget and may be seeded.
+        Some("random") => {
+            ensure!(
+                options.budget.is_some_and(|budget| budget > 0),
+                "--method random requires an explicit positive --budget"
+            );
+        }
+        // `apcc` needs a positive budget and has no seed.
+        Some("apcc") => {
+            ensure!(
+                options.budget.is_some_and(|budget| budget > 0),
+                "--method apcc requires an explicit positive --budget"
+            );
+            ensure!(
+                options.seed.is_none(),
+                "--seed is only valid with --method random"
+            );
+        }
         Some(method) => {
             ensure!(
-                METHOD_KEYS.contains(&method.as_str()),
+                METHOD_KEYS.contains(&method),
                 "unsupported --method {method:?}; encmars accepts one of {METHOD_KEYS:?}"
             );
-            if method == "random" {
-                ensure!(
-                    options.budget.is_some_and(|budget| budget > 0),
-                    "--method random requires an explicit positive --budget"
-                );
-            } else {
-                ensure!(
-                    options.budget.is_none(),
-                    "--budget is only valid with --method random"
-                );
-                ensure!(
-                    options.seed.is_none(),
-                    "--seed is only valid with --method random"
-                );
-            }
+            ensure!(
+                options.budget.is_none(),
+                "--budget is only valid with --method random or apcc"
+            );
+            ensure!(
+                options.seed.is_none(),
+                "--seed is only valid with --method random"
+            );
         }
         None => ensure!(
             options.budget.is_none() && options.seed.is_none(),
-            "--budget/--seed are only valid with --method random"
+            "--budget/--seed are only valid with --method random or apcc"
         ),
     }
     let ext = options
@@ -480,4 +477,631 @@ pub fn run_smoke(options: &SmokeOptions) -> Result<SmokeReport> {
         )
     })?;
     Ok(report)
+}
+
+// ================================================================ P0.3 experiment runner
+//
+// The strict, resumable, config-driven runner (§3 P0.3, §14). It plans `(image × arm)`
+// into content-addressed cases, fails fast on missing prerequisites, appends each case's
+// row the moment it completes, and resumes only where an already-completed case's config
+// and build identity match exactly. Every planned case is represented in the store —
+// including `unsupported` ones — so a short result file can never masquerade as a run
+// that merely had fewer cases.
+
+/// Options for one `marsbench experiment` invocation.
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    pub config_path: PathBuf,
+    pub stage: Option<String>,
+    /// Artifact root; defaults to `<root>/target/experiments/<experiment_id>`.
+    pub out_dir: Option<PathBuf>,
+    /// Repo root for resolving config-relative index/input paths.
+    pub root: PathBuf,
+    pub encmars: PathBuf,
+    pub decmars: PathBuf,
+    /// Cap the number of planned cases, for cheap smoke runs and tests.
+    pub limit: Option<usize>,
+}
+
+/// The runner's result. `is_clean` is the exit condition: any non-succeeded case makes
+/// the summary unclean and the command exits non-zero.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExperimentSummary {
+    pub runner: &'static str,
+    pub schema_version: u32,
+    pub experiment: String,
+    pub experiment_id: String,
+    pub stage: String,
+    pub config_sha256: String,
+    pub planned: usize,
+    pub resumed: usize,
+    pub executed: usize,
+    pub statuses: StatusTally,
+    pub store: PathBuf,
+    pub summary_path: PathBuf,
+    pub artifact_root: PathBuf,
+    pub build: BuildIdentity,
+}
+
+impl ExperimentSummary {
+    pub fn is_clean(&self) -> bool {
+        self.statuses.is_clean()
+    }
+}
+
+/// Why the subprocess runner cannot report per-block search diagnostics.
+const DIAGNOSTICS_NOTE: &str = "candidate coverage/regret and leaf/mode histograms are not exposed by the subprocess codec; use `marsbench recall` against the oracle cache for oracle-based coverage";
+
+fn failed(error: anyhow::Error) -> (CaseStatus, String) {
+    (CaseStatus::Failed, format!("{error:#}"))
+}
+
+fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// The source/build identity resume compares. Recorded per row so two rows are only
+/// ever treated as the same measurement when their inputs actually agree.
+fn build_identity(root: &Path) -> BuildIdentity {
+    let git_sha = git_capture(root, &["rev-parse", "HEAD"])
+        .map(|value| value.trim().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let status =
+        git_capture(root, &["status", "--porcelain", "--untracked-files=no"]).unwrap_or_default();
+    let git_dirty = !status.trim().is_empty();
+    let git_patch_sha256 = if git_dirty {
+        git_capture(root, &["--no-pager", "diff", "HEAD"]).map(|diff| sha256_hex(diff.as_bytes()))
+    } else {
+        None
+    };
+    let lockfile_sha256 = std::fs::read(root.join("Cargo.lock"))
+        .ok()
+        .map(|bytes| sha256_hex(&bytes));
+    let rustc_version = Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    BuildIdentity {
+        git_sha,
+        git_dirty,
+        git_patch_sha256,
+        lockfile_sha256,
+        rustc_version,
+    }
+}
+
+fn container_of(path: &Path) -> Result<String> {
+    let mut magic = [0_u8; 4];
+    File::open(path)?.read_exact(&mut magic)?;
+    Ok(String::from_utf8_lossy(&magic).to_string())
+}
+
+fn encode_args(
+    plan: &Plan,
+    case: &PlannedCase,
+    input: &Path,
+    stream: &Path,
+) -> Result<Vec<String>> {
+    let mut args = vec![text(input)?, text(stream)?];
+    if let Some(lambda) = case.arm.lambda {
+        args.extend(["--lambda".into(), lambda.to_string()]);
+    }
+    if let Some(modes) = &case.arm.modes {
+        args.extend([
+            "--modes".into(),
+            modes
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ]);
+    }
+    if let Some(method) = &case.arm.method {
+        args.extend(["--method".into(), method.clone()]);
+    }
+    if let Some(budget) = case.arm.budget {
+        args.extend(["--budget".into(), budget.to_string()]);
+    }
+    if let Some(seed) = case.arm.seed {
+        args.extend(["--seed".into(), seed.to_string()]);
+    }
+    if case.arm.adaptive_density {
+        args.push("--adaptive-density".into());
+    }
+    if case.arm.adaptive_residual {
+        args.push("--adaptive-residual".into());
+    }
+    if case.arm.progressive {
+        args.push("--progressive".into());
+    }
+    let codec = &plan.codec;
+    for (key, value) in [
+        ("--min-size", codec.min_size.to_string()),
+        ("--max-size", codec.max_size.to_string()),
+        ("--shift", codec.shift.to_string()),
+        ("--bits-alfa", codec.bits_alfa.to_string()),
+        ("--bits-beta", codec.bits_beta.to_string()),
+        ("--max-alfa", codec.max_alfa.to_string()),
+        ("--zero-threshold", codec.zero_threshold.to_string()),
+        ("--subsampling", codec.subsampling.clone()),
+        ("--t-rms", codec.t_rms.to_string()),
+        ("--chroma-t-rms", codec.chroma_t_rms.to_string()),
+        ("--threads", codec.threads.to_string()),
+    ] {
+        args.extend([key.into(), value]);
+    }
+    if let Some((width, height)) = case.image.raw_dims {
+        args.extend([
+            "--raw-width".into(),
+            width.to_string(),
+            "--raw-height".into(),
+            height.to_string(),
+        ]);
+    }
+    Ok(args)
+}
+
+fn decode_args(stream: &Path, decoded: &Path, decoder: &DecoderSpec) -> Result<Vec<String>> {
+    let mut args = vec![text(stream)?, text(decoded)?];
+    args.extend(["--iterations".into(), decoder.iterations.to_string()]);
+    args.extend(["--zoom".into(), decoder.zoom.to_string()]);
+    if decoder.smooth {
+        args.push("--smooth".into());
+    }
+    if decoder.auto {
+        args.push("--auto".into());
+        args.extend(["--threshold".into(), decoder.threshold.to_string()]);
+    }
+    if let Some(layer) = decoder.layer {
+        args.extend(["--layer".into(), layer.to_string()]);
+    }
+    Ok(args)
+}
+
+/// The provenance for one case: harness/machine identity plus this case's own parameter
+/// hash and its source corpus index hash.
+fn case_provenance(plan: &Plan, case: &PlannedCase, root: &Path) -> Provenance {
+    let params = serde_json::json!({
+        "experiment_id": plan.experiment_id,
+        "config_sha256": plan.config_sha256,
+        "stage": plan.stage,
+        "case_id": case.case_id,
+        "image": case.image.name,
+        "arm": case.arm,
+        "codec": plan.codec,
+        "decoder": case.decoder,
+    });
+    let mut provenance = Provenance::detect(case.index as u32).with_parameter_set(&params);
+    if let Some(index) = &case.image.corpus_index {
+        if let Ok(bytes) = std::fs::read(root.join(index)) {
+            provenance = provenance.with_corpus_manifest(&bytes);
+        }
+    }
+    provenance
+}
+
+struct CaseContext<'a> {
+    plan: &'a Plan,
+    root: &'a Path,
+    artifact_root: &'a Path,
+    build: &'a BuildIdentity,
+    encmars: &'a Path,
+    decmars: &'a Path,
+    encoder_binary: Option<FileIdentity>,
+    decoder_binary: Option<FileIdentity>,
+}
+
+fn base_row(ctx: &CaseContext, case: &PlannedCase) -> ExperimentCaseRow {
+    ExperimentCaseRow {
+        schema: crate::experiment_report::EXPERIMENT_SCHEMA,
+        experiment: ctx.plan.experiment.clone(),
+        experiment_id: ctx.plan.experiment_id.clone(),
+        config_sha256: ctx.plan.config_sha256.clone(),
+        stage: ctx.plan.stage.clone(),
+        case_id: case.case_id.clone(),
+        case_index: case.index,
+        total_cases: case.total,
+        arm: case.arm.label.clone(),
+        arm_description: case.arm.description.clone(),
+        image: case.image.name.clone(),
+        image_file: case.image.file.display().to_string(),
+        corpus_index: case
+            .image
+            .corpus_index
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        raw_dims: case.image.raw_dims,
+        planes: case.image.planes,
+        artifact_dir: None,
+        container: None,
+        codec: ctx.plan.codec.clone(),
+        arm_params: case.arm.clone(),
+        decoder: case.decoder.clone(),
+        encode_args: Vec::new(),
+        decode_args: Vec::new(),
+        input: None,
+        encoder_binary: ctx.encoder_binary.clone(),
+        decoder_binary: ctx.decoder_binary.clone(),
+        build: ctx.build.clone(),
+        status: CaseStatus::Failed,
+        error: None,
+        unsupported_reason: None,
+        repetitions: Vec::new(),
+        encode_wall_secs: None,
+        decode_wall_secs: None,
+        stream: None,
+        decoded: None,
+        metrics: None,
+        metrics_unavailable: None,
+        encode_summary: None,
+        encode_counters: None,
+        diagnostics_unavailable: None,
+        timeout_secs: ctx.plan.timeout_secs,
+        notes: String::new(),
+    }
+}
+
+/// One explicit `unsupported` record for an image/arm pair the codec refuses.
+fn unsupported_row(ctx: &CaseContext, case: &PlannedCase, reason: &str) -> ExperimentCaseRow {
+    let mut row = base_row(ctx, case);
+    row.status = CaseStatus::Unsupported;
+    row.unsupported_reason = Some(reason.to_string());
+    row.error = Some(format!("not run: {reason}"));
+    row
+}
+
+/// Run every repetition for one case, mutating `row`. Errors become statuses, never
+/// panics: a single bad case must not take the run's accounting down with it.
+fn run_attempt(
+    ctx: &CaseContext,
+    case: &PlannedCase,
+    row: &mut ExperimentCaseRow,
+    attempt: usize,
+) -> std::result::Result<(), (CaseStatus, String)> {
+    let input = ctx.root.join(&case.image.file);
+    let artifact_dir = ctx
+        .artifact_root
+        .join("cases")
+        .join(&case.case_id)
+        .join(format!("attempt-{attempt}"));
+    row.artifact_dir = Some(artifact_dir.clone());
+    if !input.is_file() {
+        return Err((
+            CaseStatus::MissingPrerequisite,
+            format!("input {} is missing", input.display()),
+        ));
+    }
+    if !ctx.encmars.is_file() {
+        return Err((
+            CaseStatus::MissingPrerequisite,
+            format!("encmars {} is missing", ctx.encmars.display()),
+        ));
+    }
+    if !ctx.decmars.is_file() {
+        return Err((
+            CaseStatus::MissingPrerequisite,
+            format!("decmars {} is missing", ctx.decmars.display()),
+        ));
+    }
+    row.input = Some(identity(&input).map_err(failed)?);
+    fs::create_dir_all(&artifact_dir).map_err(|error| {
+        (
+            CaseStatus::Failed,
+            format!("creating {}: {error}", artifact_dir.display()),
+        )
+    })?;
+
+    let timeout = Duration::from_secs(ctx.plan.timeout_secs);
+    let mut repetitions: Vec<Repetition> = Vec::new();
+    let mut container: Option<String> = None;
+    for rep in 0..ctx.plan.repetitions {
+        let rep_dir = artifact_dir.join(format!("rep-{rep:03}"));
+        fs::create_dir_all(&rep_dir).map_err(|error| {
+            (
+                CaseStatus::Failed,
+                format!("creating {}: {error}", rep_dir.display()),
+            )
+        })?;
+        let stream = rep_dir.join("coded.mars");
+        let decoded = rep_dir.join(format!("decoded.{}", case.decoder.output));
+
+        let args = encode_args(ctx.plan, case, &input, &stream).map_err(failed)?;
+        if row.encode_args.is_empty() {
+            row.encode_args = args.clone();
+        }
+        let mut encode = phase(
+            ctx.encmars,
+            args,
+            &rep_dir,
+            "encode",
+            ctx.plan.codec.threads,
+        );
+        if let Err(error) = execute(&mut encode, ctx.root, timeout) {
+            let status = if encode.status == "timed_out" {
+                CaseStatus::TimedOut
+            } else {
+                CaseStatus::Failed
+            };
+            return Err((status, format!("encode: {error:#}")));
+        }
+        let stream_identity = identity(&stream).map_err(failed)?;
+        let magic = container_of(&stream).map_err(failed)?;
+        if !matches!(magic.as_str(), "MARC" | "MPRG") {
+            return Err((
+                CaseStatus::Failed,
+                format!("encoder output is not a whole container (magic {magic:?})"),
+            ));
+        }
+        container = Some(magic);
+
+        let args = decode_args(&stream, &decoded, &case.decoder).map_err(failed)?;
+        if row.decode_args.is_empty() {
+            row.decode_args = args.clone();
+        }
+        let mut decode = phase(
+            ctx.decmars,
+            args,
+            &rep_dir,
+            "decode",
+            ctx.plan.codec.threads,
+        );
+        if let Err(error) = execute(&mut decode, ctx.root, timeout) {
+            let status = if decode.status == "timed_out" {
+                CaseStatus::TimedOut
+            } else {
+                CaseStatus::Failed
+            };
+            return Err((status, format!("decode: {error:#}")));
+        }
+        let decoded_identity = identity(&decoded).map_err(failed)?;
+        repetitions.push(Repetition {
+            index: rep,
+            encode_wall_secs: encode.wall_secs.unwrap_or(0.0),
+            decode_wall_secs: decode.wall_secs.unwrap_or(0.0),
+            stream: stream_identity,
+            decoded: decoded_identity,
+            decode_iterations: case.decoder.iterations,
+            encode_status: encode.status.clone(),
+            decode_status: decode.status.clone(),
+        });
+    }
+    if repetitions.len() != ctx.plan.repetitions as usize {
+        return Err((CaseStatus::Failed, "not every repetition completed".into()));
+    }
+    // §2.3: a deterministic codec must produce identical bytes and pixels across repeats.
+    if repetitions
+        .iter()
+        .any(|r| r.stream.sha256 != repetitions[0].stream.sha256)
+    {
+        return Err((
+            CaseStatus::Failed,
+            "encoder produced different bytes across repetitions".into(),
+        ));
+    }
+    if repetitions
+        .iter()
+        .any(|r| r.decoded.sha256 != repetitions[0].decoded.sha256)
+    {
+        return Err((
+            CaseStatus::Failed,
+            "decoder produced different pixels across repetitions".into(),
+        ));
+    }
+    let (first_encode, first_decode) = (
+        repetitions[0].encode_wall_secs,
+        repetitions[0].decode_wall_secs,
+    );
+    let (first_stream, first_decoded) = (
+        repetitions[0].stream.clone(),
+        repetitions[0].decoded.clone(),
+    );
+    row.repetitions = repetitions;
+    row.container = container;
+    row.encode_wall_secs = Some(first_encode);
+    row.decode_wall_secs = Some(first_decode);
+    row.stream = Some(first_stream.clone());
+    row.decoded = Some(first_decoded);
+
+    if let Ok(stdout) = fs::read_to_string(artifact_dir.join("rep-000").join("encode.stdout.log")) {
+        row.encode_summary = stdout
+            .lines()
+            .rev()
+            .find(|line| line.contains(" bpp"))
+            .map(str::to_string);
+        row.encode_counters = EncodeCounters::parse(&stdout);
+    }
+
+    let mut request = MeasureRequest::new(
+        &input,
+        artifact_dir
+            .join("rep-000")
+            .join(format!("decoded.{}", case.decoder.output)),
+    )
+    .with_coded_bytes(first_stream.bytes);
+    request.raw_dims = case.image.raw_dims;
+    match measure(&request) {
+        Ok(measurement) => row.metrics = Some(measurement),
+        Err(error) => return Err((CaseStatus::Failed, format!("metrics: {error}"))),
+    }
+
+    // The input must not have changed under the run (the smoke runner's own check).
+    let after = identity(&input).map_err(failed)?;
+    if row.input.as_ref().map(|identity| &identity.sha256) != Some(&after.sha256) {
+        return Err((CaseStatus::Failed, "input changed during the run".into()));
+    }
+
+    row.diagnostics_unavailable = Some(DIAGNOSTICS_NOTE.to_string());
+    row.status = CaseStatus::Succeeded;
+    Ok(())
+}
+
+fn execute_case(ctx: &CaseContext, case: &PlannedCase, attempt: usize) -> ExperimentCaseRow {
+    let mut row = base_row(ctx, case);
+    if let Err((status, error)) = run_attempt(ctx, case, &mut row, attempt) {
+        row.status = status;
+        row.error = Some(error);
+    }
+    row
+}
+
+fn write_summary(summary: &ExperimentSummary) -> Result<()> {
+    let temporary = summary.summary_path.with_extension("json.tmp");
+    let _ = fs::remove_file(&temporary);
+    let mut file = new_file(&temporary)?;
+    serde_json::to_writer_pretty(&mut file, summary)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_all()?;
+    fs::rename(&temporary, &summary.summary_path)?;
+    let parent = summary
+        .summary_path
+        .parent()
+        .context("summary path has no parent")?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// Run one stage of one experiment, resuming where a completed case's build matches.
+///
+/// Returns `Ok` even when some cases fail — the summary carries the tally, and the CLI
+/// exits non-zero on an unclean summary. `Err` is reserved for setup failures that
+/// prevent the run from starting honestly at all (bad config, missing input, unreadable
+/// store), so a missing prerequisite never looks like a completed run.
+pub fn run_experiment(options: &RunOptions) -> Result<ExperimentSummary> {
+    let config = ExperimentConfig::read(&options.config_path)?;
+    let stage = config.stage(options.stage.as_deref())?.clone();
+    let images = config.resolve(&options.root)?;
+    let mut plan = crate::experiment_config::plan(&config, &stage, &images)?;
+    if let Some(limit) = options.limit {
+        plan.cases.truncate(limit);
+        let total = plan.cases.len();
+        for (index, case) in plan.cases.iter_mut().enumerate() {
+            case.index = index;
+            case.total = total;
+        }
+    }
+
+    let artifact_root = options.out_dir.clone().unwrap_or_else(|| {
+        options
+            .root
+            .join("target/experiments")
+            .join(&plan.experiment_id)
+    });
+    fs::create_dir_all(&artifact_root)
+        .with_context(|| format!("creating {}", artifact_root.display()))?;
+    let store_path = artifact_root.join("results.jsonl");
+    let summary_path = artifact_root.join("summary.json");
+
+    let build = build_identity(&options.root);
+    // Preflight every prerequisite before any expensive work.
+    let encoder_binary = identity(&options.encmars).context("encmars prerequisite")?;
+    let decoder_binary = identity(&options.decmars).context("decmars prerequisite")?;
+
+    // Resume scan: only an already-completed case with an identical config and build is
+    // resumable; anything else is re-attempted, and a *completed* case under a different
+    // build is a hard error rather than a silent re-run.
+    let prior = if store_path.exists() {
+        crate::experiment_report::read_cases(&store_path, Some(&plan.experiment_id))?
+    } else {
+        Vec::new()
+    };
+    let mut attempts: BTreeMap<String, usize> = BTreeMap::new();
+    for row in &prior {
+        *attempts.entry(row.case_id.clone()).or_insert(0) += 1;
+    }
+    let latest = crate::experiment_report::latest_by_case(&prior);
+    let mut conflicts: Vec<&str> = Vec::new();
+    for case in &plan.cases {
+        let Some(row) = latest.iter().find(|row| row.case_id == case.case_id) else {
+            continue;
+        };
+        let completed = if case.unsupported.is_some() {
+            matches!(row.status, CaseStatus::Unsupported)
+        } else {
+            row.status.is_succeeded()
+        };
+        if completed && (row.config_sha256 != plan.config_sha256 || row.build != build) {
+            conflicts.push(case.case_id.as_str());
+        }
+    }
+    if !conflicts.is_empty() {
+        bail!(
+            "resume requires a matching config/build identity: {} completed case(s) were recorded under a different build ({}); use a fresh --out-dir or remove {}",
+            conflicts.len(),
+            conflicts.iter().take(3).copied().collect::<Vec<_>>().join(", "),
+            store_path.display()
+        );
+    }
+
+    let ctx = CaseContext {
+        plan: &plan,
+        root: &options.root,
+        artifact_root: &artifact_root,
+        build: &build,
+        encmars: &options.encmars,
+        decmars: &options.decmars,
+        encoder_binary: Some(encoder_binary),
+        decoder_binary: Some(decoder_binary),
+    };
+
+    let mut summary = ExperimentSummary {
+        runner: "experiment",
+        schema_version: crate::experiment_report::EXPERIMENT_SCHEMA,
+        experiment: plan.experiment.clone(),
+        experiment_id: plan.experiment_id.clone(),
+        stage: plan.stage.clone(),
+        config_sha256: plan.config_sha256.clone(),
+        planned: plan.cases.len(),
+        resumed: 0,
+        executed: 0,
+        statuses: StatusTally::default(),
+        store: store_path.clone(),
+        summary_path: summary_path.clone(),
+        artifact_root: artifact_root.clone(),
+        build: build.clone(),
+    };
+    write_summary(&summary)?;
+
+    let mut store = ResultStore::open(&store_path)?;
+    for case in &plan.cases {
+        if let Some(row) = latest.iter().find(|row| row.case_id == case.case_id) {
+            let completed = if case.unsupported.is_some() {
+                matches!(row.status, CaseStatus::Unsupported)
+            } else {
+                row.status.is_succeeded()
+            };
+            if completed && row.config_sha256 == plan.config_sha256 && row.build == build {
+                summary.resumed += 1;
+                summary.statuses.add(row.status);
+                write_summary(&summary)?;
+                continue;
+            }
+        }
+        let attempt = attempts.get(&case.case_id).copied().unwrap_or(0);
+        let row = match &case.unsupported {
+            Some(reason) => unsupported_row(&ctx, case, reason),
+            None => execute_case(&ctx, case, attempt),
+        };
+        let provenance = case_provenance(&plan, case, &options.root);
+        crate::experiment_report::append_case(&mut store, &provenance, &row)?;
+        summary.statuses.add(row.status);
+        summary.executed += 1;
+        // Persist after every case: an interrupted run's store is complete up to the
+        // case in flight, and resuming re-runs exactly that case.
+        write_summary(&summary)?;
+    }
+
+    write_summary(&summary)?;
+    Ok(summary)
 }

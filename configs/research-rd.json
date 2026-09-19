@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "name": "research-rd",
+  "description": "P5a objective/ablation grid: a lambda sweep for the flat/fractal mode set against the same sweep with the DCT-residual mode enabled. Four points per arm group is the §M3 minimum for a BD-rate curve, so `experiment-report --reference-group modes0-2` yields an interval-qualified per-image BD-rate. Fixed residual step 8 on both sides; the fixed-vs-adaptive residual question is a separate factor and is deliberately not stacked here. Kodak grayscale.",
+  "indexes": ["corpus/standard.images.json"],
+  "images": ["kodim01", "kodim02"],
+  "codec": {
+    "min_size": 4,
+    "max_size": 16,
+    "shift": 4,
+    "bits_alfa": 4,
+    "bits_beta": 7,
+    "max_alfa": 1.0,
+    "zero_threshold": 0,
+    "subsampling": "444",
+    "t_rms": 8.0,
+    "chroma_t_rms": 8.0,
+    "threads": 4
+  },
+  "decoder": {
+    "iterations": 10,
+    "zoom": 1.0
+  },
+  "stages": [
+    {
+      "name": "rd",
+      "description": "RD lambda sweep, fixed residual step 8, no search-method override. Two arm groups: modes 0/2 and modes 0/2/3.",
+      "repetitions": 1,
+      "timeout_secs": 1800,
+      "arms": [
+        {
+          "label": "m02-lambda50",
+          "group": "modes0-2",
+          "description": "Flat/fractal at lambda 50.",
+          "lambda": 50.0,
+          "modes": [0, 2]
+        },
+        {
+          "label": "m02-lambda200",
+          "group": "modes0-2",
+          "description": "Flat/fractal at lambda 200.",
+          "lambda": 200.0,
+          "modes": [0, 2]
+        },
+        {
+          "label": "m02-lambda800",
+          "group": "modes0-2",
+          "description": "Flat/fractal at lambda 800.",
+          "lambda": 800.0,
+          "modes": [0, 2]
+        },
+        {
+          "label": "m02-lambda3200",
+          "group": "modes0-2",
+          "description": "Flat/fractal at lambda 3200.",
+          "lambda": 3200.0,
+          "modes": [0, 2]
+        },
+        {
+          "label": "m023-lambda50",
+          "group": "modes0-2-3",
+          "description": "Flat/fractal/residual at lambda 50.",
+          "lambda": 50.0,
+          "modes": [0, 2, 3]
+        },
+        {
+          "label": "m023-lambda200",
+          "group": "modes0-2-3",
+          "description": "Flat/fractal/residual at lambda 200.",
+          "lambda": 200.0,
+          "modes": [0, 2, 3]
+        },
+        {
+          "label": "m023-lambda800",
+          "group": "modes0-2-3",
+          "description": "Flat/fractal/residual at lambda 800.",
+          "lambda": 800.0,
+          "modes": [0, 2, 3]
+        },
+        {
+          "label": "m023-lambda3200",
+          "group": "modes0-2-3",
+          "description": "Flat/fractal/residual at lambda 3200.",
+          "lambda": 3200.0,
+          "modes": [0, 2, 3]
+        }
+      ]
+    }
+  ]
+}

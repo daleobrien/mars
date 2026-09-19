@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "name": "research-smoke",
+  "description": "P0.3 reproducible smoke: one real encode -> MARC -> decode -> file metrics case on the pinned tiny64 fixture. This is the profile the plan's Exit P0 names (modes 0/2, fixed residual step 8, RD lambda 200, grayscale, native resolution). It is not a corpus benchmark and carries no headline numbers.",
+  "inputs": [
+    {
+      "name": "tiny64",
+      "file": "fixtures/mars1/tiny64.raw",
+      "width": 64,
+      "height": 64,
+      "sha256": "2cac3a8d8aa44fc19883938e9577b3348595a5cd3e7045cba9c780cd76ddecba"
+    }
+  ],
+  "codec": {
+    "min_size": 4,
+    "max_size": 16,
+    "shift": 4,
+    "bits_alfa": 4,
+    "bits_beta": 7,
+    "max_alfa": 1.0,
+    "zero_threshold": 0,
+    "subsampling": "444",
+    "t_rms": 8.0,
+    "chroma_t_rms": 8.0,
+    "threads": 1
+  },
+  "decoder": {
+    "iterations": 10,
+    "zoom": 1.0
+  },
+  "stages": [
+    {
+      "name": "smoke",
+      "description": "The restricted serialized-output profile: RD lambda 200, modes 0/2, fixed residual step 8.",
+      "repetitions": 1,
+      "timeout_secs": 60,
+      "arms": [
+        {
+          "label": "rd-lambda200-modes0-2",
+          "description": "RD lambda 200 with the flat/fractal mode set, no search-method override.",
+          "lambda": 200.0,
+          "modes": [0, 2]
+        }
+      ]
+    }
+  ]
+}

@@ -10,6 +10,8 @@ pub mod anchors_report;
 pub mod bdrate;
 pub mod density_gate;
 pub mod experiment;
+pub mod experiment_config;
+pub mod experiment_report;
 pub mod gate_c;
 pub mod gpu_search;
 pub mod ifs_check;

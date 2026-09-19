@@ -109,11 +109,22 @@ The source audit below describes `250af5b`; this log records subsequent implemen
 - Synthetic evidence: 8×8 blocking fixture 22.067→22.408 dB; natural ramp unchanged (42.110 dB). Fifteen codec/CLI tests passed; targeted clippy clean.
 - Limitations: grayscale only, out-of-loop only, fixed constants (not the paper's), synthetic evidence only — no corpus BD/PSNR promotion claim yet.
 
+### Step 12 — strict unified experiment runner (P0.3 completion)
+
+- Added the config-driven, resumable experiment runner: `crates/mars-bench/src/experiment_config.rs` (schema, strict validation, corpus/input resolution, deterministic planning), `experiment_report.rs` (versioned `experiment` JSONL payload, status tally, Markdown report), and `experiment.rs::run_experiment`.
+- CLI: `marsbench experiment --config <path> [--stage <name>] [--out-dir <dir>] [--root <dir>] [--encmars/--decmars] [--limit N]` and `marsbench experiment-report --store <path>|--experiment-id <id> [--reference-group <label>] [--markdown-out <path>]`. Shipped configs: `configs/research-{smoke,search,rd,final}.json`. Arms carry an optional `group` so an RD curve can be built across a swept axis.
+- Strictness: a corpus index's `count` must equal its image list, and every referenced input/recorded hash and codec binary is checked before any work. Statically unsupported arm combinations (method+progressive, budget/seed misuse, modes on the legacy path, adaptive-residual without mode 3, smooth+progressive, `decoder.layer` without progressive arms) are rejected together, never accepted as no-ops. Data-dependent refusals (`--method`/`--progressive`/`--smooth` on colour input) are recorded as explicit `unsupported` cases, so they still count in the denominator.
+- Accounting: one append-only row per planned case, appended as each completes, carrying case/config identity, the exact encode/decode argv, codec/arm/decoder parameters, container type, whole-container bytes and SHA-256 for input/stream/decoded, raw per-repetition timing samples, the encoder's own summary line plus parsed eval/transform counters, and either metrics or an explicit status (`succeeded`/`failed`/`timed_out`/`missing_prerequisite`/`unsupported`). Any non-success makes the command exit non-zero.
+- Resume: skips only an already-completed case whose config hash and build identity (git sha, dirty-patch hash, `Cargo.lock` hash, rustc version) match; a completed case recorded under a different build is a hard error naming the store, and failed/timed-out cases are re-attempted into a fresh `attempt-N` directory so nothing is overwritten.
+- Not exposed by the subprocess runner, and recorded as an unavailable diagnostic rather than a zero: per-block candidate coverage/regret and leaf/mode histograms (`diagnostics_unavailable` points at `marsbench recall` for oracle-based coverage).
+- Validation: 90 `mars-bench` unit tests (config/plan/report/tally/store round-trip), 6 runner integration tests with native stub codecs (resume, failed-case retry, unsupported, timeout, preflight failures, repeated-repetition identity), the existing 5+3 smoke tests, and 2 CLI end-to-end tests against the shipped smoke config driving the real encmars/decmars (run → resume → report). Manual `research-smoke` run on `tiny64`: 48.711 dB, 0.117 bpp, one row; the second invocation resumed the case (`resumed: 1`, still one row). Targeted Clippy clean for the changed crates; the pre-existing `encmars::items_after_test_module` lint blocks a `mars-cli --bins --tests` sweep and is unrelated to this step.
+- Limitations: one stage per invocation; subprocess-based, so no per-block search internals; no oracle-cache requirement or coverage computation yet; the `research-search`/`research-rd`/`research-final` corpus sweeps are opt-in definitions and were not run here. The runner P0.3 asked for now exists; the corpus/science exits that depend on it remain open.
+
 ## 2. What Mars already implements
 
 README status/layout and warm-up wording were corrected in execution step 3. Use the execution log, source, and [the optimisation status](docs/encmars-optimisation-status.md) to distinguish implemented behavior from historical measurements.
 
-**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. A restricted file-to-file smoke and shared production retrieval interface are implemented (steps 6/7); random (step 8) and APCC (step 10) are opt-in providers; the out-of-loop boundary filter is implemented (step 11). The full experiment runner and sparse multi-domain format remain proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
+**Research status:** P0 is partially implemented, not complete. Residual-step metadata, focused round-trip tests, and a three-arm serialized-stream experiment exist. A restricted file-to-file smoke and shared production retrieval interface are implemented (steps 6/7); random (step 8) and APCC (step 10) are opt-in providers; the out-of-loop boundary filter is implemented (step 11); the strict config-driven experiment runner is implemented (step 12). The sparse multi-domain format remains proposed. P5 extends an existing RD optimizer; it is not a new optimizer implementation.
 
 | Area | Existing implementation | Consequence for this plan |
 |---|---|---|
@@ -210,6 +221,8 @@ These establish focused qstep bounds/metadata, malformed-step rejection, round-t
 ### P0.3 Build a strict unified experiment runner
 
 Suggested new modules: `crates/mars-bench/src/experiment.rs`, `experiment_config.rs`, `experiment_report.rs`; thin CLI wiring in `mars-cli/src/bin/marsbench.rs`. Names are proposals, not existing APIs.
+
+**Implemented in execution step 12:** those three modules and the `marsbench experiment` / `experiment-report` wiring exist, with four shipped `configs/research-*.json`. The runner is config-driven, validates corpus completeness and prerequisites before any work, appends one row per planned case (including `unsupported` ones), resumes only on matching case/config/build hashes, and exits non-zero on any non-succeeded case. The corpus gates built on it — the P2 full-stream RD/time curves, the P3 validation Pareto, and P5a's objective ablation — were not run for this step.
 
 Reuse `store::Row`, `ResultStore`, `measure`, `bdrate`, `provenance`, and reports. Keep legacy row readers working; add a versioned experiment payload. Reuse Step22's parsed-stream checks and per-record flushing, but do not mistake its separate JSONL schema for this runner. Its timeout completion was operator-added after termination; implement runner-owned timeout/failure accounting and explicit interrupted-run recovery.
 
@@ -521,7 +534,7 @@ For each promotion show worst-image behavior. Proposed guardrails: no unexplaine
 | 7 | Sparse model/format/decoder/rate integration | Conditional versioned experimental codec and RD report |
 | 8 | Result store/reporting and docs | Reproducible final leaderboard, limitations, promote/defer decisions |
 
-**Next deliverable:** finish 0a/0b rather than register a new search enum. Existing residual metadata is delivered; neither the O7 performance gate nor P0 as a whole is complete. Re-run the current residual harness using the corrected mode-3 encoder and passing independent regression, and do not make completing its expensive corpus sweep a prerequisite for the restricted modes0/2 runner smoke.
+**Next deliverable:** 0a/0b are delivered — residual metadata and geometry fixes, and the strict config-driven file-to-file runner with schema, corpus-completeness/timeout handling and a reproducible smoke report. Next is P5a's objective/counter audit and the fixed8-vs-modes0/2/3 ablation on the runner (`configs/research-rd.json`), then the P4 retrieval challengers; do not register a new search enum before those measured curves exist.
 
 0a and 0b can be delegated independently only with disjoint file ownership. Random, APCC, and P4 work can proceed in parallel after the shared interface is frozen; one integration owner controls common enums/CLI files. P5 and P6 can proceed independently after P0/P1. Sparse coding follows successful APCC and corrected RD/mode accounting.
 
@@ -570,17 +583,17 @@ Build the debug CLI first with `cargo build --locked -p mars-cli`, or use releas
 
 The existing opt-in residual acceptance sweep is `just gate-22`. It is expensive, is not run by routine tests, and its previous recorded attempt timed out; do not describe it as passed. The three-arm synthetic smoke actually executed in this review is listed in §3. The CLI adaptive example is `encmars input.png output.mars --lambda 200 --modes 0,2,3 --adaptive-residual`; this exercises an experimental policy, not a recommended default.
 
-### Proposed commands: implement in P0/P1 before use
+### Implemented commands (P0.3, execution step 12)
 
 ```text
 marsbench experiment --config configs/research-smoke.json --stage smoke
 marsbench experiment --config configs/research-search.json --stage retrieval
 marsbench experiment --config configs/research-rd.json --stage rd
 marsbench experiment --config configs/research-final.json --stage timing
-marsbench experiment-report --experiment-id <recorded-id>
+marsbench experiment-report --experiment-id <recorded-id> --reference-group modes0-2
 ```
 
-These command names/config files do not exist at the inspected revision. Define resumability, stage selection, artifact locations, preflight, and failure exits as part of their CLI contract. Avoid a misleading `cargo bench` label: the deliverable is a full codec experiment runner, not only microbenchmarks.
+CLI contract: `--config` is required; `--stage` selects one stage and is required when the config defines more than one. Artifacts default to `<root>/target/experiments/<experiment-id>` and hold an append-only `results.jsonl` plus a derived `summary.json`; `--root` resolves config-relative index/input paths; `--encmars`/`--decmars` override sibling discovery; `--limit N` caps planned cases for a cheap smoke. Resume is automatic and requires matching case/config/build hashes (a completed case under a different build is an error, not a silent re-run). `experiment-report` reads a store given directly or derived from `--experiment-id` under `--root`, prints Markdown, and computes per-image BD-rate between arm `group`s when a reference group is named. `research-search`, `research-rd` and `research-final` are opt-in corpus sweeps and are not run by routine tests. Avoid a misleading `cargo bench` label: the deliverable is a full codec experiment runner, not only microbenchmarks.
 
 ### Required final artifacts
 

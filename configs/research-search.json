@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "name": "research-search",
+  "description": "P1/P2/P3 retrieval challengers at one operating point (RD lambda 200, modes 0/2, fixed residual step 8). Every existing deterministic method is included as a serious challenger, alongside the bounded random and APCC providers at two budgets. Equal operating point, not a BD-rate curve: compare wall time and quality at matched lambda, and see `marsbench recall` for oracle-based candidate coverage. Kodak grayscale only; both images are grayscale so no arm is unsupported here.",
+  "indexes": ["corpus/standard.images.json"],
+  "images": ["kodim01", "kodim02"],
+  "codec": {
+    "min_size": 4,
+    "max_size": 16,
+    "shift": 4,
+    "bits_alfa": 4,
+    "bits_beta": 7,
+    "max_alfa": 1.0,
+    "zero_threshold": 0,
+    "subsampling": "444",
+    "t_rms": 8.0,
+    "chroma_t_rms": 8.0,
+    "threads": 4
+  },
+  "decoder": {
+    "iterations": 10,
+    "zoom": 1.0
+  },
+  "stages": [
+    {
+      "name": "retrieval",
+      "description": "One encode+decode per (image, method) at RD lambda 200, modes 0/2. RD warm-up stays exhaustive for every arm and is included in the wall time.",
+      "repetitions": 1,
+      "timeout_secs": 900,
+      "arms": [
+        {
+          "label": "exhaustive",
+          "group": "exhaustive",
+          "description": "Codec's own exhaustive provider; the byte-identity control.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "exhaustive"
+        },
+        {
+          "label": "fisher",
+          "group": "fisher",
+          "description": "Fisher classification.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "fisher"
+        },
+        {
+          "label": "hurtgen",
+          "group": "hurtgen",
+          "description": "Hurtgen four-bit classification.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "hurtgen"
+        },
+        {
+          "label": "masscenter",
+          "group": "masscenter",
+          "description": "Mass-centre retrieval.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "masscenter"
+        },
+        {
+          "label": "saupe",
+          "group": "saupe",
+          "description": "Saupe moment descriptors.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "saupe"
+        },
+        {
+          "label": "saupe-fisher",
+          "group": "saupe-fisher",
+          "description": "Saupe plus Fisher.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "saupe-fisher"
+        },
+        {
+          "label": "mc-saupe",
+          "group": "mc-saupe",
+          "description": "Mass-centre plus Saupe.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "mc-saupe"
+        },
+        {
+          "label": "funnel",
+          "group": "funnel",
+          "description": "Funnel stage-1 feature pruning.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "funnel"
+        },
+        {
+          "label": "learned",
+          "group": "learned",
+          "description": "Baked-in learned descriptors (existing negative-result experiment).",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "learned"
+        },
+        {
+          "label": "random-k64-seed0",
+          "group": "random",
+          "description": "Bounded random search, 64 domain positions, seed 0.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "random",
+          "budget": 64,
+          "seed": 0
+        },
+        {
+          "label": "random-k256-seed0",
+          "group": "random",
+          "description": "Bounded random search, 256 domain positions, seed 0.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "random",
+          "budget": 256,
+          "seed": 0
+        },
+        {
+          "label": "apcc-k64",
+          "group": "apcc",
+          "description": "Train-free APCC bucket retrieval, 64 inspected domains, no seed.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "apcc",
+          "budget": 64
+        },
+        {
+          "label": "apcc-k256",
+          "group": "apcc",
+          "description": "Train-free APCC bucket retrieval, 256 inspected domains, no seed.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "apcc",
+          "budget": 256
+        }
+      ]
+    }
+  ]
+}

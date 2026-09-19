@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "name": "research-final",
+  "description": "Repeated-timing stage: three encode+decode repetitions per case, with every raw sample persisted rather than averaged, and the codec's determinism across repetitions asserted (identical stream and decoded hashes). One image, one operating point (RD lambda 200, modes 0/2); the deliverable is a matched-operating-point wall-time distribution for the promoted candidates, not a rate-distortion comparison.",
+  "indexes": ["corpus/standard.images.json"],
+  "images": ["kodim01"],
+  "codec": {
+    "min_size": 4,
+    "max_size": 16,
+    "shift": 4,
+    "bits_alfa": 4,
+    "bits_beta": 7,
+    "max_alfa": 1.0,
+    "zero_threshold": 0,
+    "subsampling": "444",
+    "t_rms": 8.0,
+    "chroma_t_rms": 8.0,
+    "threads": 4
+  },
+  "decoder": {
+    "iterations": 10,
+    "zoom": 1.0
+  },
+  "stages": [
+    {
+      "name": "timing",
+      "description": "Three repetitions per arm at RD lambda 200, modes 0/2. RD warm-up is exhaustive and included; random's budget limits production queries only.",
+      "repetitions": 3,
+      "timeout_secs": 900,
+      "arms": [
+        {
+          "label": "exhaustive",
+          "group": "exhaustive",
+          "description": "Exhaustive production reference.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "exhaustive"
+        },
+        {
+          "label": "fisher",
+          "group": "fisher",
+          "description": "Fisher classification.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "fisher"
+        },
+        {
+          "label": "random-k256-seed0",
+          "group": "random",
+          "description": "Bounded random, 256 domain positions, seed 0.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "random",
+          "budget": 256,
+          "seed": 0
+        },
+        {
+          "label": "apcc-k256",
+          "group": "apcc",
+          "description": "Train-free APCC, 256 inspected domains.",
+          "lambda": 200.0,
+          "modes": [0, 2],
+          "method": "apcc",
+          "budget": 256
+        }
+      ]
+    }
+  ]
+}

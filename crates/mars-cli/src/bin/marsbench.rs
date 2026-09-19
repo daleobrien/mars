@@ -43,6 +43,10 @@ struct Cli {
 enum Cmd {
     /// One file-to-file case (partial P0 smoke only, not a corpus experiment runner).
     ExperimentSmoke(ExperimentSmokeArgs),
+    /// P0.3: run one stage of a strict, resumable, config-driven experiment.
+    Experiment(ExperimentArgs),
+    /// P0.3: render a Markdown report from an experiment store.
+    ExperimentReport(ExperimentReportArgs),
     /// Compute every pinned quality metric for one (original, decoded) pair.
     Metrics(MetricsArgs),
     /// BD-rate and BD-PSNR between two curves given as JSON.
@@ -141,6 +145,111 @@ struct ExperimentSmokeArgs {
     /// Timeout per codec process, including startup and file I/O.
     #[arg(long, default_value_t = 60)]
     timeout_secs: u64,
+}
+
+#[derive(Args)]
+struct ExperimentArgs {
+    /// The experiment config JSON (see `configs/research-*.json`).
+    #[arg(long)]
+    config: PathBuf,
+    /// Stage name. Required when the config defines more than one stage.
+    #[arg(long)]
+    stage: Option<String>,
+    /// Artifact root; defaults to `<root>/target/experiments/<experiment-id>`.
+    #[arg(long)]
+    out_dir: Option<PathBuf>,
+    /// Repository root for resolving config-relative index/input paths.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Encoder executable path; defaults to encmars beside this marsbench binary.
+    #[arg(long)]
+    encmars: Option<PathBuf>,
+    /// Decoder executable path; defaults to decmars beside this marsbench binary.
+    #[arg(long)]
+    decmars: Option<PathBuf>,
+    /// Cap the number of planned cases (for a cheap smoke run).
+    #[arg(long)]
+    limit: Option<usize>,
+}
+
+#[derive(Args)]
+struct ExperimentReportArgs {
+    /// Experiment id to report; also selects the default store.
+    #[arg(long)]
+    experiment_id: Option<String>,
+    /// Explicit store path; overrides the default derived from --experiment-id.
+    #[arg(long)]
+    store: Option<PathBuf>,
+    /// Artifact root used to derive the store when neither is given.
+    #[arg(long, default_value = "target/experiments")]
+    root: PathBuf,
+    /// Reference arm group label for BD-rate comparisons.
+    #[arg(long)]
+    reference_group: Option<String>,
+    /// Write Markdown here instead of stdout.
+    #[arg(long)]
+    markdown_out: Option<PathBuf>,
+}
+
+fn experiment(a: ExperimentArgs) -> Result<()> {
+    let executable = std::env::current_exe().context("locating sibling codec binaries")?;
+    let sibling =
+        |name: &str| executable.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let options = mars_bench::experiment::RunOptions {
+        config_path: a.config,
+        stage: a.stage,
+        out_dir: a.out_dir,
+        root: a.root,
+        encmars: a.encmars.unwrap_or_else(|| sibling("encmars")),
+        decmars: a.decmars.unwrap_or_else(|| sibling("decmars")),
+        limit: a.limit,
+    };
+    let summary = mars_bench::experiment::run_experiment(&options)?;
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    // Every planned case is accounted for; any non-success is an explicit failure (§A1).
+    if !summary.is_clean() {
+        bail!(
+            "experiment {} is not clean: {} failed, {} timed out, {} missing-prerequisite, \
+             {} unsupported ({} succeeded, {} resumed); store {}",
+            summary.experiment_id,
+            summary.statuses.failed,
+            summary.statuses.timed_out,
+            summary.statuses.missing_prerequisite,
+            summary.statuses.unsupported,
+            summary.statuses.succeeded,
+            summary.resumed,
+            summary.store.display()
+        );
+    }
+    Ok(())
+}
+
+fn experiment_report(a: ExperimentReportArgs) -> Result<()> {
+    if a.store.is_none() && a.experiment_id.is_none() {
+        bail!("give --experiment-id and/or --store");
+    }
+    let store = a.store.clone().unwrap_or_else(|| {
+        a.root
+            .join(a.experiment_id.clone().unwrap_or_default())
+            .join("results.jsonl")
+    });
+    let cases = mars_bench::experiment_report::read_cases(&store, a.experiment_id.as_deref())?;
+    let latest = mars_bench::experiment_report::latest_by_case(&cases);
+    let id = a
+        .experiment_id
+        .clone()
+        .or_else(|| latest.first().map(|case| case.experiment_id.clone()))
+        .unwrap_or_else(|| store.display().to_string());
+    let markdown =
+        mars_bench::experiment_report::render_markdown(&id, &latest, a.reference_group.as_deref());
+    match a.markdown_out {
+        Some(path) => {
+            std::fs::write(&path, &markdown)?;
+            eprintln!("wrote {}", path.display());
+        }
+        None => print!("{markdown}"),
+    }
+    Ok(())
 }
 
 fn experiment_smoke(a: ExperimentSmokeArgs) -> Result<()> {
@@ -568,6 +677,8 @@ fn read_curve(path: &Path) -> Result<RdCurve> {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::ExperimentSmoke(a) => experiment_smoke(a),
+        Cmd::Experiment(a) => experiment(a),
+        Cmd::ExperimentReport(a) => experiment_report(a),
         Cmd::Metrics(a) => metrics(a),
         Cmd::Bdrate(a) => bdrate(a),
         Cmd::Report(a) => report(a),
