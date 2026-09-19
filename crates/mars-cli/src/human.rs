@@ -98,8 +98,9 @@ pub struct HumanRegion {
     pub region: LambdaRegion,
 }
 
-/// Build the region plan for a list of faces: one box per face at `face_scale`, plus an
-/// eyes, a nose, and a mouth box per face at `feature_scale`.
+/// Build the region plan for a list of faces: one box per face at `face_scale`, an eyes box
+/// at `eye_scale`, and a nose and mouth box per face at `feature_scale` -- so the eyes can be
+/// refined harder (or more cheaply) than the rest of the face without touching anything else.
 ///
 /// Feature boxes are derived from the landmarks relative to the interocular distance, so
 /// the mapping is scale-invariant and needs no assumptions about image resolution or the
@@ -110,6 +111,7 @@ pub fn plan_regions(
     height: u32,
     face_scale: f64,
     feature_scale: f64,
+    eye_scale: f64,
 ) -> Vec<HumanRegion> {
     let mut regions = Vec::with_capacity(faces.len() * 4);
     for face in faces {
@@ -134,13 +136,14 @@ pub fn plan_regions(
         }
 
         // Eyes: both keypoints, padded by half the interocular distance so the brows and
-        // lashes -- where errors are most visible -- are covered too.
+        // lashes -- where errors are most visible -- are covered too. This is the one box
+        // with a scale of its own (`eye_scale`), so it can out-refine the nose and mouth.
         if let Some(region) = padded_region(
             points_bounds(&face.keypoints[0..2]),
             0.5 * eye_distance,
             width,
             height,
-            feature_scale,
+            eye_scale,
         ) {
             regions.push(HumanRegion {
                 kind: RegionKind::Eyes,
@@ -186,8 +189,9 @@ pub fn regions_from_faces(
     height: u32,
     face_scale: f64,
     feature_scale: f64,
+    eye_scale: f64,
 ) -> Vec<LambdaRegion> {
-    plan_regions(faces, width, height, face_scale, feature_scale)
+    plan_regions(faces, width, height, face_scale, feature_scale, eye_scale)
         .into_iter()
         .map(|planned| planned.region)
         .collect()
@@ -212,9 +216,25 @@ mod tests {
         }
     }
 
+    /// The eyes can be refined harder than the nose and mouth: `eye_scale` applies to the
+    /// eyes box alone, and the deeper region still nests inside the face.
+    #[test]
+    fn the_eye_scale_applies_to_the_eyes_box_alone() {
+        let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25, 0.125);
+        assert_eq!(regions[1].scale, 0.125, "the eyes box uses the eye scale");
+        assert_eq!(regions[2].scale, 0.25, "the nose keeps the feature scale");
+        assert_eq!(regions[3].scale, 0.25, "the mouth keeps the feature scale");
+        // A block between the eyes now sees the eye scale, not the feature scale.
+        let between_eyes = lambda_scale_for_block(&regions, 72, 88, 16);
+        assert!(
+            (between_eyes - 0.125).abs() < 1e-9,
+            "expected the eye scale, got {between_eyes}"
+        );
+    }
+
     #[test]
     fn a_face_yields_face_plus_three_feature_regions() {
-        let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25);
+        let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25, 0.25);
         assert_eq!(regions.len(), 4, "one face box + eyes + nose + mouth");
         assert_eq!(regions[0].scale, 0.5, "the face box uses the face scale");
         for feature in &regions[1..] {
@@ -227,7 +247,7 @@ mod tests {
 
     #[test]
     fn the_face_box_covers_the_detected_bounding_box() {
-        let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25);
+        let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25, 0.25);
         let face = regions[0];
         assert!(face.col <= 50 && face.row <= 40);
         assert!(face.col + face.width >= 150);
@@ -240,7 +260,7 @@ mod tests {
     /// pixels past the face box (`--debug-regions` shows exactly where).
     #[test]
     fn feature_boxes_of_a_centred_face_sit_inside_its_face_box() {
-        let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25);
+        let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25, 0.25);
         let face = regions[0];
         for feature in &regions[1..] {
             assert!(
@@ -255,7 +275,7 @@ mod tests {
 
     #[test]
     fn a_block_inside_the_eyes_sees_the_feature_scale_not_the_face_scale() {
-        let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25);
+        let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25, 0.25);
         // A block centred between the eyes is fully inside the eyes region and the face
         // region; the smaller (feature) scale must win.
         let scale = lambda_scale_for_block(&regions, 72, 88, 16);
@@ -285,7 +305,7 @@ mod tests {
                 [8.0, 5.0],
             ],
         };
-        let regions = regions_from_faces(&[edge_face], 64, 64, 0.5, 0.25);
+        let regions = regions_from_faces(&[edge_face], 64, 64, 0.5, 0.25, 0.25);
         assert!(!regions.is_empty());
         for region in &regions {
             assert!(region.col + region.width <= 64, "{region:?} exceeds width");
@@ -308,14 +328,14 @@ mod tests {
                 [560.0, 560.0],
             ],
         };
-        assert!(regions_from_faces(&[off_screen], 64, 64, 0.5, 0.25).is_empty());
+        assert!(regions_from_faces(&[off_screen], 64, 64, 0.5, 0.25, 0.25).is_empty());
     }
 
     #[test]
     fn degenerate_landmarks_fall_back_to_a_fraction_of_the_face_box() {
         let mut face = centred_face();
         face.keypoints = [[0.0; 2]; 5];
-        let regions = regions_from_faces(&[face], 200, 200, 0.5, 0.25);
+        let regions = regions_from_faces(&[face], 200, 200, 0.5, 0.25, 0.25);
         // Face box plus three feature boxes, all on-screen -- the fallback scale unit must
         // still produce usable feature regions rather than panicking or collapsing.
         assert_eq!(regions.len(), 4);
@@ -326,12 +346,12 @@ mod tests {
 
     #[test]
     fn no_faces_yields_no_regions() {
-        assert!(regions_from_faces(&[], 200, 200, 0.5, 0.25).is_empty());
+        assert!(regions_from_faces(&[], 200, 200, 0.5, 0.25, 0.25).is_empty());
     }
 
     #[test]
     fn the_plan_tags_each_region_with_its_feature_kind() {
-        let plan = plan_regions(&[centred_face()], 200, 200, 0.5, 0.25);
+        let plan = plan_regions(&[centred_face()], 200, 200, 0.5, 0.25, 0.25);
         let kinds: Vec<RegionKind> = plan.iter().map(|planned| planned.kind).collect();
         assert_eq!(
             kinds,

@@ -17,7 +17,8 @@ cargo build \
   --debug-regions regions.png \
   --color eyes \
   --outside-min-size 16 \
-  --desaturate 0.5 \
+  --desaturate 0.33 \
+  --eye-lambda-scale 0.1 \
   --scrfd-model ./models/det_10g.onnx
 
 ./target/release/decmars \

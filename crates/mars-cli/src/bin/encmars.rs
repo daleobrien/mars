@@ -326,6 +326,13 @@ struct Cli {
     #[arg(long, default_value_t = 0.25, requires = "human_adaptive")]
     feature_lambda_scale: f64,
 
+    /// Lambda multiplier inside the detected eyes box alone (default: the
+    /// --feature-lambda-scale value). Lower spends more bits on the eyes -- finer blocks,
+    /// higher resolution -- without changing the nose, the mouth, or the rest of the face,
+    /// so the eyes can out-refine everything else. Must be finite and positive.
+    #[arg(long, value_name = "SCALE", requires = "human_adaptive")]
+    eye_lambda_scale: Option<f64>,
+
     /// Detector confidence threshold for --human-adaptive (default 0.25, SCRFD's own).
     #[arg(long, default_value_t = 0.25, requires = "human_adaptive")]
     face_confidence: f32,
@@ -557,6 +564,11 @@ impl Cli {
             ] {
                 if !value.is_finite() || value <= 0.0 {
                     bail!("{name} must be finite and positive");
+                }
+            }
+            if let Some(eye) = self.eye_lambda_scale {
+                if !eye.is_finite() || eye <= 0.0 {
+                    bail!("--eye-lambda-scale must be finite and positive");
                 }
             }
             if !self.face_confidence.is_finite() || !(0.0..=1.0).contains(&self.face_confidence) {
@@ -881,6 +893,8 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         image.height() as u32,
         cli.face_lambda_scale,
         cli.feature_lambda_scale,
+        // Unset means the eyes follow `--feature-lambda-scale`, exactly as before.
+        cli.eye_lambda_scale.unwrap_or(cli.feature_lambda_scale),
     );
 
     let mut lambda_regions: Vec<LambdaRegion> = plan.iter().map(|planned| planned.region).collect();
@@ -1144,6 +1158,38 @@ mod tests {
         );
         // An unknown region name is rejected rather than silently ignored.
         assert!(Cli::try_parse_from(["encmars", "in.png", "out.mars", "--color", "nose"]).is_err());
+    }
+
+    #[test]
+    fn eye_lambda_scale_requires_human_adaptive_and_is_positive() {
+        // Meaningless on its own, and clap refuses it.
+        assert!(Cli::try_parse_from([
+            "encmars",
+            "in.png",
+            "out.mars",
+            "--eye-lambda-scale",
+            "0.1"
+        ])
+        .is_err());
+        // Unset means "follow --feature-lambda-scale".
+        assert_eq!(parse(&["--human-adaptive"]).eye_lambda_scale, None);
+        let cli = parse(&["--human-adaptive", "--eye-lambda-scale", "0.1"]);
+        assert_eq!(cli.eye_lambda_scale, Some(0.1));
+        assert!(cli.validate().is_ok());
+        // Out of range is refused rather than clamped silently. The `=` form keeps clap from
+        // reading a leading `-` as another flag.
+        for (bad, arg) in [
+            ("0", "--eye-lambda-scale=0"),
+            ("-1", "--eye-lambda-scale=-1"),
+        ] {
+            let cli =
+                Cli::try_parse_from(["encmars", "in.png", "out.mars", "--human-adaptive", arg])
+                    .unwrap_or_else(|e| panic!("--eye-lambda-scale {bad} should parse: {e}"));
+            assert!(
+                cli.validate().is_err(),
+                "--eye-lambda-scale {bad} should be refused"
+            );
+        }
     }
 
     #[test]
