@@ -15,7 +15,7 @@ cargo build \
   --human-adaptive \
   --lambda 100 \
   --debug-regions regions.png \
-  --color-features-only \
+  --color eyes \
   --outside-min-size 16 \
   --scrfd-model ./models/det_10g.onnx
 

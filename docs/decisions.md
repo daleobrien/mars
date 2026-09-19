@@ -3295,20 +3295,24 @@ real-image default/off byte comparison also passed; its opt-in density sweep was
 ## D52 · 2026-09-20 · `encmars --human-adaptive --color-faces-only` / `--color-features-only`: colour in detected regions, grayscale elsewhere, by masking chroma rather than by a format or decoder change
 
 User-requested extension to `--human-adaptive`: keep colour only inside detected regions
-and encode everything else as grayscale. Two mutually exclusive flags choose the regions:
-`--color-faces-only` (the whole face box) and `--color-features-only` (the eyes, nose and
-mouth boxes). Both map onto one codec field, `ColorEncodeParams::color_regions` -- a set of
+and encode everything else as grayscale. One value option chooses the regions --
+`--color face|features|eyes` (with `--colour` accepted as an alias), where `face` is the
+whole face box, `features` is the eyes, nose and mouth boxes, and `eyes` is only the eyes
+box. The three map onto one codec field, `ColorEncodeParams::color_regions` -- a set of
 luma-space rectangles that *retain* colour. After `ycbcr(img)`, the Cb and Cr planes are
 forced to neutral 128 outside their union and encoded as normal, before any 4:2:0
 subsampling, so a neutralised area stays neutral through the box filter. Empty (the
-default) is a no-op, byte-identical to every pre-existing caller.
+default) is a no-op, byte-identical to every pre-existing caller. Distinguishing `eyes`
+from the other features is why `human::RegionKind` now carries `Eyes`/`Nose`/`Mouth`
+rather than a single `Feature` (the `--debug-regions` overlay still colours the whole face
+differently from the three feature boxes).
 
 **Why a chroma mask, not a new mode or format field.** `Cb == Cr == 128` inverts to
 `R == G == B` (`mars_core::metrics::ycbcr`), so no format change and no decoder change are
 needed: `decode_color_image` already reconstructs those pixels as grayscale, and the
-neutral area compresses to almost nothing, so the flags save chroma bits rather than
-spending them (measured on `input.jpeg`, 270x333: chroma 486 bytes with `faces`, 382 with
-`features`).
+neutral area compresses to almost nothing, so the option saves chroma bits rather than
+spending them (measured on `input.jpeg`, 270x333: chroma 486 bytes with `--color face`,
+382 with `--color features`).
 
 **A one-level colour cast, and why chroma `bits_beta` is raised.** A flat leaf reconstructs
 `trunc(0.5 + qbeta/((1 << bits_beta) - 1) * 255)`. At the CLI's default `bits_beta = 7` the
@@ -3327,8 +3331,8 @@ pixels are exactly `R == G == B`, and inside they keep full colour.
   survives around the edge -- measured up to ~12 px (`faces`) and ~7 px (`features`) from
   the region box, bounded by `--max-size`. Most of the fringe is subtle (RGB spread <= 10),
   but a narrow outline at the edge is not. A finer `--max-size` narrows it.
-- As with `--outside-min-size`, the flags are **not applied** when no face is detected (an
+- As with `--outside-min-size`, the option is **not applied** when no face is detected (an
   empty region set is a no-op, reported as such), rather than silently grayscaling the whole
-  image on a detection failure. On grayscale input they have no effect and say so.
+  image on a detection failure. On grayscale input it has no effect and says so.
 
 No measurement/gate accompanies this entry; it adds a capability, not a number.

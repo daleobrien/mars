@@ -15,17 +15,17 @@ use crate::human::{HumanRegion, RegionKind};
 /// Outline thickness in pixels. Thick enough to stay visible over busy detail.
 const THICKNESS: usize = 2;
 
-/// Outline value per channel for a region kind. Grayscale has a single channel, so the two
-/// kinds are told apart by brightness there instead of hue.
+/// Outline value per channel for a region kind. Grayscale has a single channel, so the whole
+/// face box and the eyes/nose/mouth boxes are told apart by brightness there instead of hue.
 fn outline_colour(kind: RegionKind, colour_space: ColorSpace) -> [u8; 3] {
     match colour_space {
         ColorSpace::Gray => match kind {
             RegionKind::Face => [255, 255, 255],
-            RegionKind::Feature => [128, 128, 128],
+            RegionKind::Eyes | RegionKind::Nose | RegionKind::Mouth => [128, 128, 128],
         },
         ColorSpace::Rgb => match kind {
             RegionKind::Face => [0, 255, 0],
-            RegionKind::Feature => [255, 0, 0],
+            RegionKind::Eyes | RegionKind::Nose | RegionKind::Mouth => [255, 0, 0],
         },
     }
 }
@@ -162,7 +162,7 @@ mod tests {
             &image,
             &[
                 region(0, 0, 4, 4, RegionKind::Face),
-                region(4, 4, 4, 4, RegionKind::Feature),
+                region(4, 4, 4, 4, RegionKind::Eyes),
             ],
         );
         let plane = &drawn.planes()[0];
@@ -181,7 +181,7 @@ mod tests {
             &image,
             &[
                 region(0, 0, 4, 4, RegionKind::Face),
-                region(4, 4, 4, 4, RegionKind::Feature),
+                region(4, 4, 4, 4, RegionKind::Eyes),
             ],
         );
         let planes = drawn.planes();
@@ -203,7 +203,7 @@ mod tests {
             &image,
             &[
                 region(100, 100, 4, 4, RegionKind::Face), // entirely off-image
-                region(2, 2, 0, 0, RegionKind::Feature),  // zero-sized
+                region(2, 2, 0, 0, RegionKind::Eyes),     // zero-sized
             ],
         );
         assert_eq!(drawn, image, "nothing to draw leaves the image unchanged");
@@ -219,7 +219,7 @@ mod tests {
             Plane::filled(8, 8, 20),
             Plane::filled(8, 8, 30),
         );
-        let drawn = draw_regions(&image, &[region(0, 0, 4, 4, RegionKind::Feature)]);
+        let drawn = draw_regions(&image, &[region(0, 0, 4, 4, RegionKind::Eyes)]);
         let path = std::env::temp_dir().join(format!("mars-overlay-{}.png", std::process::id()));
         write_image(&drawn, &path).expect("writing the overlay must succeed");
 

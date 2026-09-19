@@ -184,9 +184,9 @@ pub struct ColorEncodeParams {
     /// Regions (luma pixel coordinates) that **keep their colour**; chroma outside their
     /// union is forced to neutral before encoding ([`neutralise_chroma_outside`]), so the
     /// decoder reconstructs those pixels as grayscale (`R == G == B`). This is what
-    /// `encmars --human-adaptive --color-faces-only` (whole face boxes) and
-    /// `--color-features-only` (eyes/nose/mouth boxes) fill: colour inside those regions, a
-    /// luma-only (grayscale) image with the same detail everywhere else. Empty (the
+    /// `encmars --human-adaptive --color face|features|eyes` fills with the detected whole
+    /// face, eyes/nose/mouth, or eyes-only boxes: colour inside those regions, a luma-only
+    /// (grayscale) image with the same detail everywhere else. Empty (the
     /// default) leaves chroma untouched and reproduces every pre-existing caller
     /// byte-for-byte. An empty set because nothing was detected is deliberately a no-op, not
     /// "grayscale everywhere" -- see `docs/decisions.md` D52. Ignored for grayscale input.
@@ -948,9 +948,8 @@ mod tests {
             }
         }
         // Inside it, colour must have survived -- otherwise the assertion above is vacuous.
-        let colourful_inside = (0..32).any(|y| {
-            (0..64).any(|x| r.get(x, y) != g.get(x, y) || g.get(x, y) != b.get(x, y))
-        });
+        let colourful_inside = (0..32)
+            .any(|y| (0..64).any(|x| r.get(x, y) != g.get(x, y) || g.get(x, y) != b.get(x, y)));
         assert!(colourful_inside, "the colour region lost all its colour");
 
         // Masking chroma must not cost more chroma bits than keeping it everywhere.

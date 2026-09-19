@@ -76,15 +76,19 @@ fn padded_region(
     })
 }
 
-/// Which part of a face a region was derived from. Only the `--debug-regions` overlay uses
-/// this (to colour face outlines differently from feature outlines); the encoder treats
-/// every region identically.
+/// Which part of a face a region was derived from. The `--debug-regions` overlay colours
+/// `Face` outlines differently from the eyes/nose/mouth outlines, and `encmars --color`
+/// selects which kinds keep colour; the encoder otherwise treats every region identically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionKind {
     /// The whole detected face box.
     Face,
-    /// One eye, nose, or mouth box inside a face.
-    Feature,
+    /// The eyes box: both eye landmarks, padded.
+    Eyes,
+    /// The nose box: the single nose landmark, padded outward.
+    Nose,
+    /// The mouth box: both mouth corners, padded.
+    Mouth,
 }
 
 /// A planned region: the encoder-facing rectangle plus the feature class it came from.
@@ -139,7 +143,7 @@ pub fn plan_regions(
             feature_scale,
         ) {
             regions.push(HumanRegion {
-                kind: RegionKind::Feature,
+                kind: RegionKind::Eyes,
                 region,
             });
         }
@@ -152,7 +156,7 @@ pub fn plan_regions(
             feature_scale,
         ) {
             regions.push(HumanRegion {
-                kind: RegionKind::Feature,
+                kind: RegionKind::Nose,
                 region,
             });
         }
@@ -166,7 +170,7 @@ pub fn plan_regions(
             feature_scale,
         ) {
             regions.push(HumanRegion {
-                kind: RegionKind::Feature,
+                kind: RegionKind::Mouth,
                 region,
             });
         }
@@ -333,11 +337,11 @@ mod tests {
             kinds,
             vec![
                 RegionKind::Face,
-                RegionKind::Feature,
-                RegionKind::Feature,
-                RegionKind::Feature,
+                RegionKind::Eyes,
+                RegionKind::Nose,
+                RegionKind::Mouth,
             ],
-            "one face box, then eyes, nose and mouth"
+            "one face box, then the eyes, nose and mouth boxes"
         );
     }
 }
