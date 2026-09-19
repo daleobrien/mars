@@ -390,6 +390,7 @@ fn audit_one(
         adaptive_density: false,
         residual_quantisation: ResidualQuantisation::default(),
         rd_candidates: 1,
+        lambda_regions: Vec::new(),
     };
     let audited = audit_rd(plane, &params(&config.codec, lambda, t_rms), &options)?;
 

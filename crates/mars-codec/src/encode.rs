@@ -68,7 +68,7 @@ impl Default for ResidualQuantisation {
 }
 
 /// Optional encode controls without adding fields to existing `EncodeParams` literals.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EncodeOptions {
     pub allowed_modes: [bool; 4],
     pub adaptive_density: bool,
@@ -81,6 +81,13 @@ pub struct EncodeOptions {
     /// stream syntax, so the winner's coordinate/coefficient fields are already fully priced
     /// by [`crate::mars_format::leaf_events`], but they do add per-leaf mode-pricing work.
     pub rd_candidates: usize,
+    /// Spatially varying lambda: each [`LambdaRegion`] scales the run's base lambda for
+    /// blocks overlapping it, so a region can spend more bits where errors are most
+    /// visible (e.g. a detected face). Empty (the default) leaves every block at the base
+    /// lambda, byte-identical to every caller that predates this field. Only consulted on
+    /// the RD (`params.lambda: Some`) path -- the legacy `walk` makes no `J = D + lambda*R`
+    /// decision to bias.
+    pub lambda_regions: Vec<LambdaRegion>,
 }
 
 impl Default for EncodeOptions {
@@ -90,8 +97,65 @@ impl Default for EncodeOptions {
             adaptive_density: false,
             residual_quantisation: ResidualQuantisation::default(),
             rd_candidates: 1,
+            lambda_regions: Vec::new(),
         }
     }
+}
+
+/// One axis-aligned rectangle in plane pixel coordinates whose RD trade-off is scaled by
+/// `scale` -- the multiplier applied to the run's base lambda for blocks overlapping it.
+///
+/// `scale < 1.0` weights distortion more heavily inside the rectangle, so [`walk_rd`]
+/// prefers finer blocks there (lower error, more bits); `scale > 1.0` does the opposite.
+/// A region is a *preference*, not a hard bound: RD still chooses per node, so a region can
+/// never force a partition the rate term would not otherwise accept.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LambdaRegion {
+    pub row: u32,
+    pub col: u32,
+    pub height: u32,
+    pub width: u32,
+    /// Multiplier on the base lambda. `1.0` is a no-op.
+    pub scale: f64,
+}
+
+/// Effective lambda multiplier for a `size x size` block at `(row, col)`.
+///
+/// Each region contributes in proportion to the fraction of the block it covers -- a
+/// block only partly inside a region is only partly affected, which is what keeps a small
+/// region from dragging its whole enclosing quadtree down to the region's scale -- and the
+/// smallest resulting multiplier over all regions wins, so a smaller, lower-scale region
+/// nested inside a larger one (an eye inside a face) dominates where they overlap.
+///
+/// A block that intersects no region, or an empty region list, yields exactly `1.0`, so the
+/// no-region path is unchanged. This is a pure function of geometry, and the RD walk calls
+/// it per node, so it must stay cheap: it is `O(regions)` with no allocation.
+pub fn lambda_scale_for_block(regions: &[LambdaRegion], row: u32, col: u32, size: u32) -> f64 {
+    if regions.is_empty() || size == 0 {
+        return 1.0;
+    }
+    let block_area = f64::from(size) * f64::from(size);
+    let mut best = 1.0f64;
+    for region in regions {
+        // A region at or above the current best cannot improve it.
+        if region.scale >= best {
+            continue;
+        }
+        let top = u64::from(row.max(region.row));
+        let left = u64::from(col.max(region.col));
+        let bottom = u64::from((row + size).min(region.row.saturating_add(region.height)));
+        let right = u64::from((col + size).min(region.col.saturating_add(region.width)));
+        if bottom <= top || right <= left {
+            continue;
+        }
+        let coverage = (((bottom - top) * (right - left)) as f64 / block_area).min(1.0);
+        // The region's scale, diluted by how little of the block it actually covers.
+        let candidate = 1.0 - (1.0 - region.scale) * coverage;
+        if candidate < best {
+            best = candidate;
+        }
+    }
+    best
 }
 
 /// The six integer moments of one candidate fit, kept alongside the winning candidate so
@@ -964,6 +1028,7 @@ pub fn encode_image_with_search(
             allowed_modes,
             adaptive_density,
             rd_candidates: options.rd_candidates,
+            lambda_regions: options.lambda_regions.as_slice(),
         };
         let result = walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda);
         return EncodeOutcome {
@@ -987,6 +1052,7 @@ pub fn encode_image_with_search(
         allowed_modes,
         adaptive_density: false,
         rd_candidates: options.rd_candidates,
+        lambda_regions: options.lambda_regions.as_slice(),
     };
     let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
     EncodeOutcome {
@@ -1033,6 +1099,9 @@ fn build_rate_snapshot(
         adaptive_density: false,
         // The warm-up is a legacy `walk`, which has no mode competition to widen.
         rd_candidates: 1,
+        // The warm-up partition is deliberately region-free: it exists only to build a
+        // rate snapshot, not to express the run's own quality target.
+        lambda_regions: &[],
     };
     let (leaves, evals) = walk(&warmup_ctx, 0, 0, hdr.virtual_size());
     let rate = RateModels::from_leaves(hdr, &leaves)
@@ -1091,6 +1160,7 @@ pub fn audit_rd(
                 allowed_modes: options.allowed_modes,
                 adaptive_density: options.adaptive_density,
                 rd_candidates: options.rd_candidates,
+                lambda_regions: options.lambda_regions.as_slice(),
             };
             let result = walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda);
             (
@@ -1114,6 +1184,7 @@ pub fn audit_rd(
                 allowed_modes: options.allowed_modes,
                 adaptive_density: false,
                 rd_candidates: options.rd_candidates,
+                lambda_regions: options.lambda_regions.as_slice(),
             };
             let (leaves, evals) = walk(&ctx, 0, 0, hdr.virtual_size());
             (
@@ -1175,6 +1246,11 @@ struct Ctx<'a> {
     /// `1` reproduces the single-winner behaviour exactly. Read only by [`walk_rd`]; the
     /// legacy [`walk`] has no mode competition to widen.
     rd_candidates: usize,
+    /// Spatially varying lambda: [`walk_rd`] scales each node's base lambda by
+    /// [`lambda_scale_for_block`] before its `J = D + lambda*R` decision. Empty everywhere
+    /// on the legacy `lambda: None` path ([`walk`] never reads it) and for every caller that
+    /// supplies no regions, so those encodes stay byte-for-byte unchanged.
+    lambda_regions: &'a [LambdaRegion],
 }
 
 /// Step 12: below this block size, a `rayon::join`'s task-spawn/steal overhead costs more
@@ -1783,6 +1859,12 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
         };
     }
 
+    // Human-adaptive encoding: scale this node's base lambda by whatever [`LambdaRegion`]
+    // covers it, if any. `lambda` itself stays the run's base value so recursion below
+    // re-derives each child's own effective lambda from geometry instead of compounding
+    // this node's. No regions (the default) leaves `node_lambda == lambda` exactly.
+    let node_lambda = lambda * lambda_scale_for_block(ctx.lambda_regions, row, col, size);
+
     // Step 16: content-adaptive domain-pool density. Computed before the search itself so
     // the density decision never depends on the search's own result (which would make the
     // "which stride did we search at" question circular). `false` (every pre-Step-16
@@ -1817,7 +1899,7 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
             size,
             outcome.candidate.as_slice(),
             rate,
-            lambda,
+            node_lambda,
             size_class,
         );
         (leaf, d, r, outcome.evals)
@@ -1830,7 +1912,7 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
             size,
             &outcome.candidates,
             rate,
-            lambda,
+            node_lambda,
             size_class,
         );
         (leaf, d, r, outcome.evals)
@@ -1854,8 +1936,8 @@ fn walk_rd(ctx: &Ctx, row: u32, col: u32, size: u32, lambda: f64) -> RdResult {
     let total_evals = block_evals + children.evals;
 
     let split_flag_bits = |symbol: u32| rate.bits_for((FIELD_SPLIT, size_class), 2, symbol);
-    let leaf_j = leaf_d + lambda * (leaf_r + split_flag_bits(0));
-    let split_j = children.d + lambda * (children.r + split_flag_bits(1));
+    let leaf_j = leaf_d + node_lambda * (leaf_r + split_flag_bits(0));
+    let split_j = children.d + node_lambda * (children.r + split_flag_bits(1));
 
     if leaf_j <= split_j {
         let mut stats = ModeStats::default();
@@ -2782,6 +2864,7 @@ mod tests {
                 allowed_modes,
                 adaptive_density: false,
                 rd_candidates: 1,
+                lambda_regions: &[],
             };
             walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda)
         };
@@ -2913,6 +2996,7 @@ mod tests {
                 allowed_modes: [true, false, true, true],
                 adaptive_density: false,
                 rd_candidates,
+                lambda_regions: &[],
             };
             walk_rd(&ctx, 0, 0, hdr.virtual_size(), lambda)
         };
@@ -2957,7 +3041,7 @@ mod tests {
         };
         let explicit_one = EncodeOptions {
             rd_candidates: 1,
-            ..base
+            ..base.clone()
         };
         assert_eq!(encode(&base), encode(&explicit_one));
 
@@ -2967,8 +3051,144 @@ mod tests {
         };
         let mode0_wide = EncodeOptions {
             rd_candidates: 4,
-            ..mode0
+            ..mode0.clone()
         };
         assert_eq!(encode(&mode0), encode(&mode0_wide));
+    }
+
+    /// `LambdaRegion` geometry: a region's influence is diluted by how little of a block it
+    /// covers, a nested (smaller-scale) region wins where the two overlap, and "no region"
+    /// or "scale 1.0" is a strict no-op.
+    #[test]
+    fn lambda_scale_for_block_blends_coverage_and_resolves_nesting() {
+        let face = LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 64,
+            width: 64,
+            scale: 0.5,
+        };
+        let eye = LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 16,
+            width: 16,
+            scale: 0.25,
+        };
+        let both = [face, eye];
+        // Fully inside the eye (and the face): the deeper, smaller scale wins.
+        assert_eq!(lambda_scale_for_block(&both, 0, 0, 8), 0.25);
+        // Inside the face only.
+        assert_eq!(lambda_scale_for_block(&both, 32, 32, 8), 0.5);
+        // Outside both.
+        assert_eq!(lambda_scale_for_block(&both, 200, 200, 8), 1.0);
+
+        // A block half-covered by a region is only half-affected: 1 - (1 - 0.5) * 0.5.
+        let strip = [LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 100,
+            width: 4,
+            scale: 0.5,
+        }];
+        assert!((lambda_scale_for_block(&strip, 0, 0, 8) - 0.75).abs() < 1e-12);
+
+        // An empty list, and a `scale: 1.0` entry, both leave the lambda exactly alone.
+        assert_eq!(lambda_scale_for_block(&[], 0, 0, 8), 1.0);
+        let no_op = [LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 8,
+            width: 8,
+            scale: 1.0,
+        }];
+        assert_eq!(lambda_scale_for_block(&no_op, 0, 0, 8), 1.0);
+    }
+
+    /// The byte-level no-op guarantee: a region at `scale: 1.0` scales nothing, so the
+    /// stream must be identical to the region-free encode.
+    #[test]
+    fn a_scale_one_region_is_byte_identical_to_no_regions() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let params = rd_params(200.0);
+        let encode = |options: &EncodeOptions| {
+            let (hdr, leaves, _, _) = encode_image_with_options(&image, &params, options);
+            crate::mars_format::write(&hdr, &leaves).expect("a valid partition always writes")
+        };
+        let no_op = EncodeOptions {
+            lambda_regions: vec![LambdaRegion {
+                row: 8,
+                col: 8,
+                height: 24,
+                width: 40,
+                scale: 1.0,
+            }],
+            ..EncodeOptions::default()
+        };
+        assert_eq!(encode(&EncodeOptions::default()), encode(&no_op));
+    }
+
+    /// A region covering the whole image at `scale` makes every node's effective lambda
+    /// exactly `lambda * scale`, which must be byte-identical to encoding with that lambda
+    /// directly. This pins the per-node plumbing against the geometry without depending on
+    /// how any particular image fixture responds to lambda. `0.5` is used because it is
+    /// exactly representable, so `lambda * scale` and `1 - (1 - scale)` agree bit-for-bit.
+    #[test]
+    fn a_full_image_region_is_exactly_a_scaled_lambda() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let base = rd_params(400.0);
+        let regioned = EncodeOptions {
+            lambda_regions: vec![LambdaRegion {
+                row: 0,
+                col: 0,
+                height: 64,
+                width: 64,
+                scale: 0.5,
+            }],
+            ..EncodeOptions::default()
+        };
+        let (hdr_a, leaves_a, _, _) = encode_image_with_options(&image, &base, &regioned);
+        let (hdr_b, leaves_b, _, _) = encode_image_with_options(
+            &image,
+            &EncodeParams {
+                lambda: Some(200.0),
+                ..base
+            },
+            &EncodeOptions::default(),
+        );
+        assert_eq!(hdr_a, hdr_b);
+        assert_eq!(leaves_a, leaves_b);
+    }
+
+    /// The region value must reach [`walk_rd`]'s decision, not just the geometry helper: a
+    /// whole-image region scaled far below the (deliberately coarse) base lambda must buy
+    /// detail -- the same monotonicity
+    /// [`higher_lambda_yields_fewer_larger_leaves_than_lower_lambda`] pins for a uniform
+    /// lambda.
+    #[test]
+    fn a_low_scale_region_buys_more_leaves_than_the_uniform_lambda() {
+        let image = half_flat_half_noisy_image(64, 64);
+        let base = rd_params(5000.0);
+        let (_, plain, _, _) = encode_image_with_options(&image, &base, &EncodeOptions::default());
+        let (_, regioned, _, _) = encode_image_with_options(
+            &image,
+            &base,
+            &EncodeOptions {
+                lambda_regions: vec![LambdaRegion {
+                    row: 0,
+                    col: 0,
+                    height: 64,
+                    width: 64,
+                    scale: 0.0002,
+                }],
+                ..EncodeOptions::default()
+            },
+        );
+        assert!(
+            regioned.len() > plain.len(),
+            "a whole-image low-scale region must buy detail ({} vs {})",
+            regioned.len(),
+            plain.len()
+        );
     }
 }

@@ -100,6 +100,7 @@ fn encoded_residuals_reconstruct_in_all_eight_orientations_after_wire_roundtrip(
                 adaptive_density: false,
                 residual_quantisation: policy,
                 rd_candidates: 1,
+                lambda_regions: Vec::new(),
             },
         );
         assert_eq!(header.residual_qstep, expected_step);

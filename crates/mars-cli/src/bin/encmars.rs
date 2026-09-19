@@ -11,7 +11,8 @@ use mars_codec::color::{
     ColorEncodeParams, Subsampling, encode_color_image_with_residual_quantisation, wrap_gray_stream,
 };
 use mars_codec::encode::{
-    EncodeOptions, EncodeParams, ExhaustiveSearch, ResidualQuantisation, encode_image_with_search,
+    EncodeOptions, EncodeParams, ExhaustiveSearch, LambdaRegion, ResidualQuantisation,
+    encode_image_with_search,
 };
 use mars_core::io::read_image;
 
@@ -251,6 +252,38 @@ struct Cli {
     /// partition is serialised.
     #[arg(long)]
     progressive: bool,
+
+    /// Human-adaptive encoding: detect faces, then lower the RD lambda inside each face
+    /// region -- and further inside its eyes, nose, and mouth -- so the encoder spends more
+    /// bits where human viewers notice errors most. Needs the RD path (the default; omit
+    /// --t-rms/--method, or supply --lambda). Regions apply to the luma/grayscale plane;
+    /// chroma keeps the run's uniform lambda. Face detection needs a build with the
+    /// `face-detect` feature (OpenCV + ONNX Runtime) and an SCRFD ONNX model via
+    /// --scrfd-model.
+    #[arg(long, default_value_t = false)]
+    human_adaptive: bool,
+
+    /// SCRFD ONNX model used by --human-adaptive (for example `det_500m.onnx`).
+    #[arg(long, requires = "human_adaptive")]
+    scrfd_model: Option<PathBuf>,
+
+    /// Lambda multiplier inside a detected face box (default 0.5, i.e. half the run's
+    /// lambda: more bits, lower error, inside the face).
+    #[arg(long, default_value_t = 0.5, requires = "human_adaptive")]
+    face_lambda_scale: f64,
+
+    /// Lambda multiplier inside a detected eye, nose, or mouth box (default 0.25, applied
+    /// on top of the face region: still more detail around the features within a face).
+    #[arg(long, default_value_t = 0.25, requires = "human_adaptive")]
+    feature_lambda_scale: f64,
+
+    /// Detector confidence threshold for --human-adaptive (default 0.25, SCRFD's own).
+    #[arg(long, default_value_t = 0.25, requires = "human_adaptive")]
+    face_confidence: f32,
+
+    /// Maximum number of faces --human-adaptive will adapt for (default 8).
+    #[arg(long, default_value_t = 8, requires = "human_adaptive")]
+    max_faces: usize,
 }
 
 impl Cli {
@@ -422,6 +455,24 @@ impl Cli {
                 );
             }
         }
+        if self.human_adaptive {
+            if self.effective_lambda().is_none() {
+                bail!(
+                    "--human-adaptive requires the RD path; supply --lambda with legacy thresholds or --method"
+                );
+            }
+            for (name, value) in [
+                ("--face-lambda-scale", self.face_lambda_scale),
+                ("--feature-lambda-scale", self.feature_lambda_scale),
+            ] {
+                if !value.is_finite() || value <= 0.0 {
+                    bail!("{name} must be finite and positive");
+                }
+            }
+            if !self.face_confidence.is_finite() || !(0.0..=1.0).contains(&self.face_confidence) {
+                bail!("--face-confidence must be in 0.0..=1.0");
+            }
+        }
         Ok(())
     }
 }
@@ -467,11 +518,13 @@ fn main() -> Result<()> {
     for &mode in cli.effective_modes() {
         allowed_modes[usize::from(mode)] = true;
     }
+    let lambda_regions = human_adaptive_regions(&cli, &image)?;
     let options = EncodeOptions {
         allowed_modes,
         adaptive_density: cli.adaptive_density,
         residual_quantisation: residual_policy(&cli),
         rd_candidates: cli.rd_candidates,
+        lambda_regions: lambda_regions.clone(),
     };
 
     if let Some(method_arg) = cli.method {
@@ -510,6 +563,7 @@ fn main() -> Result<()> {
         adaptive_density: options.adaptive_density,
         allowed_modes: options.allowed_modes,
         rd_candidates: cli.rd_candidates,
+        lambda_regions,
     };
 
     let (width, height) = (image.width(), image.height());
@@ -677,6 +731,44 @@ fn run_progressive(
     Ok(())
 }
 
+/// Build the region-local lambda set for `--human-adaptive`, or an empty set when the flag
+/// is off. Detection itself is behind the `face-detect` feature; without that feature the
+/// flag fails with a build instruction rather than silently encoding without adaptation.
+#[cfg(feature = "face-detect")]
+fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<Vec<LambdaRegion>> {
+    if !cli.human_adaptive {
+        return Ok(Vec::new());
+    }
+    let model = cli
+        .scrfd_model
+        .as_ref()
+        .context("--human-adaptive requires --scrfd-model")?;
+    let faces =
+        mars_cli::human::detect_faces(model, &cli.input, cli.face_confidence, cli.max_faces)
+            .with_context(|| format!("detecting faces in {}", cli.input.display()))?;
+    Ok(mars_cli::human::regions_from_faces(
+        &faces,
+        image.width() as u32,
+        image.height() as u32,
+        cli.face_lambda_scale,
+        cli.feature_lambda_scale,
+    ))
+}
+
+#[cfg(not(feature = "face-detect"))]
+fn human_adaptive_regions(
+    cli: &Cli,
+    _image: &mars_core::image::Image,
+) -> Result<Vec<LambdaRegion>> {
+    if cli.human_adaptive {
+        bail!(
+            "--human-adaptive needs the `face-detect` build feature (OpenCV + ONNX Runtime); \
+             rebuild with `cargo build -p mars-cli --features face-detect`"
+        );
+    }
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,5 +873,31 @@ mod tests {
         assert_eq!(parse(&["--lambda", "0"]).effective_lambda(), Some(0.0));
         assert_eq!(parse(&["--modes", "3"]).modes, [3]);
         assert_eq!(parse(&["--progressive"]).effective_lambda(), Some(200.0));
+    }
+
+    #[test]
+    fn human_adaptive_requires_the_rd_path_and_positive_scales() {
+        let cli = parse(&["--human-adaptive"]);
+        assert!(cli.human_adaptive);
+        // The default RD path satisfies the requirement.
+        assert!(cli.validate().is_ok());
+        // A legacy threshold leaves no RD path to adapt.
+        assert!(parse(&["--human-adaptive", "-r", "8"]).validate().is_err());
+        // Both scales must be positive and finite.
+        assert!(parse(&["--human-adaptive", "--face-lambda-scale", "0"])
+            .validate()
+            .is_err());
+        assert!(parse(&["--human-adaptive", "--feature-lambda-scale=-1"])
+            .validate()
+            .is_err());
+        // Confidence is a probability.
+        assert!(parse(&["--human-adaptive", "--face-confidence", "1.5"])
+            .validate()
+            .is_err());
+        // The detector knobs are meaningless without the flag, and clap refuses them.
+        assert!(
+            Cli::try_parse_from(["encmars", "in.png", "out.mars", "--scrfd-model", "m.onnx"])
+                .is_err()
+        );
     }
 }

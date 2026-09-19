@@ -31,7 +31,9 @@ use mars_core::image::{ColorSpace, Image};
 use mars_core::metrics::{rgb_from_ycbcr, ycbcr};
 use mars_core::Plane;
 
-use crate::encode::{encode_image_with_options, EncodeOptions, EncodeParams, ResidualQuantisation};
+use crate::encode::{
+    encode_image_with_options, EncodeOptions, EncodeParams, LambdaRegion, ResidualQuantisation,
+};
 use crate::ifs::{
     decode_iterative, decode_step, decode_until_stable, max_pixel_delta, zoom_leaves,
 };
@@ -122,6 +124,12 @@ pub struct ColorEncodeParams {
     /// the RD path, per plane. `1` (the default) is the historical single-winner
     /// behaviour and is byte-identical to it. See [`EncodeOptions::rd_candidates`].
     pub rd_candidates: usize,
+    /// Spatially varying lambda for the **luma** plane (human-adaptive encoding): each
+    /// [`LambdaRegion`] is in luma pixel coordinates and scales `params.y.lambda` for blocks
+    /// overlapping it. Chroma keeps the run's uniform lambda -- human sensitivity to chroma
+    /// detail is low, and the regions are defined from luma-space detections. Empty (the
+    /// default) reproduces every pre-existing caller byte-for-byte.
+    pub lambda_regions: Vec<LambdaRegion>,
 }
 
 /// Per-plane stats from a colour encode, for measurement (bpp attribution, evals).
@@ -193,19 +201,22 @@ pub fn encode_color_image_with_residual_quantisation(
     params: &ColorEncodeParams,
     policy: ResidualQuantisation,
 ) -> (Vec<u8>, ColorEncodeStats) {
-    let options = EncodeOptions {
+    let y_options = EncodeOptions {
         allowed_modes: params.allowed_modes,
         adaptive_density: params.adaptive_density,
         residual_quantisation: policy,
         rd_candidates: params.rd_candidates,
+        lambda_regions: params.lambda_regions.clone(),
+    };
+    // Chroma intentionally drops the luma-space regions (see `ColorEncodeParams`).
+    let chroma_options = EncodeOptions {
+        lambda_regions: Vec::new(),
+        ..y_options.clone()
     };
     match img.color() {
         ColorSpace::Gray => {
-            let (hdr, leaves, evals, _stats) = encode_image_with_options(
-                &img.planes()[0],
-                &params.y,
-                &options,
-            );
+            let (hdr, leaves, evals, _stats) =
+                encode_image_with_options(&img.planes()[0], &params.y, &y_options);
             let bytes = mars_format::write(&hdr, &leaves)
                 .expect("encode_image always produces a header valid for mars_format::write");
             let y_bytes = bytes.len();
@@ -227,21 +238,12 @@ pub fn encode_color_image_with_residual_quantisation(
                 Subsampling::Yuv420 => (MODE_RGB_420, downsample_box(&cb), downsample_box(&cr)),
             };
 
-            let (y_hdr, y_leaves, y_evals, _) = encode_image_with_options(
-                &y,
-                &params.y,
-                &options,
-            );
-            let (cb_hdr, cb_leaves, cb_evals, _) = encode_image_with_options(
-                &cb_enc,
-                &params.chroma,
-                &options,
-            );
-            let (cr_hdr, cr_leaves, cr_evals, _) = encode_image_with_options(
-                &cr_enc,
-                &params.chroma,
-                &options,
-            );
+            let (y_hdr, y_leaves, y_evals, _) =
+                encode_image_with_options(&y, &params.y, &y_options);
+            let (cb_hdr, cb_leaves, cb_evals, _) =
+                encode_image_with_options(&cb_enc, &params.chroma, &chroma_options);
+            let (cr_hdr, cr_leaves, cr_evals, _) =
+                encode_image_with_options(&cr_enc, &params.chroma, &chroma_options);
 
             let y_bytes = mars_format::write(&y_hdr, &y_leaves).expect("valid header");
             let cb_bytes = mars_format::write(&cb_hdr, &cb_leaves).expect("valid header");
@@ -667,6 +669,7 @@ mod tests {
             adaptive_density: false,
             allowed_modes: [true; 4],
             rd_candidates: 1,
+            lambda_regions: Vec::new(),
         };
         let (bytes, _stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -685,6 +688,7 @@ mod tests {
             adaptive_density: false,
             allowed_modes: [true; 4],
             rd_candidates: 1,
+            lambda_regions: Vec::new(),
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -725,6 +729,7 @@ mod tests {
             adaptive_density: false,
             allowed_modes: [true; 4],
             rd_candidates: 3,
+            lambda_regions: Vec::new(),
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let (bytes_again, _) = encode_color_image(&img, &cfg);
@@ -748,6 +753,7 @@ mod tests {
             adaptive_density: false,
             allowed_modes: [true; 4],
             rd_candidates: 1,
+            lambda_regions: Vec::new(),
         };
         let cfg_420 = ColorEncodeParams {
             y: params(4.0),
@@ -756,6 +762,7 @@ mod tests {
             adaptive_density: false,
             allowed_modes: [true; 4],
             rd_candidates: 1,
+            lambda_regions: Vec::new(),
         };
         let (bytes_444, stats_444) = encode_color_image(&img, &cfg_444);
         let (bytes_420, stats_420) = encode_color_image(&img, &cfg_420);
@@ -796,6 +803,7 @@ mod tests {
             adaptive_density: false,
             allowed_modes: [true; 4],
             rd_candidates: 1,
+            lambda_regions: Vec::new(),
         };
         let (bytes_420, _stats) = encode_color_image(&img, &cfg_420);
 
