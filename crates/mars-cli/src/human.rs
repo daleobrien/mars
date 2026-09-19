@@ -1,6 +1,8 @@
 //! Human-adaptive encoding: turn face detections into [`LambdaRegion`]s that lower the RD
 //! lambda around faces, and more so around the eyes, nose, and mouth, so the encoder spends
-//! more bits where human viewers notice compression errors most.
+//! more bits where human viewers notice compression errors most. [`plan_regions`] tags each
+//! rectangle with the feature it came from, which the `--debug-regions` overlay uses to
+//! tell face outlines from feature outlines.
 //!
 //! The region *geometry* here has no external dependencies and is unit-tested directly;
 //! face detection itself lives in [`crate::scrfd`].
@@ -71,19 +73,37 @@ fn padded_region(
     })
 }
 
-/// Build the region set for a list of faces: one box per face at `face_scale`, plus an
+/// Which part of a face a region was derived from. Only the `--debug-regions` overlay uses
+/// this (to colour face outlines differently from feature outlines); the encoder treats
+/// every region identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionKind {
+    /// The whole detected face box.
+    Face,
+    /// One eye, nose, or mouth box inside a face.
+    Feature,
+}
+
+/// A planned region: the encoder-facing rectangle plus the feature class it came from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HumanRegion {
+    pub kind: RegionKind,
+    pub region: LambdaRegion,
+}
+
+/// Build the region plan for a list of faces: one box per face at `face_scale`, plus an
 /// eyes, a nose, and a mouth box per face at `feature_scale`.
 ///
 /// Feature boxes are derived from the landmarks relative to the interocular distance, so
 /// the mapping is scale-invariant and needs no assumptions about image resolution or the
 /// detector's input size. Degenerate landmarks fall back to a fraction of the face box.
-pub fn regions_from_faces(
+pub fn plan_regions(
     faces: &[FaceDetection],
     width: u32,
     height: u32,
     face_scale: f64,
     feature_scale: f64,
-) -> Vec<LambdaRegion> {
+) -> Vec<HumanRegion> {
     let mut regions = Vec::with_capacity(faces.len() * 4);
     for face in faces {
         if let Some(region) = padded_region(
@@ -93,7 +113,10 @@ pub fn regions_from_faces(
             height,
             face_scale,
         ) {
-            regions.push(region);
+            regions.push(HumanRegion {
+                kind: RegionKind::Face,
+                region,
+            });
         }
 
         let mut eye_distance = face.eye_distance();
@@ -112,7 +135,10 @@ pub fn regions_from_faces(
             height,
             feature_scale,
         ) {
-            regions.push(region);
+            regions.push(HumanRegion {
+                kind: RegionKind::Feature,
+                region,
+            });
         }
         // Nose: a zero-area box around the single landmark, padded outward.
         if let Some(region) = padded_region(
@@ -122,7 +148,10 @@ pub fn regions_from_faces(
             height,
             feature_scale,
         ) {
-            regions.push(region);
+            regions.push(HumanRegion {
+                kind: RegionKind::Feature,
+                region,
+            });
         }
         // Mouth: both corners, padded by well under the interocular distance so it does
         // not swallow the nose above it.
@@ -133,10 +162,28 @@ pub fn regions_from_faces(
             height,
             feature_scale,
         ) {
-            regions.push(region);
+            regions.push(HumanRegion {
+                kind: RegionKind::Feature,
+                region,
+            });
         }
     }
     regions
+}
+
+/// The encoder-facing projection of [`plan_regions`]: just the rectangles, in the same
+/// order.
+pub fn regions_from_faces(
+    faces: &[FaceDetection],
+    width: u32,
+    height: u32,
+    face_scale: f64,
+    feature_scale: f64,
+) -> Vec<LambdaRegion> {
+    plan_regions(faces, width, height, face_scale, feature_scale)
+        .into_iter()
+        .map(|planned| planned.region)
+        .collect()
 }
 
 #[cfg(test)]
@@ -180,8 +227,12 @@ mod tests {
         assert!(face.row + face.height >= 160);
     }
 
+    /// For this centred fixture the landmark padding happens to stay within the detected
+    /// box. That is a property of the fixture, not a guarantee: feature boxes are clamped to
+    /// the *image*, not to the face box, so on a real detection the eye box can extend a few
+    /// pixels past the face box (`--debug-regions` shows exactly where).
     #[test]
-    fn feature_boxes_are_inside_the_face_box() {
+    fn feature_boxes_of_a_centred_face_sit_inside_its_face_box() {
         let regions = regions_from_faces(&[centred_face()], 200, 200, 0.5, 0.25);
         let face = regions[0];
         for feature in &regions[1..] {
@@ -269,5 +320,21 @@ mod tests {
     #[test]
     fn no_faces_yields_no_regions() {
         assert!(regions_from_faces(&[], 200, 200, 0.5, 0.25).is_empty());
+    }
+
+    #[test]
+    fn the_plan_tags_each_region_with_its_feature_kind() {
+        let plan = plan_regions(&[centred_face()], 200, 200, 0.5, 0.25);
+        let kinds: Vec<RegionKind> = plan.iter().map(|planned| planned.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                RegionKind::Face,
+                RegionKind::Feature,
+                RegionKind::Feature,
+                RegionKind::Feature,
+            ],
+            "one face box, then eyes, nose and mouth"
+        );
     }
 }

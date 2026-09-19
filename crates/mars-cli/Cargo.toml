@@ -26,10 +26,12 @@ serde_json = { workspace = true }
 # `cargo build -p mars-cli --features face-detect` to enable it.
 ort = { version = "=2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
+# Writing the `--debug-regions` overlay. Already in the graph via `mars-core`.
+image = { workspace = true, optional = true }
 
 [features]
 # Enables `mars_cli::scrfd::detect_faces` and hence `encmars --human-adaptive`.
-face-detect = ["dep:ort", "dep:ndarray"]
+face-detect = ["dep:ort", "dep:ndarray", "dep:image"]
 
 [[bin]]
 name = "marsbench"

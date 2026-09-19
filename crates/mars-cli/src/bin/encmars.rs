@@ -283,6 +283,14 @@ struct Cli {
     /// Maximum number of faces --human-adaptive will adapt for (default 8).
     #[arg(long, default_value_t = 8, requires = "human_adaptive")]
     max_faces: usize,
+
+    /// Debug aid for --human-adaptive: also write a copy of the input with the active
+    /// regions outlined -- the face box, and the eye/nose/mouth boxes inside it. On colour
+    /// input the face outline is green and the feature outlines red; on grayscale, face
+    /// outlines are white and features mid-grey. The file format follows the extension, so
+    /// pass a `.png` path.
+    #[arg(long, value_name = "PATH", requires = "human_adaptive")]
+    debug_regions: Option<PathBuf>,
 }
 
 impl Cli {
@@ -733,8 +741,13 @@ fn run_progressive(
 /// Build the region-local lambda set for `--human-adaptive`, or an empty set when the flag
 /// is off. Detection itself is behind the `face-detect` feature; without that feature the
 /// flag fails with a build instruction rather than silently encoding without adaptation.
+///
+/// `--debug-regions` writes an overlay of the same plan the encoder is handed, so the file
+/// shows exactly which rectangles were active.
 #[cfg(feature = "face-detect")]
 fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<Vec<LambdaRegion>> {
+    use mars_cli::human::RegionKind;
+
     if !cli.human_adaptive {
         return Ok(Vec::new());
     }
@@ -744,13 +757,46 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         .context("--human-adaptive requires --scrfd-model")?;
     let faces = mars_cli::scrfd::detect_faces(model, image, cli.face_confidence, cli.max_faces)
         .with_context(|| format!("detecting faces in {}", cli.input.display()))?;
-    Ok(mars_cli::human::regions_from_faces(
+    let plan = mars_cli::human::plan_regions(
         &faces,
         image.width() as u32,
         image.height() as u32,
         cli.face_lambda_scale,
         cli.feature_lambda_scale,
-    ))
+    );
+
+    if let Some(path) = &cli.debug_regions {
+        let annotated = mars_cli::overlay::draw_regions(image, &plan);
+        mars_cli::overlay::write_image(&annotated, path)
+            .with_context(|| format!("writing the region overlay to {}", path.display()))?;
+    }
+    let faces_found = plan
+        .iter()
+        .filter(|planned| planned.kind == RegionKind::Face)
+        .count();
+    let overlay = match &cli.debug_regions {
+        Some(path) => format!(", overlay -> {}", path.display()),
+        None => String::new(),
+    };
+    println!(
+        "human-adaptive: {faces_found} face(s), {} region(s){overlay}",
+        plan.len()
+    );
+    if cli.debug_regions.is_some() {
+        for planned in &plan {
+            println!(
+                "  {:?} rows {}..{} cols {}..{} (lambda x{})",
+                planned.kind,
+                planned.region.row,
+                planned.region.row + planned.region.height,
+                planned.region.col,
+                planned.region.col + planned.region.width,
+                planned.region.scale,
+            );
+        }
+    }
+
+    Ok(plan.into_iter().map(|planned| planned.region).collect())
 }
 
 #[cfg(not(feature = "face-detect"))]

@@ -722,6 +722,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "image",
  "mars-bench",
  "mars-codec",
  "mars-core",
