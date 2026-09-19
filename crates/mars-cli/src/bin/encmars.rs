@@ -367,6 +367,13 @@ struct Cli {
         requires = "human_adaptive"
     )]
     color: Option<ColorRegionArg>,
+
+    /// With --color: how much of the colour to remove *outside* the chosen regions. `1.0`
+    /// (the default) makes the outside fully grayscale; `0.5` keeps half its colour; `0.0`
+    /// leaves the outside untouched, so the mask has no effect. Inside the regions the
+    /// colour is untouched either way. Has no effect on grayscale input (no chroma).
+    #[arg(long, value_name = "AMOUNT", requires = "color")]
+    desaturate: Option<f64>,
 }
 
 impl Cli {
@@ -573,6 +580,11 @@ impl Cli {
                     );
                 }
             }
+            if let Some(amount) = self.desaturate {
+                if !amount.is_finite() || !(0.0..=1.0).contains(&amount) {
+                    bail!("--desaturate must be in 0.0..=1.0");
+                }
+            }
         }
         Ok(())
     }
@@ -669,6 +681,7 @@ fn main() -> Result<()> {
         rd_candidates: cli.rd_candidates,
         lambda_regions: human.lambda_regions,
         color_regions: human.color_regions,
+        color_desaturate: cli.desaturate.unwrap_or(1.0),
     };
 
     let (width, height) = (image.width(), image.height());
@@ -930,12 +943,22 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         (Some(arg), true) => format!(", --color {} not applied (no face detected)", arg.key()),
         (None, _) => String::new(),
     };
+    let fade_note = match cli.desaturate {
+        Some(amount) if !color_regions.is_empty() && amount < 1.0 => {
+            if amount <= 0.0 {
+                ", --desaturate 0.0: outside colour unchanged, mask has no effect".to_string()
+            } else {
+                format!(", outside colour down {}%", (amount * 100.0).round())
+            }
+        }
+        _ => String::new(),
+    };
     let overlay = match &cli.debug_regions {
         Some(path) => format!(", overlay -> {}", path.display()),
         None => String::new(),
     };
     println!(
-        "human-adaptive: {faces_found} face(s), {} region(s){outside_note}{color_note}{overlay}",
+        "human-adaptive: {faces_found} face(s), {} region(s){outside_note}{color_note}{fade_note}{overlay}",
         plan.len()
     );
     if cli.debug_regions.is_some() {
@@ -1121,6 +1144,46 @@ mod tests {
         );
         // An unknown region name is rejected rather than silently ignored.
         assert!(Cli::try_parse_from(["encmars", "in.png", "out.mars", "--color", "nose"]).is_err());
+    }
+
+    #[test]
+    fn desaturate_requires_color_and_is_a_fraction() {
+        // Meaningless without --color, and clap refuses it.
+        let standalone = [
+            "encmars",
+            "in.png",
+            "out.mars",
+            "--human-adaptive",
+            "--desaturate",
+            "0.5",
+        ];
+        assert!(Cli::try_parse_from(standalone).is_err());
+        // Omitted means full grayscale (the pre-existing behaviour).
+        assert_eq!(
+            parse(&["--human-adaptive", "--color", "face"]).desaturate,
+            None
+        );
+        let cli = parse(&["--human-adaptive", "--color", "face", "--desaturate", "0.5"]);
+        assert_eq!(cli.desaturate, Some(0.5));
+        assert!(cli.validate().is_ok());
+        // Out of range is refused rather than clamped silently. The `=` form keeps clap from
+        // reading a leading `-` as another flag.
+        for (bad, arg) in [("1.5", "--desaturate=1.5"), ("-0.1", "--desaturate=-0.1")] {
+            let cli = Cli::try_parse_from([
+                "encmars",
+                "in.png",
+                "out.mars",
+                "--human-adaptive",
+                "--color",
+                "face",
+                arg,
+            ])
+            .unwrap_or_else(|e| panic!("--desaturate {bad} should parse: {e}"));
+            assert!(
+                cli.validate().is_err(),
+                "--desaturate {bad} should be refused"
+            );
+        }
     }
 
     #[test]

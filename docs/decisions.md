@@ -3292,16 +3292,16 @@ legacy selection, zero/explicit lambda precedence and mode replacement. These an
 C, D, E and residual integration tests passed; focused encmars Clippy passed. CLI-A's
 real-image default/off byte comparison also passed; its opt-in density sweep was not run.
 
-## D52 · 2026-09-20 · `encmars --human-adaptive --color-faces-only` / `--color-features-only`: colour in detected regions, grayscale elsewhere, by masking chroma rather than by a format or decoder change
+## D52 · 2026-09-20 · `encmars --human-adaptive --color face|features|eyes`: colour inside detected regions, grayscale or partial desaturation outside, by masking chroma rather than by a format or decoder change
 
 User-requested extension to `--human-adaptive`: keep colour only inside detected regions
-and encode everything else as grayscale. One value option chooses the regions --
-`--color face|features|eyes` (with `--colour` accepted as an alias), where `face` is the
-whole face box, `features` is the eyes, nose and mouth boxes, and `eyes` is only the eyes
-box. The three map onto one codec field, `ColorEncodeParams::color_regions` -- a set of
+and remove -- or merely reduce -- the colour everywhere else. One value option chooses the
+regions: `--color face|features|eyes` (with `--colour` accepted as an alias), where `face`
+is the whole face box, `features` is the eyes, nose and mouth boxes, and `eyes` is only the
+eyes box. The three map onto one codec field, `ColorEncodeParams::color_regions` -- a set of
 luma-space rectangles that *retain* colour. After `ycbcr(img)`, the Cb and Cr planes are
-forced to neutral 128 outside their union and encoded as normal, before any 4:2:0
-subsampling, so a neutralised area stays neutral through the box filter. Empty (the
+scaled toward neutral outside their union and encoded as normal, before any 4:2:0
+subsampling, so a desaturated area stays desaturated through the box filter. Empty (the
 default) is a no-op, byte-identical to every pre-existing caller. Distinguishing `eyes`
 from the other features is why `human::RegionKind` now carries `Eyes`/`Nose`/`Mouth`
 rather than a single `Feature` (the `--debug-regions` overlay still colours the whole face
@@ -3314,13 +3314,23 @@ neutral area compresses to almost nothing, so the option saves chroma bits rathe
 spending them (measured on `input.jpeg`, 270x333: chroma 486 bytes with `--color face`,
 382 with `--color features`).
 
+**Partial desaturation.** To keep some colour outside rather than discarding it,
+`--desaturate <AMOUNT>` (0.0..=1.0, default 1.0, requires `--color`) scales the outside
+chroma toward neutral: `1.0` is the full grayscale above, `0.5` keeps half the colour
+outside, and `0.0` leaves the outside untouched -- which makes the mask a byte-identical
+no-op, exactly as if `--color` were absent. The codec field is
+`ColorEncodeParams::color_desaturate`, applied by `desaturate_chroma_outside` at the same
+point as the full mask. Only the fully neutral case is exactly reconstructible; a partial
+amount is ordinary lossy chroma.
+
 **A one-level colour cast, and why chroma `bits_beta` is raised.** A flat leaf reconstructs
 `trunc(0.5 + qbeta/((1 << bits_beta) - 1) * 255)`. At the CLI's default `bits_beta = 7` the
-step skips 128 (63 -> 127, 64 -> 129), so a neutralised background would decode with a
-uniform one-level colour cast instead of being gray. When `color_regions` is non-empty the
-chroma planes' `bits_beta` is therefore raised to at least 8 (DC step exactly 1.0), which
-makes neutral exact; luma is untouched. Verified end to end: outside the regions the decoded
-pixels are exactly `R == G == B`, and inside they keep full colour.
+step skips 128 (63 -> 127, 64 -> 129), so a fully neutralised background would decode with a
+uniform one-level colour cast instead of being gray. When `color_regions` is non-empty and
+`color_desaturate` is above zero the chroma planes' `bits_beta` is therefore raised to at
+least 8 (DC step exactly 1.0), which makes neutral exact; luma is untouched. Verified end to
+end: outside the regions the decoded pixels are exactly `R == G == B`, and inside they keep
+full colour.
 
 **What this is not, stated plainly.**
 - It is a deliberately lossy, stylistic transform: the background's colour information is

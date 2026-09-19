@@ -102,28 +102,50 @@ pub fn upsample_nearest(plane: &Plane, width: usize, height: usize) -> Plane {
 /// grayscale pixel. [`mars_core::metrics::ycbcr`] emits exactly this for gray input.
 const NEUTRAL_CHROMA: u8 = 128;
 
-/// Force `cb` and `cr` to neutral outside every rectangle in `regions`, keeping the colour
-/// inside them. This is the "colour only inside the face boxes, grayscale elsewhere"
-/// transform: the neutral area compresses to almost nothing, and because `Cb == Cr == 128`
-/// inverts to `R == G == B`, [`decode_color_image`] reconstructs those pixels as grayscale
-/// with no format or decoder change at all.
+/// Scale the chroma of every pixel outside `regions` toward neutral by `desaturate`, keeping
+/// the colour inside them: `0.0` leaves the outside unchanged, `1.0` makes it fully neutral
+/// (grayscale), and values in between keep that fraction of the colour. This is "colour only
+/// inside the face boxes, partly or fully desaturated elsewhere".
+///
+/// A fully neutral pixel is `Cb == Cr == 128`, which inverts to `R == G == B`, so
+/// [`decode_color_image`] reconstructs it as grayscale with no format or decoder change at
+/// all -- and a neutral area compresses to almost nothing.
 ///
 /// The rectangles are in luma pixel coordinates, which are the chroma planes' coordinates
-/// at this point too: the caller masks *before* any 4:2:0 subsampling, so a neutralised area
-/// stays neutral through the box filter. A pixel covered by at least one region keeps its
-/// colour, so overlapping or adjacent boxes compose by union. An empty list is a no-op,
-/// leaving the planes exactly as `ycbcr` produced them.
-fn neutralise_chroma_outside(cb: &mut Plane, cr: &mut Plane, regions: &[LambdaRegion]) {
-    if regions.is_empty() {
+/// at this point too: the caller masks *before* any 4:2:0 subsampling, so a desaturated area
+/// stays desaturated through the box filter. A pixel covered by at least one region keeps its
+/// colour, so overlapping or adjacent boxes compose by union. An empty list, or a
+/// `desaturate` of `0.0` or less, is a no-op. `desaturate` is clamped to `0.0..=1.0`.
+fn desaturate_chroma_outside(
+    cb: &mut Plane,
+    cr: &mut Plane,
+    regions: &[LambdaRegion],
+    desaturate: f64,
+) {
+    let keep = (1.0 - desaturate).clamp(0.0, 1.0);
+    if regions.is_empty() || keep >= 1.0 {
         return;
     }
     let (width, height) = (cb.width(), cb.height());
     let colour_cb = cb.as_slice().to_vec();
     let colour_cr = cr.as_slice().to_vec();
-    let cb_out = cb.as_mut_slice();
-    let cr_out = cr.as_mut_slice();
-    cb_out.fill(NEUTRAL_CHROMA);
-    cr_out.fill(NEUTRAL_CHROMA);
+    if keep <= 0.0 {
+        cb.as_mut_slice().fill(NEUTRAL_CHROMA);
+        cr.as_mut_slice().fill(NEUTRAL_CHROMA);
+    } else {
+        let scale = |v: u8| -> u8 {
+            (f64::from(NEUTRAL_CHROMA) + (f64::from(v) - f64::from(NEUTRAL_CHROMA)) * keep)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        for v in cb.as_mut_slice() {
+            *v = scale(*v);
+        }
+        for v in cr.as_mut_slice() {
+            *v = scale(*v);
+        }
+    }
+    // Restore the colour inside each region, which the whole-plane pass above also touched.
     for region in regions {
         let x0 = (region.col as usize).min(width);
         let y0 = (region.row as usize).min(height);
@@ -139,8 +161,8 @@ fn neutralise_chroma_outside(cb: &mut Plane, cr: &mut Plane, regions: &[LambdaRe
         for y in y0..y1 {
             let start = y * width + x0;
             let end = y * width + x1;
-            cb_out[start..end].copy_from_slice(&colour_cb[start..end]);
-            cr_out[start..end].copy_from_slice(&colour_cr[start..end]);
+            cb.as_mut_slice()[start..end].copy_from_slice(&colour_cb[start..end]);
+            cr.as_mut_slice()[start..end].copy_from_slice(&colour_cr[start..end]);
         }
     }
 }
@@ -195,6 +217,12 @@ pub struct ColorEncodeParams {
     /// exactly; below 8 bits the DC step skips 128 and the background would keep a
     /// one-level colour cast. Luma is unaffected.
     pub color_regions: Vec<LambdaRegion>,
+    /// How much of the colour to remove *outside* [`Self::color_regions`]: `0.0` leaves the
+    /// outside untouched, `1.0` makes it fully neutral (grayscale), and `0.5` keeps half the
+    /// colour. Applied by [`desaturate_chroma_outside`] before encoding, so a fully neutral
+    /// area still compresses to nothing and decodes as `R == G == B`. Clamped to `0.0..=1.0`.
+    /// Only consulted when `color_regions` is non-empty, and `0.0` is a no-op there too.
+    pub color_desaturate: f64,
 }
 
 /// Per-plane stats from a colour encode, for measurement (bpp attribution, evals).
@@ -298,12 +326,18 @@ pub fn encode_color_image_with_residual_quantisation(
         }
         ColorSpace::Rgb => {
             let [y, mut cb, mut cr] = ycbcr(img);
-            neutralise_chroma_outside(&mut cb, &mut cr, &params.color_regions);
+            desaturate_chroma_outside(
+                &mut cb,
+                &mut cr,
+                &params.color_regions,
+                params.color_desaturate,
+            );
             // Exact neutral chroma needs a DC step of 1.0. Below 8 bits,
             // `qbeta/((1<<bits_beta)-1)*255` steps past 128 (127 -> 127, 128 -> 129), so the
-            // neutralised background would reconstruct with a one-level colour cast instead
+            // desaturated background would reconstruct with a one-level colour cast instead
             // of being gray. Raise only the chroma planes, and only when a mask is in use.
-            let chroma_params = if params.color_regions.is_empty() {
+            let chroma_params = if params.color_regions.is_empty() || params.color_desaturate <= 0.0
+            {
                 params.chroma
             } else {
                 EncodeParams {
@@ -749,6 +783,7 @@ mod tests {
             rd_candidates: 1,
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
+            color_desaturate: 1.0,
         };
         let (bytes, _stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -769,6 +804,7 @@ mod tests {
             rd_candidates: 1,
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
+            color_desaturate: 1.0,
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -811,6 +847,7 @@ mod tests {
             rd_candidates: 3,
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
+            color_desaturate: 1.0,
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let (bytes_again, _) = encode_color_image(&img, &cfg);
@@ -836,6 +873,7 @@ mod tests {
             rd_candidates: 1,
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
+            color_desaturate: 1.0,
         };
         let cfg_420 = ColorEncodeParams {
             y: params(4.0),
@@ -846,6 +884,7 @@ mod tests {
             rd_candidates: 1,
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
+            color_desaturate: 1.0,
         };
         let (bytes_444, stats_444) = encode_color_image(&img, &cfg_444);
         let (bytes_420, stats_420) = encode_color_image(&img, &cfg_420);
@@ -888,6 +927,7 @@ mod tests {
             rd_candidates: 1,
             lambda_regions: Vec::new(),
             color_regions: Vec::new(),
+            color_desaturate: 1.0,
         };
         let (bytes_420, _stats) = encode_color_image(&img, &cfg_420);
 
@@ -927,6 +967,7 @@ mod tests {
                 scale: 1.0,
                 min_size: None,
             }],
+            color_desaturate: 1.0,
         };
         let (bytes, stats) = encode_color_image(&img, &cfg);
         let decoded = decode_color_image(&bytes, 10).unwrap();
@@ -965,6 +1006,113 @@ mod tests {
             stats.cr_bytes,
             baseline.cb_bytes,
             baseline.cr_bytes
+        );
+    }
+
+    /// The mask is a scale toward neutral, not a boolean: a `desaturate` between 0 and 1
+    /// keeps that fraction of the colour outside the regions.
+    #[test]
+    fn desaturate_scales_chroma_toward_neutral_outside_the_regions() {
+        let region = LambdaRegion {
+            row: 0,
+            col: 0,
+            height: 1,
+            width: 1,
+            scale: 1.0,
+            min_size: None,
+        };
+        let regions = std::slice::from_ref(&region);
+        let mut cb = CorePlane::from_vec(2, 1, vec![100, 100]);
+        let mut cr = CorePlane::from_vec(2, 1, vec![200, 200]);
+        desaturate_chroma_outside(&mut cb, &mut cr, regions, 0.5);
+        assert_eq!(
+            (cb.get(0, 0), cr.get(0, 0)),
+            (100, 200),
+            "inside the region keeps its colour"
+        );
+        // 128 + (100 - 128) * 0.5 = 114; 128 + (200 - 128) * 0.5 = 164.
+        assert_eq!(
+            (cb.get(1, 0), cr.get(1, 0)),
+            (114, 164),
+            "outside keeps half the colour"
+        );
+
+        desaturate_chroma_outside(&mut cb, &mut cr, regions, 1.0);
+        assert_eq!(
+            (cb.get(1, 0), cr.get(1, 0)),
+            (128, 128),
+            "1.0 is fully neutral"
+        );
+
+        let mut cb = CorePlane::from_vec(2, 1, vec![100, 100]);
+        let mut cr = CorePlane::from_vec(2, 1, vec![200, 200]);
+        desaturate_chroma_outside(&mut cb, &mut cr, regions, 0.0);
+        assert_eq!(
+            (cb.get(1, 0), cr.get(1, 0)),
+            (100, 200),
+            "0.0 leaves the outside unchanged"
+        );
+    }
+
+    /// End to end through the container: partial desaturation reduces the colour outside
+    /// without removing it, and none of it leaks inside the region.
+    #[test]
+    fn color_desaturate_reduces_but_does_not_remove_the_colour_outside() {
+        let img = gradient_image(64, 64);
+        let cfg = |color_desaturate: f64| ColorEncodeParams {
+            y: params(1.0),
+            chroma: params(1.0),
+            subsampling: Subsampling::Yuv444,
+            adaptive_density: false,
+            allowed_modes: [true; 4],
+            rd_candidates: 1,
+            lambda_regions: Vec::new(),
+            color_regions: vec![LambdaRegion {
+                row: 0,
+                col: 0,
+                height: 32,
+                width: 64,
+                scale: 1.0,
+                min_size: None,
+            }],
+            color_desaturate,
+        };
+        // Mean distance from neutral chroma over the lower (outside) half.
+        let outside_chroma = |cfg: &ColorEncodeParams| -> f64 {
+            let (bytes, _) = encode_color_image(&img, cfg);
+            let decoded = decode_color_image(&bytes, 10).unwrap();
+            let [_, cb, cr] = mars_core::metrics::ycbcr(&decoded);
+            let sum: u64 = (32..64)
+                .flat_map(|y| (0..64).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    u64::from(cb.get(x, y).abs_diff(128)) + u64::from(cr.get(x, y).abs_diff(128))
+                })
+                .sum();
+            sum as f64 / (32.0 * 64.0 * 2.0)
+        };
+
+        let none = outside_chroma(&cfg(0.0));
+        let half = outside_chroma(&cfg(0.5));
+        let full = outside_chroma(&cfg(1.0));
+        assert!(none > 1.0, "the unmasked background is colourful: {none}");
+        assert!(
+            full < 1e-9,
+            "full desaturation leaves neutral chroma: {full}"
+        );
+        assert!(
+            half < none && half > 0.0,
+            "half desaturation should keep some colour: {half} of {none}"
+        );
+
+        // A zero amount changes nothing, so it encodes exactly as if there were no mask.
+        let no_mask = ColorEncodeParams {
+            color_regions: Vec::new(),
+            ..cfg(0.0)
+        };
+        assert_eq!(
+            encode_color_image(&img, &cfg(0.0)).0,
+            encode_color_image(&img, &no_mask).0,
+            "color_desaturate 0.0 must be byte-identical to no mask"
         );
     }
 
