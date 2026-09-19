@@ -258,8 +258,7 @@ struct Cli {
     /// bits where human viewers notice errors most. Needs the RD path (the default; omit
     /// --t-rms/--method, or supply --lambda). Regions apply to the luma/grayscale plane;
     /// chroma keeps the run's uniform lambda. Face detection needs a build with the
-    /// `face-detect` feature (OpenCV + ONNX Runtime) and an SCRFD ONNX model via
-    /// --scrfd-model.
+    /// `face-detect` feature (ONNX Runtime) and an SCRFD ONNX model via --scrfd-model.
     #[arg(long, default_value_t = false)]
     human_adaptive: bool,
 
@@ -743,9 +742,8 @@ fn human_adaptive_regions(cli: &Cli, image: &mars_core::image::Image) -> Result<
         .scrfd_model
         .as_ref()
         .context("--human-adaptive requires --scrfd-model")?;
-    let faces =
-        mars_cli::human::detect_faces(model, &cli.input, cli.face_confidence, cli.max_faces)
-            .with_context(|| format!("detecting faces in {}", cli.input.display()))?;
+    let faces = mars_cli::scrfd::detect_faces(model, image, cli.face_confidence, cli.max_faces)
+        .with_context(|| format!("detecting faces in {}", cli.input.display()))?;
     Ok(mars_cli::human::regions_from_faces(
         &faces,
         image.width() as u32,
@@ -762,7 +760,7 @@ fn human_adaptive_regions(
 ) -> Result<Vec<LambdaRegion>> {
     if cli.human_adaptive {
         bail!(
-            "--human-adaptive needs the `face-detect` build feature (OpenCV + ONNX Runtime); \
+            "--human-adaptive needs the `face-detect` build feature (ONNX Runtime); \
              rebuild with `cargo build -p mars-cli --features face-detect`"
         );
     }

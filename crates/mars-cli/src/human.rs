@@ -2,10 +2,8 @@
 //! lambda around faces, and more so around the eyes, nose, and mouth, so the encoder spends
 //! more bits where human viewers notice compression errors most.
 //!
-//! The region *geometry* here has no external dependencies and is unit-tested directly.
-//! Only [`detect_faces`] needs the opt-in `face-detect` build feature (OpenCV + ONNX
-//! Runtime via [`rusty_scrfd`]), so the ordinary `cargo test`/`cargo build` never pulls
-//! those native libraries in.
+//! The region *geometry* here has no external dependencies and is unit-tested directly;
+//! face detection itself lives in [`crate::scrfd`].
 
 use mars_codec::encode::LambdaRegion;
 
@@ -13,7 +11,7 @@ use mars_codec::encode::LambdaRegion;
 /// fixed order -- left eye, right eye, nose, left mouth corner, right mouth corner.
 ///
 /// Coordinates are in plane pixels (the top-left origin this codec uses everywhere), not
-/// SCRFD's relative 0..1 output; [`detect_faces`] converts before returning.
+/// SCRFD's normalised model output; [`crate::scrfd`] converts before returning.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FaceDetection {
     /// `[x1, y1, x2, y2]`.
@@ -139,79 +137,6 @@ pub fn regions_from_faces(
         }
     }
     regions
-}
-
-/// Detect faces in `image_path` with the SCRFD ONNX model at `model`, returning pixel-space
-/// [`FaceDetection`]s (at most `max_faces`).
-///
-/// Requires the `face-detect` build feature, OpenCV at build/link time, and a compatible
-/// SCRFD ONNX model. An image with no detectable faces returns an empty vector, not an
-/// error -- `rusty_scrfd` reports that case as an error, which is translated here.
-#[cfg(feature = "face-detect")]
-pub fn detect_faces(
-    model: &std::path::Path,
-    image_path: &std::path::Path,
-    conf_threshold: f32,
-    max_faces: usize,
-) -> anyhow::Result<Vec<FaceDetection>> {
-    use std::collections::HashMap;
-
-    use anyhow::Context;
-    use opencv::prelude::MatTraitConst;
-
-    let session = ort::session::Session::builder()
-        .map_err(|err| anyhow::anyhow!("creating an ONNX Runtime session builder: {err}"))?
-        .commit_from_file(model)
-        .map_err(|err| anyhow::anyhow!("loading SCRFD model {}: {err}", model.display()))?;
-    let mut detector = rusty_scrfd::SCRFDBuilder::new(session)
-        .set_input_size((640, 640))
-        .set_conf_thres(conf_threshold)
-        .set_iou_thres(0.4)
-        // Relative 0..1 output; converted to pixels below so `FaceDetection` is always in
-        // the codec's own coordinate convention.
-        .set_relative_output(true)
-        .build()
-        .map_err(|err| anyhow::anyhow!("initialising the SCRFD detector: {err}"))?;
-
-    let path = image_path
-        .to_str()
-        .with_context(|| format!("{} is not valid UTF-8", image_path.display()))?;
-    let mat = opencv::imgcodecs::imread(path, opencv::imgcodecs::IMREAD_COLOR)
-        .map_err(|err| anyhow::anyhow!("OpenCV could not read {}: {err}", image_path.display()))?;
-    let (image_width, image_height) = (mat.cols() as f32, mat.rows() as f32);
-
-    let mut center_cache = HashMap::new();
-    let (boxes, keypoints) = match detector.detect(&mat, max_faces, "max", &mut center_cache) {
-        Ok(found) => found,
-        // No faces is a normal outcome for this feature, not a failure.
-        Err(err) if err.to_string().contains("No faces detected") => return Ok(Vec::new()),
-        Err(err) => return Err(anyhow::anyhow!("SCRFD detection failed: {err}")),
-    };
-
-    let mut detections = Vec::with_capacity(boxes.nrows());
-    for (index, row) in boxes.rows().into_iter().enumerate() {
-        let bbox = [
-            row[0] * image_width,
-            row[1] * image_height,
-            row[2] * image_width,
-            row[3] * image_height,
-        ];
-        // Keypoints are optional in SCRFD and land in the same NMS order as the boxes, so
-        // row `index` of each refers to the same face.
-        let keypoints = match &keypoints {
-            Some(keypoints) if index < keypoints.shape()[0] => {
-                let face = keypoints.index_axis(ndarray::Axis(0), index);
-                let mut points = [[0.0f32; 2]; 5];
-                for (slot, point) in points.iter_mut().zip(face.rows()) {
-                    *slot = [point[0] * image_width, point[1] * image_height];
-                }
-                points
-            }
-            _ => [[0.0f32; 2]; 5],
-        };
-        detections.push(FaceDetection { bbox, keypoints });
-    }
-    Ok(detections)
 }
 
 #[cfg(test)]

@@ -19,19 +19,17 @@ clap = { workspace = true }
 rayon = { workspace = true }
 serde_json = { workspace = true }
 
-# `encmars --human-adaptive` face detection is opt-in so the ordinary build never needs
-# OpenCV (a heavy native dependency, installed via Homebrew/pkg-config) or ONNX Runtime.
-# `rusty_scrfd` v2 dropped its re-exports, so the peer crates it exposes in its API must be
-# depended on directly, at the exact versions its own manifest pins. Build with
+# `encmars --human-adaptive` face detection is opt-in. It needs only ONNX Runtime -- `ort`
+# downloads a prebuilt library at build time, so no system package is required and there
+# is no OpenCV dependency: `src/scrfd.rs` does the SCRFD preprocessing and decode directly
+# against the model's tensors. Build with
 # `cargo build -p mars-cli --features face-detect` to enable it.
-rusty_scrfd = { version = "2.0.1", optional = true }
-ort = { version = "=2.0.0-rc.13", features = ["ndarray"], optional = true }
-opencv = { version = "0.100", optional = true }
+ort = { version = "=2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
 
 [features]
-# Enables `mars_cli::human::detect_faces` and hence `encmars --human-adaptive`.
-face-detect = ["dep:rusty_scrfd", "dep:ort", "dep:opencv", "dep:ndarray"]
+# Enables `mars_cli::scrfd::detect_faces` and hence `encmars --human-adaptive`.
+face-detect = ["dep:ort", "dep:ndarray"]
 
 [[bin]]
 name = "marsbench"
