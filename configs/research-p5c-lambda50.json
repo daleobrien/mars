@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "name": "research-p5c-lambda50",
+  "description": "P5c's lambda=50 completion point (k=1 vs k=8), same codec/decoder and same groups as research-p5c.json. Kept as a separate config so the three already-measured lambda points are reused instead of recomputed: the runner's resume key is `experiment_id`, and `case_id` hashes `config_sha256`, so adding lambda to research-p5c.json would have invalidated and recomputed all six existing cases under an identical encoder binary (the store's recorded encmars/decmars sha256 match the current target/release binaries). lambda's {50} here is disjoint from research-p5c's {200,800,3200}, so the two configs' rows combine into exactly four distinct points per curve per image without duplicates, which is what `marsbench experiment-report --reference-group candidates1` needs for a BD-rate. Run with `--out-dir target/p5c` to append beside research-p5c's rows.",
+  "indexes": ["corpus/standard.images.json"],
+  "images": ["kodim01", "kodim02"],
+  "codec": {
+    "min_size": 4,
+    "max_size": 16,
+    "shift": 4,
+    "bits_alfa": 4,
+    "bits_beta": 7,
+    "max_alfa": 1.0,
+    "zero_threshold": 0,
+    "subsampling": "444",
+    "t_rms": 8.0,
+    "chroma_t_rms": 8.0,
+    "threads": 4
+  },
+  "decoder": {
+    "iterations": 10,
+    "zoom": 1.0
+  },
+  "stages": [
+    {
+      "name": "rd",
+      "description": "RD lambda 50, modes 0/2/3, fixed residual step 8, exhaustive search: single-winner candidate list versus the eight best-RMS candidates. Completes research-p5c's grid to four lambda points.",
+      "repetitions": 1,
+      "timeout_secs": 1800,
+      "arms": [
+        {
+          "label": "k1-lambda50",
+          "group": "candidates1",
+          "description": "Historical single min-RMS candidate at lambda 50.",
+          "lambda": 50.0,
+          "modes": [0, 2, 3],
+          "rd_candidates": 1
+        },
+        {
+          "label": "k8-lambda50",
+          "group": "candidates8",
+          "description": "Eight best-RMS candidates competing for modes 2/3 at lambda 50.",
+          "lambda": 50.0,
+          "modes": [0, 2, 3],
+          "rd_candidates": 8
+        }
+      ]
+    }
+  ]
+}

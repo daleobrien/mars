@@ -26,18 +26,48 @@ use std::path::Path;
 use std::process::Command;
 
 use mars_bench::bdrate::{bd_metrics, RdCurve, RdPoint};
+use mars_bench::provenance::sha256_hex;
 use mars_core::metrics::psnr;
 
 const LAMBDA_GRID: [f64; 4] = [50.0, 200.0, 800.0, 3200.0];
 const KODAK_WIDTH: usize = 768;
 const KODAK_HEIGHT: usize = 512;
 
-/// Frame size [`omitting_adaptive_density_matches_explicit_false_byte_for_byte`] encodes.
-/// That check's claim is byte identity between two CLI invocations, which no frame size can
-/// change, while a full-frame exhaustive RD encode costs ~90s per invocation even in an
-/// optimized profile -- the same cost that keeps the `MARS_RUN_CLI_A_GATE` sweep above
-/// opt-in.
-const DEFAULT_CHECK_CROP: usize = 128;
+/// Side of the synthetic plane [`omitting_adaptive_density_reproduces_the_pinned_default_stream`]
+/// encodes.
+///
+/// A synthetic input rather than a corpus crop is deliberate and load-bearing. Post-D48,
+/// `--adaptive-density` only reroutes a block whose `block_rms` sits below `DENSITY_LOW_RMS`
+/// onto a doubled domain-search stride, and on natural imagery almost no block qualifies.
+/// Measured directly at the args the check below pins: kodim01's 128x128 top-left encodes
+/// **byte-identically** with and without the flag. A real-image input therefore cannot
+/// observe the default flipping, so any check built on one is inert however it asserts. A
+/// gradient this gentle puts *every* block below the threshold, making the reroute
+/// unconditional and the flag observable. Fast, and hermetic -- no corpus fetch, so unlike
+/// the opt-in sweep above it runs in CI's quick job.
+const DEFAULT_CHECK_SIZE: usize = 128;
+
+/// SHA-256 of the `.mars` stream `encmars` writes for [`DEFAULT_CHECK_SIZE`]'s synthetic
+/// plane when `--adaptive-density` is *omitted*. Captured from the current default-off path;
+/// per `docs/decisions.md` D43 that path must stay opt-in and byte-for-byte stable. Supplying
+/// the flag on this input yields a different stream, so a default that silently flipped to
+/// `true` would move the omitted stream off this hash and fail the check.
+const PINNED_DEFAULT_STREAM_SHA256: &str =
+    "55ccaacf9b9c0e952673992404cfdf8ebb21e8503ae3d45a67b4e82a5eed3544";
+
+/// Write a `size`x`size` gentle gradient whose every block is flat enough to route through
+/// `adaptive_shift`'s sparsify branch -- the same construction `mars_codec::encode`'s
+/// `adaptive_density_reduces_evals_on_a_uniformly_low_rms_image` uses to make the flag
+/// observable.
+fn write_low_rms_gradient(path: &Path, size: usize) {
+    let mut data = vec![0u8; size * size];
+    for r in 0..size {
+        for c in 0..size {
+            data[r * size + c] = (100 + (r + c) % 5) as u8;
+        }
+    }
+    std::fs::write(path, &data).expect("writing the synthetic gradient plane");
+}
 
 /// **D48 CONTRACT-CHANGE.** D43's originally-measured -6.82% mean BD-rate came from a
 /// branch that D48 found corrupted the bitstream and removed; the surviving mechanism
@@ -48,26 +78,6 @@ const BD_RATE_CEILING_PCT: f64 = 2.0;
 
 fn encmars_bin() -> &'static str {
     env!("CARGO_BIN_EXE_encmars")
-}
-
-/// Write `DEFAULT_CHECK_CROP`x`DEFAULT_CHECK_CROP` from the top-left of the committed
-/// full-frame grayscale plane to `dest`. Returns `false` when the corpus (or an
-/// unexpected-sized plane) is unavailable, so the caller can skip with a message -- this
-/// file's own convention for corpus-dependent checks.
-fn write_cropped_raw(src: &Path, dest: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(src) else {
-        return false;
-    };
-    if bytes.len() != KODAK_WIDTH * KODAK_HEIGHT {
-        return false;
-    }
-    let mut cropped = Vec::with_capacity(DEFAULT_CHECK_CROP * DEFAULT_CHECK_CROP);
-    for row in 0..DEFAULT_CHECK_CROP {
-        let start = row * KODAK_WIDTH;
-        cropped.extend_from_slice(&bytes[start..start + DEFAULT_CHECK_CROP]);
-    }
-    std::fs::write(dest, &cropped).expect("writing the cropped plane");
-    true
 }
 
 /// Encode `kodimNN.raw` at one lambda via the real `encmars` binary, returning the
@@ -202,44 +212,40 @@ fn adaptive_density_flag_reproduces_a_real_improvement_at_cli_scope() {
 /// This project's own convention (per `docs/decisions.md`'s D43 note that `--adaptive-
 /// density` must stay an opt-in default-off flag): omitting the flag must still produce
 /// exactly what it always has. Fast -- no `MARS_RUN_CLI_A_GATE` gate needed.
+///
+/// The claim is pinned by stream hash rather than by an "explicit false" arm, which cannot
+/// exist for a boolean flag: both arms would have to *omit* `--adaptive-density`, making the
+/// comparison vacuous (see the previous revision of this test). Pinning alone would be just
+/// as hollow on an input where the flag does nothing, so the observable-effect assertion
+/// below is what gives the hash teeth -- and, per [`DEFAULT_CHECK_SIZE`], only the synthetic
+/// plane supports it. `encode_via_cli` pins the same explicit non-default configuration as
+/// the sweep above (four modes, `t_rms` 0), so the flag is the one differing input.
 #[test]
-fn omitting_adaptive_density_matches_explicit_false_byte_for_byte() {
+fn omitting_adaptive_density_reproduces_the_pinned_default_stream() {
     let tmp = std::env::temp_dir().join(format!("gate-cli-a-default-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).expect("scratch dir");
-    let source =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/images/kodak-gray/kodim01.raw");
-    let image_path = tmp.join("kodim01-crop.raw");
-    if !write_cropped_raw(&source, &image_path) {
-        eprintln!("skipping: corpus not fetched (run `just corpus-gray`)");
-        return;
-    }
-    let dims = (DEFAULT_CHECK_CROP, DEFAULT_CHECK_CROP);
+    let image_path = tmp.join("gradient.raw");
+    let size = DEFAULT_CHECK_SIZE;
+    write_low_rms_gradient(&image_path, size);
 
-    // Both arms must pin the same explicit non-default configuration (four modes,
-    // `t_rms` 0, matching `encode_via_cli` below) so this test isolates the
-    // `--adaptive-density` flag alone. With the D51 CLI-default switch, a bare
-    // `--lambda 200` invocation resolves to modes 0,2 / `t_rms` 8, which would make
-    // this a modes-vs-modes comparison instead of a density-flag one.
-    let out_default = tmp.join("default.mars");
-    let status = Command::new(encmars_bin())
-        .arg(&image_path)
-        .arg(&out_default)
-        .args(["--raw-width", &dims.0.to_string()])
-        .args(["--raw-height", &dims.1.to_string()])
-        .args(["--lambda", "200"])
-        .args(["--modes", "0,1,2,3"])
-        .args(["--t-rms", "0"])
-        .status()
-        .expect("encmars runs");
-    assert!(status.success());
+    let (off, _) = encode_via_cli(
+        &image_path,
+        &tmp.join("off.mars"),
+        (size, size),
+        200.0,
+        false,
+    );
+    let (on, _) = encode_via_cli(&image_path, &tmp.join("on.mars"), (size, size), 200.0, true);
+    let (off_hash, on_hash) = (sha256_hex(&off), sha256_hex(&on));
 
-    let out_explicit = tmp.join("explicit-off.mars");
-    let (bytes_explicit, _) = encode_via_cli(&image_path, &out_explicit, dims, 200.0, false);
-    let bytes_default = std::fs::read(&out_default).unwrap();
-
+    assert_ne!(
+        off_hash, on_hash,
+        "--adaptive-density must be observable on this input, or pinning the omitted stream \
+         would prove nothing about which branch omitting selects"
+    );
     assert_eq!(
-        bytes_default, bytes_explicit,
-        "omitting --adaptive-density must be byte-identical to passing it off explicitly"
+        off_hash, PINNED_DEFAULT_STREAM_SHA256,
+        "omitting --adaptive-density must still reproduce the pinned historical default stream"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
