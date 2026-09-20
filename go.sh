@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set +x
 
-f=${1:-'input.jpeg'}
+f=${1:-'lena.jpg'}
 
 ext="${f##*.}"
 name="$(basename "${f%.*}")"
@@ -22,9 +22,9 @@ cargo build \
   --lambda 50 \
   --color eyes \
   --min-size 8 \
-  --max-size 128 \
+  --max-size 32 \
   --outside-min-size-ramp \
-  --desaturate 0.3 \
+  --desaturate 0.5 \
   --desaturate-ramp 0 \
   --eye-lambda-scale 0.1 \
   --scrfd-model ./models/det_10g.onnx
