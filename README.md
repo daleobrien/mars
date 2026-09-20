@@ -2,6 +2,25 @@
 
 A quadtree fractal image codec in Rust, targeting Apple Silicon (aarch64 + Metal).
 
+## Lena, at 0.465 bpp
+
+Encode and decode a 512×512 JPEG:
+
+```bash
+./target/release/encmars lena.jpg lena.mars   # 512x512 rgb (Yuv444) -> 15,234 bytes, 0.465 bpp
+./target/release/decmars lena.mars decoded.png
+```
+
+| Original (`lena.jpg`, 512×512) | Decoded (`decoded.png`, 0.465 bpp) |
+| --- | --- |
+| ![Lena, original 512x512 JPEG](lena.jpg) | ![Lena, decoded from 15,234 bytes](decoded.png) |
+
+`marsbench` measures the reconstruction against the source JPEG: **29.87 dB PSNR-Y**,
+0.811 SSIM, 0.960 MS-SSIM, from 15,234 bytes (0.465 bpp, header included). Decoding is
+deterministic — a fresh decode reproduces `decoded.png` byte for byte.
+
+## Overview
+
 The 1998 C original by Mario Polvere lives unmodified in [`reference/mars1/`](reference/mars1/)
 and serves as the measured baseline. Mars 2 is a clean-room implementation.
 
@@ -24,8 +43,8 @@ and [optimisation status](docs/encmars-optimisation-status.md) for historical re
 
 ```bash
 cargo build --release -p mars-cli
-./target/release/encmars input.png output.mars
-./target/release/decmars output.mars decoded.png
+./target/release/encmars lena.jpg lena.mars
+./target/release/decmars lena.mars decoded.png
 ```
 
 A plain encode uses RD partitioning at `--lambda 200`, modes `0,2` (flat and fractal),
