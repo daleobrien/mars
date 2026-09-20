@@ -4,13 +4,11 @@ set +x
 f=${1:-'input.jpeg'}
 
 ext="${f##*.}"
-name="${f%.*}"
+name="$(basename "${f%.*}")"
 
-echo "Encoding ${f}"
+echo "Encoding '${f}'"
 
-mkdir -p images
-
-cp ${f} images/${name}_i.${ext}
+cp "${f}" "./images/${name}_i.${ext}"
 
 cargo build \
   --release \
@@ -31,7 +29,10 @@ cargo build \
   --eye-lambda-scale 0.1 \
   --scrfd-model ./models/det_10g.onnx
 
+echo ''
+rm -rf images/progress
+
 ./target/release/decmars \
    images/${name}_m.mars \
    images/${name}_o.${ext} \
-   --progression output/p
+   --progression images/progress

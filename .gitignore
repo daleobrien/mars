@@ -7,6 +7,7 @@
 /corpus/images/
 /images/
 /output/
+/images_src/
 
 # The pinned cross-validation reference venv. Recreate with `just crossval-setup`.
 /.venv-crossval/
@@ -17,39 +18,5 @@
 # to commit, and never silently reused if stale (the hash check refuses that).
 /oracle-cache/
 results
-output.mars
-output.png
-Research/2507.06325v2.pdf
-Research/A_Novel_Fractal_Image_Compression_Scheme_With_Block_Classification_and_Sorting_Based_on_Pearsons_Correlation_Coefficient.pdf
-Research/A_Review_on_Fractal_Image_Compression_Us.pdf
-Research/Adaptive_fractal_image_compression_using.pdf
-Research/Adaptive_post_processing_for_fractal_ima.pdf
-Research/An_improved_fractal_image_compression_us.pdf
-Research/Discrete_Wavelet_Transform.pdf
-Research/Enhancing_fractal_image_compression_spee.pdf
-Research/Evaluation_of_Pure_Fractal_and_Wavelet_F.pdf
-Research/Fast_sparse_fractal_image_compression.pdf
-Research/Fractal_image_compression.pdf
-Research/Fractal_image_compression_a_randomized_a.pdf
-Research/Fractal_Image_compression_for_efficient.pdf
-Research/Fractal_Image_Compression_using_Hierarch.pdf
-Research/Fractals_Image_Rendering_and_Compression.pdf
-Research/Genetic_Algorithm_based_Fractal_Image_Co.pdf
-Research/Graph_Directed_Fractal_Image_Compression.pdf
-Research/Image_Compression_Technique_Based_on_Fra.pdf
-Research/Large_Texture_Storage_Using_Fractal_Imag.pdf
-Research/mars-research-implementation-plan.md
-Research/Optimal_hierarchical_partitions_for_frac.pdf
-Research/Optimization_of_Fractal_Image_Compressio.pdf
-Research/PROPOSED_PYRAMID_FRACTAL_IMAGE_COMPRESSI.pdf
-Research/Stochastic_image_compression_using_fract.pdf
-Research/Using_adaptive_contraction_for_fractal_i.pdf
-Research/The_JPEG_Algorithm_for_Image_Compression.pdf
-output.jpeg
-regions.png
-input.jpeg
-dale.jpeg
-input-large.jpg
-input-large-2.jpg
-input.webp
-output-large.mars
+Research
+*.mars
