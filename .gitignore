@@ -5,6 +5,8 @@
 # manifests (§M9). They are never committed: they are large, and Kodak is not ours to
 # redistribute.
 /corpus/images/
+/images/
+/output/
 
 # The pinned cross-validation reference venv. Recreate with `just crossval-setup`.
 /.venv-crossval/
@@ -49,3 +51,5 @@ input.jpeg
 dale.jpeg
 input-large.jpg
 input-large-2.jpg
+input.webp
+output-large.mars

@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 set +x
 
-input_image=${1:-'input.jpeg'}
+f=${1:-'input.jpeg'}
 
-echo "Encoding ${input_image}"
+ext="${f##*.}"
+name="${f%.*}"
+
+echo "Encoding ${f}"
+
+mkdir -p images
+
+cp ${f} images/${name}_i.${ext}
 
 cargo build \
   --release \
-  --features face-detect
+  --features face-detect \
+  --quiet
 
 ./target/release/encmars \
-   ${input_image} \
-   output.mars \
+   ${f} \
+   images/${name}_m.mars \
   --human-adaptive \
-  --lambda 100 \
-  --debug-regions regions.png \
+  --lambda 50 \
   --color eyes \
   --min-size 8 \
   --max-size 128 \
@@ -25,5 +32,6 @@ cargo build \
   --scrfd-model ./models/det_10g.onnx
 
 ./target/release/decmars \
-   output.mars \
-   output.jpeg
+   images/${name}_m.mars \
+   images/${name}_o.${ext} \
+   --progression output/p
