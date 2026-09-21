@@ -1,4 +1,4 @@
-# Mars 2
+# Mars
 
 A quadtree fractal image codec in Rust, targeting Apple Silicon (aarch64 + Metal).
 
