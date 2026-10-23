@@ -10,4 +10,4 @@ sewar==0.4.6
 # Bumped from 11.3.0: every Pillow release before 12.3.0 carries at least one published
 # advisory (the default branch had 18 open Dependabot alerts, all Pillow). Only
 # `Image.open(...).convert("L")` is used here, which is unchanged across the major bump.
-Pillow==12.3.0
+Pillow==13.0.0
