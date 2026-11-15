@@ -1,197 +1,68 @@
-# Mars
+<h1 align="center">Mars</h1>
 
-A quadtree fractal image codec in Rust, targeting Apple Silicon (aarch64 + Metal).
+<p align="center">A quadtree fractal image codec in Rust, for Apple Silicon.</p>
 
-## Lena, at 0.465 bpp
+<p align="center">
+  <a href="docs/example.md"><b>Example</b></a> &nbsp;·&nbsp;
+  <a href="#quick-start">Quick start</a> &nbsp;·&nbsp;
+  <a href="#documents">Documents</a> &nbsp;·&nbsp;
+  <a href="#how-it-works">How it works</a>
+</p>
 
-Encode and decode a 512×512 JPEG:
+<p align="center">
+  <img src="docs/cover.png" alt="An image decoding by fractal iteration: iterations 1, 2 and 3, then the final image" width="100%">
+</p>
 
-```bash
-./target/release/encmars lena.jpg lena.mars   # 512x512 rgb (Yuv444) -> 15,234 bytes, 0.465 bpp
-./target/release/decmars lena.mars decoded.png
-```
+Mars stores an image as a set of self-similarities, then rebuilds it by iteration,
+as above. It is a clean-room Rust rewrite of Mario Polvere's 1998 C codec,
+targeting aarch64 and Metal, with rate–distortion partitioning, colour,
+progressive streams, nine search methods, and every result measured against the
+original. A 512×512 colour image encodes to 15,234 bytes (0.465 bpp) at 29.87 dB
+PSNR-Y; see the [example](docs/example.md).
 
-| Original (`lena.jpg`, 512×512) | Decoded (`decoded.png`, 0.465 bpp) |
-| --- | --- |
-| ![Lena, original 512x512 JPEG](lena.jpg) | ![Lena, decoded from 15,234 bytes](decoded.png) |
-
-`marsbench` measures the reconstruction against the source JPEG: **29.87 dB PSNR-Y**,
-0.811 SSIM, 0.960 MS-SSIM, from 15,234 bytes (0.465 bpp, header included). Decoding is
-deterministic — a fresh decode reproduces `decoded.png` byte for byte.
-
-## Progressive decode
-
-`decmars` reconstructs the image by fixed-point iteration from a flat grey (128) seed.
-`decmars lena.mars decoded.png --progression p/` writes `iter-01.png` … `iter-10.png`, one
-per iteration. The first five, as the decode settles:
-
-| iteration 1 | iteration 2 | iteration 3 | iteration 4 | iteration 5 |
-| --- | --- | --- | --- | --- |
-| ![Lena decode, iteration 1 of 10](p/iter-01.png) | ![Lena decode, iteration 2 of 10](p/iter-02.png) | ![Lena decode, iteration 3 of 10](p/iter-03.png) | ![Lena decode, iteration 4 of 10](p/iter-04.png) | ![Lena decode, iteration 5 of 10](p/iter-05.png) |
-
-Iteration 10 is `decoded.png` above. `--iterations` sets a different fixed count;
-`--auto --threshold N` instead stops early once no pixel moves by more than N between
-iterations.
-
-## Overview
-
-The 1998 C original by Mario Polvere lives unmodified in [`reference/mars1/`](reference/mars1/)
-and serves as the measured baseline. Mars 2 is a clean-room implementation.
-
-**Plans:** [technical-research-and-development-plan.md](technical-research-and-development-plan.md)
-is the *why* and *what*. [implementation-plan.md](implementation-plan.md) is the *how*, *in
-what order*, and *how we know it worked*.
-
-## Status
-
-Mars 2 implements threshold and rate–distortion quadtree encoding, iterative decoding,
-color, progressive streams, nine search methods, SIMD/GPU infrastructure, and benchmark
-metrics/anchors. Implementation does not imply that every research acceptance gate passed.
-
-Current work follows [the research implementation plan](mars-research-implementation-plan.md):
-correct residual reconstruction, measure serialized output, validate CLI capabilities, then
-integrate search with the production RD encoder. See its execution log for completed steps
-and [optimisation status](docs/encmars-optimisation-status.md) for historical results and limits.
-
-## Encode and decode
+## Quick start
 
 ```bash
 cargo build --release -p mars-cli
-./target/release/encmars lena.jpg lena.mars
+./target/release/encmars lena.jpg lena.mars     # 15,234 bytes, 0.465 bpp
 ./target/release/decmars lena.mars decoded.png
+just                                            # list the tasks: tests, gates, benchmarks
 ```
 
-A plain encode uses RD partitioning at `--lambda 200`, modes `0,2` (flat and fractal),
-4:4:4 colour, and automatic thread selection. The mode choice follows the existing
-kodim01/02 comparisons, not a claim of universal optimality. RD can be slower than
-legacy threshold encoding. Library/benchmark defaults are unchanged.
+`--lambda 50` favours quality and `--lambda 800` smaller files. See
+[Encoding and decoding](docs/usage.md) for the options and formats.
 
-Inputs may be `.png`, `.jpg`/`.jpeg`, `.tga`, `.tif`/`.tiff`, `.webp`, `.pgm`, `.ppm` or
-headerless raw. PNG, JPEG, TIFF and WebP are detected from the file's contents rather than
-its name; TGA (which has no signature), PNM and raw are selected by extension. `decmars`
-picks its output format from the output filename's extension: `.png`, `.tga`, `.tif`/`.tiff`
-and `.webp` (all lossless, though WebP has no grayscale mode), `.jpg`/`.jpeg` (lossy, for
-visual inspection only; `decmars --quality 1-100` sets its quality, default 75) or
-`.pgm`/`.ppm` (raw PNM).
+## Documents
 
-- `--lambda 50`: prioritise quality; `--lambda 800`: prioritise smaller files.
-- `--subsampling 420`: optionally trade chroma detail for smaller colour files.
-- `--modes 0,1,2,3`: explicitly enable affine and residual modes too.
-- `--t-rms 8`: restore legacy threshold partitioning. `--chroma-t-rms` also selects
-  that path unless `--lambda` is supplied; explicit lambda takes precedence and ignores
-  the thresholds. The rate-estimation warm-up uses fixed RMS 8.
-- `--method fisher --lambda 200 --modes 0,2`: use indexed search with production
-  grayscale RD partitioning. All nine existing methods support this path; method alone
-  retains legacy threshold 8. Color/method and progressive/method remain unsupported.
-  Method output separates search fits, exhaustive warm-up fits, and total fits.
-- Explicit masks are strict: if a block needs mandatory DC fallback but mode 0 was
-  excluded, encoding fails before writing output. Prefer `0,2` or `0,2,3` over a
-  fractal-only mask when using restricted search or tiny/border-heavy images.
-- Explicit `--modes` and `--adaptive-density` require RD, rather than silently doing
-  nothing on the legacy/method path. Numeric options are checked before reading input;
-  domain stride must be even and contrast limits must be representable in the header.
-- Adaptive density, progressive output and experimental adaptive residual quantisation
-  remain opt-in. To try the latter, include mode 3:
-  `--lambda 200 --modes 0,2,3 --adaptive-residual`.
+| Document | What's in it |
+| -------- | ------------ |
+| [Example](docs/example.md) | An encode at 0.465 bpp, its quality, and the progressive decode |
+| [Encoding and decoding](docs/usage.md) | `encmars` and `decmars`: options, input and output formats, progressive streams |
+| [Measurement and experiments](docs/experiments.md) | Setting up the measurements, and the research experiment runner |
+| [The project](docs/project.md) | Where it comes from, its status, the layout, and the rules that shape the code |
+| [The measurement contract](docs/measurement.md) | Where each measurement rule lives in the code |
+| [The Mars 1 format](docs/mars1-format.md) | The 1998 `.ifs` bitstream, specified |
+| [Decisions](docs/decisions.md) | The append-only decision log |
+| [Predictions](docs/predictions.md) | What each step expected, written before measuring |
+| [Optimisation status](docs/encmars-optimisation-status.md) | The `encmars` optimisation checkpoint and its limits |
+| [Step 9 open gaps](docs/step9-open-gaps.md) | What gate 9's reduced scope left open |
+| [Licensing](docs/licensing.md) | Why GPL-2.0-or-later, and the Apache-2.0 interaction |
+| [Research direction](technical-research-and-development-plan.md) | The *why* and *what* |
+| [Implementation plan](implementation-plan.md) | The *how*, *in what order*, and how we know it worked |
+| [Research implementation plan](mars-research-implementation-plan.md) | The current research and benchmarking work |
+| Other plans | [Improvement](improvement-plan.md), [CLI](encmars-decmars-cli-plan.md), [optimisation](encmars-optimisation-plan.md), [HV split](hv-split-plan.md) |
 
-Progressive streams also honor decoder iteration counts:
+## How it works
 
-```bash
-encmars input.pgm output.mars --progressive
-decmars output.mars decoded.png --layer 4 --iterations 20
-```
+The encoder splits the image into a quadtree of blocks and stores each one either
+as a flat value or as a shrunken, brightness- and contrast-adjusted copy of
+another part of the image, choosing the split and the copies by rate and
+distortion. Those maps describe an image they leave unchanged: the decoder
+starts from flat grey and applies them again and again, and within ten or so
+iterations the image settles. [The project](docs/project.md) has more.
 
-For regular streams, `decmars --auto --iterations 40` stops when the pixel-change
-threshold is reached or the iteration limit is exhausted. `--progression frames/`
-writes iteration images; failures writing frames are reported as command failures.
-`--debug-rects tree.png` writes native-resolution leaf boundaries for regular streams.
-Progressive streams still reject auto/progression/zoom/debug-rects combinations.
+Licensed GPL-2.0-or-later, following Mars 1; see [Licensing](docs/licensing.md).
 
-## Measurement setup
+---
 
-```bash
-just crossval-setup   # pinned python reference implementations (needs python3.12)
-just corpus           # fetch + hash-verify the Kodak corpus
-just mars1            # build the 1998 C reference with pinned flags
-just gate-a           # the whole Group A gate: exits 0 or 1
-```
-
-Measure a pair of images:
-
-```bash
-marsbench metrics original.png decoded.png --coded stream.mars
-```
-
-## Research experiments
-
-The research plan's experiments run through a strict, resumable, config-driven runner.
-A config names its inputs, the codec parameters held fixed across the stage, the decoder
-settings, and one or more named stages. Every planned case is written to an append-only
-store the moment it completes.
-
-```bash
-# One reproducible smoke case on the pinned fixture, then read it back:
-marsbench experiment --config configs/research-smoke.json --stage smoke
-marsbench experiment-report --experiment-id <recorded-id> --reference-group modes0-2
-```
-
-Artifacts default to `target/experiments/<experiment-id>/` and hold `results.jsonl` plus a
-derived `summary.json`. Referenced inputs, their recorded hashes, and the codec binaries
-are checked before any encode; statically unsupported arm combinations are rejected
-rather than accepted as no-ops, and image-dependent refusals (for example `--method` on a
-colour image) are recorded as explicit `unsupported` cases. A re-run resumes cases whose
-config and build hashes still match, and the command exits non-zero if any planned case
-failed, timed out, or was unsupported — a partial run never looks like a complete one.
-`configs/research-search.json`, `research-rd.json` and `research-final.json` are opt-in
-Kodak sweeps and are not run by routine tests.
-
-## Layout
-
-```
-crates/mars-core/     image types, IO, and THE implementation of every quality metric
-crates/mars-codec/    partition/search/fit/encode/decode, color and progressive formats
-crates/mars-search/   candidate retrieval and classical/learned search methods
-crates/mars-bench/    the harness: BD-rate, provenance, append-only result store, reports
-crates/mars-cli/      marsbench, encmars, decmars
-reference/mars1/      the unmodified 1998 C, plus a pinned build wrapper
-Research/            papers and research summaries
-corpus/               manifests; images are fetched and hash-verified, never committed
-results/              append-only JSONL — committed
-docs/                 mars1-format.md, measurement.md, licensing.md, predictions.md, decisions.md
-```
-
-## The rules that matter
-
-Three, from §1 and §2.1 of the implementation plan, because they explain why the code looks
-the way it does:
-
-- **One metrics implementation, never self-reported** (§M1). Quality is computed by
-  `mars-bench` from two files on disk. No codec reports its own PSNR.
-- **A BD-rate without its interval is not a number** (§M3). `BdResult` cannot be
-  constructed without the interval it was integrated over, and invalid input is refused
-  rather than coerced into something quotable.
-- **Tests are the contract** (§A2). Tolerances live in one file
-  ([`tolerance.rs`](crates/mars-core/src/tolerance.rs)); `scripts/check-contract.sh` fails
-  any commit that loosens an assertion or a tolerance without a `CONTRACT-CHANGE:` trailer
-  explaining why.
-
-The executor here is AI agents, which inverts the usual risk profile: typing is cheap and
-the characteristic failure is not *running out of time* but **silent plausible wrongness** —
-a PSNR that looks entirely reasonable, is wrong by 0.4 dB, and is inherited by everything
-downstream. The measurement contract is the defence.
-
-## Licence
-
-GPL-2.0-or-later, following Mars 1. See [docs/licensing.md](docs/licensing.md) — there is a
-real Apache-2.0 interaction, and it is resolved deliberately rather than discovered later.
-
-
-## CLI
-```bash
-
-encmars input.png output.mars --lambda 200 --modes 0,2 --subsampling 420
-
-encmars input.png output.mars --lambda 50       # Higher quality
-encmars input.png output.mars --subsampling 420 # Smaller colour files
-encmars input.png output.mars --t-rms 8         # Legacy encoding
-```
+<p align="center"><sub>Part of <a href="https://daleobrien.github.io/#engineering">Engineering</a> &nbsp;·&nbsp; more at <a href="https://daleobrien.github.io">daleobrien.github.io</a></sub></p>
